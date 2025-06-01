@@ -40,19 +40,20 @@ This project implements a physics-guided neural network for seismic waveform inv
 **Note:** The repository cloning logic has been removed from `setup.py`. You must run the following code block in your first Colab cell to set up the environment:
 
 ```python
-# Install required packages
-!pip install kagglehub
+# Install Kaggle CLI if needed
+!pip install kaggle
 
-# Clone the repository
-!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
-%cd YaleGWI
+# Upload your kaggle.json (API token) if not already present
+from google.colab import files
+files.upload()  # Then move kaggle.json to ~/.kaggle/
 
-# Import the project
-from src.core.setup import setup_environment
-from src.core.config import CFG
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
 
-# Setup the environment
-setup_environment()
+# Download the competition data
+!kaggle competitions download -c waveform-inversion
+!unzip -q waveform-inversion.zip -d /content/data
 ```
 
 This will install dependencies, clone the repository, and set up the environment for Colab. The dataset will be downloaded automatically by the setup script.
@@ -91,17 +92,4 @@ Install the required packages:
 pip install -r requirements.txt
 ```
 
-# Install Kaggle CLI if needed
-!pip install kaggle
 
-# Upload your kaggle.json (API token) if not already present
-from google.colab import files
-files.upload()  # Then move kaggle.json to ~/.kaggle/
-
-!mkdir -p ~/.kaggle
-!cp kaggle.json ~/.kaggle/
-!chmod 600 ~/.kaggle/kaggle.json
-
-# Download the competition data
-!kaggle competitions download -c waveform-inversion
-!unzip -q waveform-inversion.zip -d /content/data
