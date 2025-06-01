@@ -78,13 +78,6 @@ class Config:
             cls._inst.lambda_pde = 0.1
         return cls._inst
 
-    @classmethod
-    def initialize(cls):
-        """Initialize the configuration and setup environment."""
-        from src.core.setup import setup_environment
-        setup_environment()
-        return cls()
-
 CFG = Config()
 
 def save_cfg(out_dir: Path):
