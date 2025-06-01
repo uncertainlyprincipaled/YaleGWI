@@ -54,6 +54,9 @@ files.upload()  # Then move kaggle.json to ~/.kaggle/
 # Download the competition data
 !kaggle competitions download -c waveform-inversion
 !unzip -q waveform-inversion.zip -d /content/data
+
+!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+%cd YaleGWI
 ```
 
 This will install dependencies, clone the repository, and set up the environment for Colab. The dataset will be downloaded automatically by the setup script.
