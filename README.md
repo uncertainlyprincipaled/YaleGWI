@@ -66,7 +66,7 @@ To use this project in Kaggle:
 
 1. Create a new notebook in the [Waveform Inversion competition](https://www.kaggle.com/competitions/waveform-inversion)
 
-2. Add the following code to your first cell to clone the repository and set up the environment:
+2. Add the following code to your first cell to automatically set up the environment and create cells:
    ```python
    # Clone repository (ignore error if already exists)
    !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git || true
@@ -75,14 +75,14 @@ To use this project in Kaggle:
    # Install dependencies
    !pip install -r requirements.txt
    
-   # Import and setup
-   import os
-   os.environ['GWI_ENV'] = 'kaggle'  # Set this before importing your setup/config
-   from src.core.config import CFG
-   from src.core.setup import setup_environment
+   # Import the notebook utility
+   from src.utils.notebook_utils import setup_kaggle_notebook
    
-   # Setup environment
-   setup_environment()
+   # This will:
+   # 1. Set up the environment
+   # 2. Create and populate cells from kaggle_notebook.py
+   # 3. Execute each cell in sequence
+   setup_kaggle_notebook()
    ```
 
 **Note:** 
@@ -91,6 +91,8 @@ To use this project in Kaggle:
 - CUDA-related packages may take a moment to download - this is normal.
 
 The project will automatically detect the Kaggle environment and configure paths accordingly. The dataset is already available in Kaggle's input directory, so no additional download is needed.
+
+The cells will be created with proper formatting and will be executed automatically. You can then modify and re-run individual cells as needed.
 
 ### AWS SageMaker
 - Clone the repository and ensure it is available in the appropriate directory (e.g., `/opt/ml/code/YaleGWI`).
