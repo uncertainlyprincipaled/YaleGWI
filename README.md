@@ -49,7 +49,7 @@ This project implements a physics-guided neural network for seismic waveform inv
 
 # Import the project
 from src.core.setup import setup_environment
-from config import CFG
+from src.core.config import CFG
 
 # Setup the environment
 setup_environment()
@@ -90,3 +90,18 @@ Install the required packages:
 ```bash
 pip install -r requirements.txt
 ```
+
+# Install Kaggle CLI if needed
+!pip install kaggle
+
+# Upload your kaggle.json (API token) if not already present
+from google.colab import files
+files.upload()  # Then move kaggle.json to ~/.kaggle/
+
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
+
+# Download the competition data
+!kaggle competitions download -c waveform-inversion
+!unzip -q waveform-inversion.zip -d /content/data

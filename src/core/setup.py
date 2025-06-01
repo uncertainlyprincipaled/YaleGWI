@@ -8,20 +8,9 @@ def setup_environment():
     from src.core.config import CFG  # Import here to avoid circular dependency
     
     if CFG.env.kind == 'colab':
-        # Install kagglehub
-        try:
-            import kagglehub
-        except ImportError:
-            subprocess.run(['pip', 'install', 'kagglehub'], check=True)
-            import kagglehub
-
         # Create data directory
         data_dir = Path('/content/data')
         data_dir.mkdir(exist_ok=True)
-        
-        # Download dataset
-        print("Downloading dataset from Kaggle...")
-        kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
         
         # Update paths for Colab
         CFG.paths.root = data_dir / 'waveform-inversion'
