@@ -124,7 +124,7 @@ import kagglehub
 
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
-    from config import CFG  # Import here to avoid circular dependency
+    from src.core.config import CFG  # Import here to avoid circular dependency
     
     if CFG.env.kind == 'colab':
         # Install kagglehub
