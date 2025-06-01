@@ -61,6 +61,33 @@ files.upload()  # Then move kaggle.json to ~/.kaggle/
 
 This will install dependencies, clone the repository, and set up the environment for Colab. The dataset will be downloaded automatically by the setup script.
 
+### Kaggle Notebooks
+To use this project in Kaggle:
+
+1. Create a new notebook in the [Waveform Inversion competition](https://www.kaggle.com/competitions/waveform-inversion)
+
+2. Add the following code to your first cell to clone the repository:
+   ```python
+   !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+   %cd YaleGWI
+   ```
+
+3. Install the required dependencies:
+   ```python
+   !pip install -r requirements.txt
+   ```
+
+4. Import and use the project modules as needed:
+   ```python
+   from src.core.config import CFG
+   from src.core.setup import setup_environment
+   
+   # Setup environment
+   setup_environment()
+   ```
+
+The project will automatically detect the Kaggle environment and configure paths accordingly. The dataset is already available in Kaggle's input directory, so no additional download is needed.
+
 ### AWS SageMaker
 - Clone the repository and ensure it is available in the appropriate directory (e.g., `/opt/ml/code/YaleGWI`).
 - The setup script will configure paths and expect the dataset in `/opt/ml/input/data`.
