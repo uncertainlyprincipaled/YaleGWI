@@ -75,7 +75,46 @@ files.upload()  # Then move kaggle.json to ~/.kaggle/
 %cd YaleGWI
 ```
 
-This will install dependencies, clone the repository, and set up the environment for Colab. The dataset will be downloaded automatically by the setup script.
+### Alternative: Load Dataset from Google Drive (Faster, More Reliable)
+
+To avoid throttled Kaggle-to-Colab downloads, we recommend uploading the dataset once from Kaggle to your own Google Drive. Then you can mount it from any Colab session.
+
+#### 1. In Kaggle:
+First, set up rclone with Google Drive:
+```bash
+# Install rclone
+!pip install -q rclone
+
+# Configure Google Drive (run this once)
+!rclone config
+# Follow the prompts to set up a new remote named "gdrive"
+# You'll need to authenticate with Google Drive
+```
+
+Then run the push script:
+```python
+# Run the push script
+!python3 src/utils/push_to_drive.py
+```
+
+#### 2. In Colab:
+Mount your Google Drive and unzip the uploaded dataset:
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Unzip once
+!unzip -q /content/drive/MyDrive/<GDRIVE_FOLDER>/waveform-inversion.zip -d /content/data
+
+# Clone the repository
+!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+%cd YaleGWI
+
+# Install dependencies
+!pip install -r requirements.txt
+```
+
+This method prevents redundant downloads and enables fast access across sessions. The dataset will be cached in your Google Drive, making subsequent Colab sessions much faster to start up.
 
 ### Kaggle Notebooks
 To use this project in Kaggle:
