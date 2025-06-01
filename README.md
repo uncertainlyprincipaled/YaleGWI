@@ -22,6 +22,45 @@ This project implements a physics-guided neural network for seismic waveform inv
 └── requirements.txt         # Project dependencies
 ```
 
+## Environment-Specific Setup
+
+### Local Development
+- Clone the repository using git:
+  ```bash
+  git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+  cd YaleGWI
+  ```
+- Install dependencies:
+  ```bash
+  pip install -r requirements.txt
+  ```
+- Download the dataset manually or using `kagglehub` as needed.
+
+### Google Colab
+**Note:** The repository cloning logic has been removed from `setup.py`. You must run the following code block in your first Colab cell to set up the environment:
+
+```python
+# Install required packages
+!pip install kagglehub
+
+# Clone the repository
+!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+%cd YaleGWI
+
+# Import the project
+from src.core.setup import setup_environment
+from config import CFG
+
+# Setup the environment
+setup_environment()
+```
+
+This will install dependencies, clone the repository, and set up the environment for Colab. The dataset will be downloaded automatically by the setup script.
+
+### AWS SageMaker
+- Clone the repository and ensure it is available in the appropriate directory (e.g., `/opt/ml/code/YaleGWI`).
+- The setup script will configure paths and expect the dataset in `/opt/ml/input/data`.
+
 ## Automatic Notebook Updates
 
 The project includes an automatic update system that keeps the Kaggle notebook (`kaggle_notebook.py`) in sync with changes to the source files. There are two ways to use this:

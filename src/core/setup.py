@@ -8,20 +8,13 @@ def setup_environment():
     from config import CFG  # Import here to avoid circular dependency
     
     if CFG.env.kind == 'colab':
-        # Install required packages
+        # Install kagglehub
         try:
             import kagglehub
         except ImportError:
             subprocess.run(['pip', 'install', 'kagglehub'], check=True)
             import kagglehub
 
-        # Clone repository if not already present
-        repo_dir = Path('/content/YaleGWI')
-        if not repo_dir.exists():
-            print("Cloning repository from GitHub...")
-            subprocess.run(['git', 'clone', 'https://github.com/your-username/YaleGWI.git', str(repo_dir)], check=True)
-            os.chdir(repo_dir)
-        
         # Create data directory
         data_dir = Path('/content/data')
         data_dir.mkdir(exist_ok=True)
@@ -52,13 +45,6 @@ def setup_environment():
         print("Environment setup complete for Colab")
     
     elif CFG.env.kind == 'sagemaker':
-        # Clone repository if not already present
-        repo_dir = Path('/opt/ml/code/YaleGWI')
-        if not repo_dir.exists():
-            print("Cloning repository from GitHub...")
-            subprocess.run(['git', 'clone', 'https://github.com/your-username/YaleGWI.git', str(repo_dir)], check=True)
-            os.chdir(repo_dir)
-            
         # AWS SageMaker specific setup
         data_dir = Path('/opt/ml/input/data')
         CFG.paths.root = data_dir / 'waveform-inversion'
