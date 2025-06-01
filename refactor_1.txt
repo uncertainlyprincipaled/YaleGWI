@@ -1,0 +1,109 @@
+🔭 **High‑level objective**
+Refactor the current SpecProj‑UNet codebase so that it supports a *joint forward–inverse paradigm* inspired by the ICLR‑25 paper “A Unified Framework for Forward and Inverse Problems in Sub‑surface Imaging Using Latent‑Space Translations” (ICLR25FWI).
+Keep the existing physics‑guided splitter (Π± masks) **unchanged** while inserting a lightweight IU‑Net latent translator and its Moore–Penrose assembler.  All unrelated functionality (data I/O, CLI entry‑points, Docker, CI) must remain intact.
+
+```
+Hierarchy key
+│  ├─ task‑group               # high‑level refactor phase
+│  │   ├─ [file.py]            # file to create / edit (absolute path ≡ repo‑root)
+│  │   │    ● prompt‑ID        # short, unique tag
+│  │   │      ├─ instruction   # one atomic edit that Cursor will apply
+│  │   │      └─ …             # sub‑edits executed depth‑first
+```
+
+## 0 Pre‑flight sanity
+
+│  ├─ \[.github/workflows/ci.yml]
+│  │    ● ci‑01
+│  │      ├─ ensure “pytest -q” and “python -m py\_compile \$(git ls-files '\*.py')” still run in CI on **every branch push**.
+│  │      └─ add job `dryrun` that executes `python src/core/train.py --dryrun` (one mini‑batch) on CPU.
+│  └─ \[.pre‑commit-config.yaml]
+│       ● lint‑01 → add ruff+black hooks; line‑length 120.
+
+## 1 Singleton config upgrades
+
+│  ├─ \[src/core/config.py]
+│  │    ● cfg‑01 → add flags: `enable_joint`, `latent_h`, `latent_w`, `λ_fwd`, `λ_inv`, with sensible defaults (False/16/16/1.0/1.0).
+│  │    ● cfg‑02 → expose helper `is_joint()` returning bool for fast checks.
+│  └─ \[README.md]
+│       ● doc‑01 → document new flags in *Environment‑specific setup* section.
+
+## 2 Data utilities (no change needed)
+
+(No edits unless later tasks require.)
+
+## 3 Physics layer – add pseudo‑inverse assembler
+
+│  ├─ \[src/core/proj\_mask.py]
+│  │    ● phys‑01 → add class `SpectralAssembler` implementing Π±† using small ε‑regularised Moore–Penrose inverse.  Signature:
+│  │         `def forward(self, up:Tensor, down:Tensor)->Tensor` returning reconstructed wavefield.
+│  │    ● phys‑02 → expose functional helper `split_and_reassemble(x)` for quick unit tests.
+│  │    ● phys‑03 → write docstring with equation references (§1 answer above).
+
+## 4 Latent translator – IU‑Net mini‑module
+
+│  ├─ \[src/core/iunet.py]  # **NEW**
+│  │    ● iu‑00 → create file; implement bidirectional IU‑Net (≈24 M params) with coupling layers; default latent grid (latent\_h×latent\_w from CFG).
+│  │    ● iu‑01 → `def forward(self, z, direction:str)` where direction ∈ {"p→v","v→p"}.
+│  │    ● iu‑02 → unit test in `tests/test_iunet.py` (create if missing).
+│  └─ \[requirements.txt]
+│       ● req‑01 → add `fr‑eunet` or custom blocks if extra dep is needed (keep torch>=2.1).
+
+## 5 Model wrapper – HybridSpecProj
+
+│  ├─ \[src/core/specproj\_hybrid.py]  # **NEW**
+│  │    ● hyb‑00 → compose: PhysMask → (up,down) → IU‑Net translation → decoders
+│  │    ● hyb‑01 → for inverse‑only run, skip IU‑Net path and fall back to existing SmallUNets.
+│  │    ● hyb‑02 → for joint mode: (a) velocity decoder == old SmallUNet; (b) new `WaveDecoder` (2 conv‑upsample blocks) producing p‑pred; losses handled in losses.py.
+│  │    ● hyb‑03 → expose `forward(seis, mode:str)` returning tuple (v\_pred, p\_pred or None).
+│  └─ \[src/core/specproj\_unet.py]
+│       ● unet‑01 → *deprecate* direct use; re‑export HybridSpecProj as `SpecProjUNet` for backwards compatibility when `CFG.enable_joint` is False.
+
+## 6 Losses
+
+│  ├─ \[src/core/losses.py]
+│  │    ● loss‑01 → add `JointLoss(λ_inv, λ_fwd, λ_pde)` combining MAE(v), MAE(p) and optional PDE residual.
+│  │    ● loss‑02 → keep `HybridLoss` aliasing to `JointLoss` when `enable_joint=False` for API stability.
+
+## 7 Training script refactor
+
+│  ├─ \[src/core/train.py]
+│  │    ● train‑01 → add CLI flags `--enable_joint`, `--dryrun` (uses argparse).
+│  │    ● train‑02 → if joint: back‑prop on combo loss; else keep current path.
+│  │    ● train‑03 → add minimal validation (MAE) every epoch.
+│  │    ● train‑04 → log CUDA mem usage and loss breakdown via tqdm postfix.
+│  └─ \[src/core/infer.py]
+│       ● infer‑01 → support velocity‑only inference when joint model is active (ignore p\_pred).
+
+## 8 Kaggle notebook generator
+
+│  ├─ \[src/utils/update\_kaggle\_notebook.py]
+│  │    ● nb‑01 → ensure new files `iunet.py`, `specproj_hybrid.py` are stitched into notebook sections, preserving numbered headers.
+│  │    ● nb‑02 → add cell that toggles `CFG.enable_joint` by setting env var.
+
+## 9 Unit tests & dry‑run
+
+│  ├─ \[tests/test\_spectral.py] **NEW**
+│  │    ● tst‑01 → assert ∥Π†(Π(x)) − x∥ / ∥x∥ < 1e‑3 on random tensor.
+│  └─ \[tests/test\_hybrid\_forward.py] **NEW**
+│       ● tst‑02 → smoke‑test: forward pass of HybridSpecProj(via dummy data) returns shapes (B,1,70,70) and optional p\_pred.
+
+## 10 Documentation
+
+│  └─ \[theory\_notes.md]
+│       ● th‑01 → append paragraph comparing category‑quotient view to latent‑manifold assumption (cite §3 discussion).
+
+---
+
+### 🚧 Updated TODO list
+
+1. **Validation loop** – implement SSIM + early‑stopping (placeholder hooks in train‑03).
+2. Hyper‑param sweep script for `(latent_h,latent_w)` using validation slope criterion.
+3. Ensemble driver: blend SpecProj‑UNet (physics‑only) with HybridSpecProj outputs via uncertainty weighting.
+4. Colab/Kaggle notebooks – add sliders for latent size & λ weights.
+5. Expand `SpectralAssembler` to support frequency‑dependent ε.
+6. Move hard‑coded dt,dx into `config.py` after sanity check.
+7. CPU fallback kernels in PhysMask (fftshift → torch.fft).
+8. Publish `OpenFWI_JointBench.csv` benchmarking script; auto‑generate leaderboard figures.
+
+*Once all prompts above are applied and CI passes `dryrun`, remove `⚙️ TODO` comments from code.*

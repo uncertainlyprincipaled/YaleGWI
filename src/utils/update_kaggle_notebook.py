@@ -36,7 +36,8 @@ def update_kaggle_notebook():
         'setup.py',   # Then setup to configure environment
         'data_utils.py',
         'proj_mask.py',
-        'specproj_unet.py',
+        'iunet.py',      # Add IU-Net for latent translation
+        'specproj_hybrid.py',  # Replace specproj_unet.py with hybrid version
         'losses.py',
         'train.py',
         'infer.py'

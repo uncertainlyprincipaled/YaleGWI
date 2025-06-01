@@ -50,4 +50,58 @@ class PhysMask(nn.Module):
 
         up   = torch.fft.irfftn(Xf*mask_up  , dim=(-2,-1), s=(T,R))
         down = torch.fft.irfftn(Xf*mask_down, dim=(-2,-1), s=(T,R))
-        return up, down 
+        return up, down
+
+class SpectralAssembler(nn.Module):
+    """
+    Implements Π±† using small ε-regularized Moore-Penrose inverse.
+    Reconstructs wavefield from up-going and down-going components.
+    
+    Reference: §1 of ICLR25FWI paper for mathematical formulation.
+    """
+    def __init__(self, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, up: torch.Tensor, down: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            up: Up-going wavefield (B,S,T,R)
+            down: Down-going wavefield (B,S,T,R)
+        Returns:
+            Reconstructed wavefield (B,S,T,R)
+        """
+        # Convert to frequency domain
+        Up_f = torch.fft.rfftn(up, dim=(-2,-1))
+        Down_f = torch.fft.rfftn(down, dim=(-2,-1))
+        
+        # Compute Moore-Penrose inverse with regularization
+        # Π† = (Π^T Π + εI)^(-1) Π^T
+        # where Π is the projection operator
+        Up_f_conj = Up_f.conj()
+        Down_f_conj = Down_f.conj()
+        
+        # Regularized inverse
+        denom = (Up_f_conj * Up_f + Down_f_conj * Down_f + self.eps)
+        inv = 1.0 / denom
+        
+        # Apply inverse to reconstruct
+        recon_f = inv * (Up_f_conj * Up_f + Down_f_conj * Down_f)
+        
+        # Convert back to time domain
+        return torch.fft.irfftn(recon_f, dim=(-2,-1), s=up.shape[-2:])
+
+def split_and_reassemble(x: torch.Tensor, mask: PhysMask, assembler: SpectralAssembler) -> torch.Tensor:
+    """
+    Helper function to split wavefield and reassemble it.
+    Useful for unit testing the projection operators.
+    
+    Args:
+        x: Input wavefield (B,S,T,R)
+        mask: PhysMask instance
+        assembler: SpectralAssembler instance
+    Returns:
+        Reconstructed wavefield (B,S,T,R)
+    """
+    up, down = mask(x)
+    return assembler(up, down) 

@@ -36,6 +36,22 @@ This project implements a physics-guided neural network for seismic waveform inv
   ```
 - Download the dataset manually or using `kagglehub` as needed.
 
+### Configuration Flags
+The following flags can be set in `src/core/config.py` or via environment variables:
+
+- `enable_joint`: Enable joint forward-inverse paradigm (default: False)
+- `latent_h`: Height of latent space grid (default: 16)
+- `latent_w`: Width of latent space grid (default: 16)
+- `lambda_fwd`: Weight for forward loss term (default: 1.0)
+- `lambda_inv`: Weight for inverse loss term (default: 1.0)
+
+Example environment variable usage:
+```bash
+export GWI_ENABLE_JOINT=true
+export GWI_LATENT_H=32
+export GWI_LATENT_W=32
+```
+
 ### Google Colab
 **Note:** The repository cloning logic has been removed from `setup.py`. You must run the following code block in your first Colab cell to set up the environment:
 

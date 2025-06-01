@@ -58,7 +58,18 @@ class Config:
             cls._inst.weight_decay = 1e-3
             cls._inst.epochs  = 30
             cls._inst.lambda_pde = 0.1
+
+            # Joint forward-inverse paradigm flags
+            cls._inst.enable_joint = False  # Master switch for joint mode
+            cls._inst.latent_h = 16        # Latent space height
+            cls._inst.latent_w = 16        # Latent space width
+            cls._inst.lambda_fwd = 1.0     # Forward loss weight
+            cls._inst.lambda_inv = 1.0     # Inverse loss weight
         return cls._inst
+
+    def is_joint(self) -> bool:
+        """Helper to check if joint forward-inverse mode is enabled."""
+        return self.enable_joint
 
 CFG = Config()
 
