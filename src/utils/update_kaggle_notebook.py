@@ -1,0 +1,87 @@
+import os
+from pathlib import Path
+import re
+from typing import List
+
+def extract_code_blocks(content: str) -> List[str]:
+    """Extract code blocks from Python file."""
+    blocks = []
+    current_block = []
+    
+    for line in content.split('\n'):
+        if line.startswith('# %%'):
+            if current_block:
+                blocks.append('\n'.join(current_block))
+                current_block = []
+        else:
+            current_block.append(line)
+    
+    if current_block:
+        blocks.append('\n'.join(current_block))
+    
+    return blocks
+
+def create_notebook_block(content: str) -> str:
+    """Create a notebook code block."""
+    return f'# %%\n{content}\n\n'
+
+def update_kaggle_notebook():
+    """Update kaggle_notebook.py with content from individual files."""
+    # Get the project root directory
+    project_root = Path(__file__).parent.parent.parent
+    
+    # Files to process in order
+    files = [
+        'config.py',  # Process config first to create base CFG
+        'setup.py',   # Then setup to configure environment
+        'data_utils.py',
+        'proj_mask.py',
+        'specproj_unet.py',
+        'losses.py',
+        'train.py',
+        'infer.py'
+    ]
+    
+    # Read all files
+    all_blocks = []
+    
+    # Add header comment
+    all_blocks.append("# SpecProj-UNet for Seismic Waveform Inversion\n"
+                     "# This notebook implements a physics-guided neural network for seismic waveform inversion\n"
+                     "# using spectral projectors and UNet architecture.")
+    
+    # Add imports block
+    all_blocks.append("import os\n"
+                     "import torch\n"
+                     "import numpy as np\n"
+                     "from pathlib import Path\n"
+                     "from tqdm.notebook import tqdm\n"
+                     "import pandas as pd\n"
+                     "import matplotlib.pyplot as plt")
+    
+    # Process each file
+    for file in files:
+        file_path = project_root / 'src' / 'core' / file
+        if not file_path.exists():
+            print(f"Warning: {file} not found, skipping...")
+            continue
+            
+        with open(file_path, 'r') as f:
+            content = f.read()
+            blocks = extract_code_blocks(content)
+            all_blocks.extend(blocks)
+    
+    # Create notebook content
+    notebook_content = []
+    for block in all_blocks:
+        notebook_content.append(create_notebook_block(block))
+    
+    # Write to kaggle_notebook.py
+    notebook_path = project_root / 'kaggle_notebook.py'
+    with open(notebook_path, 'w') as f:
+        f.write('\n'.join(notebook_content))
+    
+    print(f"Successfully updated {notebook_path}")
+
+if __name__ == '__main__':
+    update_kaggle_notebook() 
