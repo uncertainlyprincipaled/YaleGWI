@@ -66,25 +66,29 @@ To use this project in Kaggle:
 
 1. Create a new notebook in the [Waveform Inversion competition](https://www.kaggle.com/competitions/waveform-inversion)
 
-2. Add the following code to your first cell to clone the repository:
+2. Add the following code to your first cell to clone the repository and set up the environment:
    ```python
-   !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+   # Clone repository (ignore error if already exists)
+   !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git || true
    %cd YaleGWI
-   ```
-
-3. Install the required dependencies:
-   ```python
+   
+   # Install dependencies
    !pip install -r requirements.txt
-   ```
-
-4. Import and use the project modules as needed:
-   ```python
+   
+   # Import and setup
+   import os
+   os.environ['GWI_ENV'] = 'kaggle'  # Set this before importing your setup/config
    from src.core.config import CFG
    from src.core.setup import setup_environment
    
    # Setup environment
    setup_environment()
    ```
+
+**Note:** 
+- If you see a message about the destination path already existing, this is normal - it means the repository was already cloned.
+- The dependency installation may show "Requirement already satisfied" for many packages - this is expected as Kaggle notebooks come with many pre-installed packages.
+- CUDA-related packages may take a moment to download - this is normal.
 
 The project will automatically detect the Kaggle environment and configure paths accordingly. The dataset is already available in Kaggle's input directory, so no additional download is needed.
 
