@@ -8,24 +8,32 @@ except ImportError:
     kagglehub = None
 
 def warm_kaggle_cache():
-    """Warm up the Kaggle FUSE cache by streaming all data once."""
-    if not os.environ.get('KAGGLE_URL_BASE'):
+    """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
+    data_dir = Path('/kaggle/input/waveform-inversion')
+    tmp_tar = Path('/kaggle/working/tmp.tar.gz')
+    
+    # Check if data directory exists
+    if not data_dir.exists():
+        print("Warning: Competition data not found at /kaggle/input/waveform-inversion")
+        print("Please add the competition dataset to your notebook first:")
+        print("1. Click on the 'Data' tab")
+        print("2. Click 'Add Data'")
+        print("3. Search for 'Waveform Inversion'")
+        print("4. Click 'Add' on the competition dataset")
         return
         
-    print("Warming up Kaggle FUSE cache...")
-    data_dir = Path('/kaggle/input/waveform-inversion')
-    
-    # Create a temporary tar file to stream all data
-    tmp_tar = Path('/kaggle/working/tmp.tar.gz')
     try:
         subprocess.run([
             'tar', '-I', 'pigz', '-cf', str(tmp_tar),
             str(data_dir)
         ], check=True)
-        print("Cache warm-up complete")
-    finally:
-        if tmp_tar.exists():
-            tmp_tar.unlink()
+        tmp_tar.unlink()  # Clean up
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Failed to warm up cache: {e}")
+        print("This is not critical - continuing with setup...")
+    except Exception as e:
+        print(f"Warning: Unexpected error during cache warmup: {e}")
+        print("This is not critical - continuing with setup...")
 
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
