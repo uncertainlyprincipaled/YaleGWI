@@ -1,0 +1,33 @@
+🔧 Simplify & Optimize SpecProj-UNet for Kaggle
+
+1. Data Pipeline Simplification
+   ├─ [src/core/data_utils.py]
+   │    ● ds-01 → Add float16 preprocessing step
+   │    ● ds-02 → Simplify dataset class to match notebook style
+   │    ● ds-03 → Add simple temporal flip augmentation
+   │    ● ds-04 → Use memory mapping for large files
+
+2. Model Architecture Updates
+   ├─ [src/core/specproj_unet.py]
+   │    ● model-01 → Replace custom UNet with HGNet/ConvNeXt backbone
+   │    ● model-02 → Simplify decoder to match notebook style
+   │    ● model-03 → Add EMA wrapper
+   │    ● model-04 → Add flip TTA for inference
+
+3. Training Loop Optimization
+   ├─ [src/core/train.py]
+   │    ● train-01 → Add AMP by default
+   │    ● train-02 → Add DDP support
+   │    ● train-03 → Simplify validation loop
+   │    ● train-04 → Add proper checkpointing
+
+4. Configuration Updates
+   ├─ [src/core/config.py]
+   │    ● cfg-01 → Add notebook-style config
+   │    ● cfg-02 → Add environment detection
+   │    ● cfg-03 → Add training flags
+
+5. Utility Functions
+   ├─ [src/utils/]
+   │    ● util-01 → Add preprocessing script
+   │    ● util-02 → Add model export uti
