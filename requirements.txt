@@ -6,4 +6,5 @@ tqdm>=4.62.0
 kagglehub>=0.2.0
 watchdog>=2.1.0  # For development
 einops
-omegaconf 
+omegaconf
+polars>=0.20.0 

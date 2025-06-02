@@ -4,7 +4,7 @@
 # %%
 import torch, random, numpy as np
 from config import CFG, save_cfg
-from data_utils import list_family_files, make_loader
+from data_manager import DataManager
 from specproj_hybrid import HybridSpecProj
 from losses import JointLoss
 from pathlib import Path
@@ -23,12 +23,19 @@ def train(dryrun: bool = False, enable_joint: bool = False):
     CFG.enable_joint = enable_joint
     save_cfg(save_dir)
 
+    # Initialize data manager
+    data_manager = DataManager(use_mmap=True, cache_size=1000)
+
     # ----------- data ----------------------------------------------------- #
     train_seis, train_vel = [], []
     for fam in ('FlatVel_A','FlatVel_B'):
-        s, v = list_family_files(fam)
+        s, v = data_manager.list_family_files(fam)
         train_seis += s; train_vel += v
-    train_loader = make_loader(train_seis, train_vel, CFG.batch, shuffle=True)
+    train_loader = data_manager.create_loader(
+        train_seis, train_vel, 
+        batch_size=CFG.batch, 
+        shuffle=True
+    )
 
     # ----------- model/optim --------------------------------------------- #
     model = HybridSpecProj().to(CFG.env.device)
@@ -86,6 +93,9 @@ def train(dryrun: bool = False, enable_joint: bool = False):
         torch.save(model.state_dict(), save_dir/'last.pth')
         
         print(f"Epoch {epoch}: val_mae = {val_mae:.4f}")
+        
+        # Clear cache periodically
+        data_manager.clear_cache()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(allow_abbrev=False)

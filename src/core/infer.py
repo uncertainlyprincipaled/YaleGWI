@@ -5,7 +5,7 @@
 import torch, pandas as pd
 from pathlib import Path
 from config import CFG
-from data_utils import list_family_files, make_loader
+from data_manager import DataManager
 from specproj_hybrid import HybridSpecProj
 
 def format_submission(vel_map, oid):
@@ -18,13 +18,18 @@ def format_submission(vel_map, oid):
     return rows
 
 def infer(weights='outputs/last.pth'):
+    # Initialize data manager
+    data_manager = DataManager(use_mmap=True, cache_size=1000)
+    
     model = HybridSpecProj().to(CFG.env.device)
     model.load_state_dict(torch.load(weights, map_location=CFG.env.device))
     model.eval()
 
-    test_files = sorted(CFG.paths.test.glob('*.npy'))
-    test_loader = make_loader(test_files, vel=None,
-                             batch=1, shuffle=False)
+    test_files = data_manager.get_test_files()
+    test_loader = data_manager.create_loader(
+        test_files, vel=None,
+        batch_size=1, shuffle=False
+    )
 
     rows = []
     with torch.no_grad(), torch.cuda.amp.autocast():
@@ -34,6 +39,10 @@ def infer(weights='outputs/last.pth'):
             vel, _ = model(seis, mode="inverse")
             vel = vel.cpu().float().numpy()[0,0]
             rows += format_submission(vel, Path(oid[0]).stem)
+            
+    # Clear cache after inference
+    data_manager.clear_cache()
+    
     pd.DataFrame(rows).to_csv('submission.csv', index=False)
 
 if __name__ == '__main__':

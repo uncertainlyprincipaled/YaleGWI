@@ -34,7 +34,7 @@ def update_kaggle_notebook():
     files = [
         'config.py',  # Process config first to create base CFG
         'setup.py',   # Then setup to configure environment
-        'data_utils.py',
+        'data_manager.py',  # New unified data management interface
         'proj_mask.py',
         'iunet.py',      # Add IU-Net for latent translation
         'specproj_hybrid.py',  # Replace specproj_unet.py with hybrid version
@@ -58,7 +58,8 @@ def update_kaggle_notebook():
                      "from pathlib import Path\n"
                      "from tqdm.notebook import tqdm\n"
                      "import pandas as pd\n"
-                     "import matplotlib.pyplot as plt")
+                     "import matplotlib.pyplot as plt\n"
+                     "import polars as pl")  # Add polars import
     
     # Process each file
     for file in files:

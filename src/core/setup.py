@@ -1,10 +1,31 @@
 import os
 import subprocess
 from pathlib import Path
+import shutil
 try:
     import kagglehub
 except ImportError:
     kagglehub = None
+
+def warm_kaggle_cache():
+    """Warm up the Kaggle FUSE cache by streaming all data once."""
+    if not os.environ.get('KAGGLE_URL_BASE'):
+        return
+        
+    print("Warming up Kaggle FUSE cache...")
+    data_dir = Path('/kaggle/input/waveform-inversion')
+    
+    # Create a temporary tar file to stream all data
+    tmp_tar = Path('/kaggle/working/tmp.tar.gz')
+    try:
+        subprocess.run([
+            'tar', '-I', 'pigz', '-cf', str(tmp_tar),
+            str(data_dir)
+        ], check=True)
+        print("Cache warm-up complete")
+    finally:
+        if tmp_tar.exists():
+            tmp_tar.unlink()
 
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
@@ -76,7 +97,28 @@ def setup_environment():
         print("Paths configured for SageMaker environment") 
     
     elif CFG.env.kind == 'kaggle':
-        # In Kaggle, do not use kagglehub or Kaggle API. Data is already available.
-        print("Environment setup complete for Kaggle (no kagglehub needed)")
+        # In Kaggle, warm up the FUSE cache first
+        warm_kaggle_cache()
+        
+        # Set up paths for Kaggle environment
+        CFG.paths.root = Path('/kaggle/input/waveform-inversion')
+        CFG.paths.train = CFG.paths.root / 'train_samples'
+        CFG.paths.test = CFG.paths.root / 'test'
+        
+        # Update family paths
+        CFG.paths.families = {
+            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
+            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
+            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
+            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
+            'Style_A'     : CFG.paths.train/'Style_A',
+            'Style_B'     : CFG.paths.train/'Style_B',
+            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
+            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
+            'CurveFault_A': CFG.paths.train/'CurveFault_A',
+            'CurveFault_B': CFG.paths.train/'CurveFault_B',
+        }
+        
+        print("Environment setup complete for Kaggle")
     
     # Add any additional logic for 'local' or other environments as needed 
