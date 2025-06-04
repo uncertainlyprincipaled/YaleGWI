@@ -1,4 +1,6 @@
-# %% [markdown]
+# All data IO in this file must go through DataManager (src/core/data_manager.py)
+# Do NOT load data directly in this file.
+#
 # ## Inference
 
 # %%
@@ -19,7 +21,7 @@ def format_submission(vel_map, oid):
 
 def infer(weights='outputs/best.pth'):
     # Initialize data manager
-    data_manager = DataManager(use_mmap=True, cache_size=1000)
+    data_manager = DataManager()
     
     # Load model
     model = SpecProjNet(
@@ -31,11 +33,10 @@ def infer(weights='outputs/best.pth'):
     model.eval()
 
     test_files = data_manager.get_test_files()
+    # For test, family_type is not needed, but we pass 'Fault' for single-sample-per-file
     test_loader = data_manager.create_loader(
-        test_files, vel=None,
-        batch_size=1, shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        test_files, test_files, 'Fault',
+        batch_size=1, shuffle=False
     )
 
     rows = []
@@ -57,9 +58,6 @@ def infer(weights='outputs/best.pth'):
             vel = vel.cpu().float().numpy()[0,0]
             rows += format_submission(vel, Path(oid[0]).stem)
             
-    # Clear cache after inference
-    data_manager.clear_cache()
-    
     pd.DataFrame(rows).to_csv('submission.csv', index=False)
 
 if __name__ == '__main__':

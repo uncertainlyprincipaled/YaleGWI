@@ -1,4 +1,6 @@
-# %% [markdown]
+# All data IO in this file must go through DataManager (src/core/data_manager.py)
+# Do NOT load data directly in this file.
+#
 # ## Data Loading and Preprocessing
 
 # %%
@@ -8,20 +10,16 @@ from torch.utils.data import DataLoader, Dataset
 from pathlib import Path
 from typing import List, Tuple, Optional
 import torch.nn.functional as F
+from data_manager import DataManager
 
 def list_family_files(family: str) -> Tuple[List[Path], Optional[List[Path]]]:
     """
     Returns sorted lists (seis_files, vel_files).  If velocity files do not
     exist (test set), second element is None.
     """
-    root = CFG.paths.families[family]
-    if (root / 'data').exists():                 # FlatVel / CurveVel / Style
-        seis = sorted((root/'data').glob('*.npy'))
-        vel  = sorted((root/'model').glob('*.npy')) if (root/'model').exists() else None
-    else:                                        # *Fault* families
-        seis = sorted(root.glob('seis*_*_*.npy'))
-        vel  = sorted(root.glob('vel*_*_*.npy')) if (root/'vel2_1_0.npy').exists() else None
-    return seis, vel
+    data_manager = DataManager()
+    seis_files, vel_files, _ = data_manager.list_family_files(family)
+    return seis_files, vel_files
 
 def _preprocess(x: np.ndarray) -> np.ndarray:
     """Preprocess seismic data to float16 and normalize."""
@@ -56,26 +54,21 @@ class SeismicDataset(Dataset):
     def __len__(self): 
         return len(self.seis_files)
 
-    def _load(self, f: Path) -> np.ndarray:
-        """Load data with memory mapping if enabled."""
-        if self.use_mmap:
-            return np.load(f, mmap_mode='r')
-        return np.load(f)
-
     def __getitem__(self, idx):
         # Load seismic data
-        x = self._load(self.seis_files[idx])
-        x = _preprocess(x)
+        data_manager = DataManager()
+        x = data_manager.create_dataset([self.seis_files[idx]], 
+                                      [self.vel_files[idx]] if self.vel_files else None,
+                                      'Fault' if self.vel_files else 'Test',
+                                      augment=self.augment)[0][0]
         
         if self.vel_files is None:
             y = np.zeros((1,70,70), np.float16)  # dummy
         else:
-            y = self._load(self.vel_files[idx]).astype(np.float16)
-            
-        # Apply temporal flip augmentation if enabled
-        if self.augment and np.random.random() < 0.5:
-            x = x[::-1, :, ::-1]  # Flip time and receiver dimensions
-            y = y[..., ::-1]      # Flip width dimension of velocity map
+            y = data_manager.create_dataset([self.seis_files[idx]], 
+                                          [self.vel_files[idx]],
+                                          'Fault',
+                                          augment=self.augment)[0][1]
             
         return torch.from_numpy(x), torch.from_numpy(y)
 
@@ -90,12 +83,11 @@ def make_loader(seis: List[Path],
     Args:
         num_workers: Number of worker processes. If 0, persistent_workers is disabled.
     """
-    return DataLoader(
-        SeismicDataset(seis, vel, augment=shuffle, use_mmap=use_mmap),
+    data_manager = DataManager()
+    return data_manager.create_loader(
+        seis, vel,
+        'Fault' if vel else 'Test',
         batch_size=batch,
         shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 1 else None
+        num_workers=num_workers
     ) 

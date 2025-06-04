@@ -59,7 +59,7 @@ class _Env:
             self.kind = 'sagemaker'
         else:
             self.kind = 'local'
-        self.device = 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES', '') != '' else 'cpu'
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
 
 class Config:
@@ -89,6 +89,9 @@ class Config:
             cls._inst.lambda_inv = 1.0
             cls._inst.lambda_fwd = 1.0
             cls._inst.lambda_pde = 0.1
+
+            # Enable joint training by default in Kaggle
+            cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
 
         return cls._inst
 
@@ -267,148 +270,141 @@ def setup_environment():
 
 
 # %%
+"""
+DataManager is the single source of truth for all data IO in this project.
+All data loading, streaming, and batching must go through DataManager.
+"""
 from pathlib import Path
-from typing import List, Optional, Tuple, Iterator, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-import polars as pl
 from config import CFG
-import os
+from torch.utils.data import DistributedSampler
+
+class MemoryTracker:
+    """Tracks memory usage during data loading."""
+    def __init__(self):
+        self.total_memory = 0
+        self.max_memory = 0
+        
+    def update(self, memory_used: int):
+        self.total_memory += memory_used
+        self.max_memory = max(self.max_memory, memory_used)
+        
+    def get_stats(self) -> Dict[str, float]:
+        return {
+            'total_memory_gb': self.total_memory / 1e9,
+            'max_memory_gb': self.max_memory / 1e9
+        }
 
 class DataManager:
     """
-    Unified interface for data operations. Handles:
-    1. Memory-efficient data loading
-    2. Streaming for large datasets
-    3. Caching and memory mapping
-    4. Environment-specific optimizations
+    DataManager is the single source of truth for all data IO in this project.
+    Handles memory-efficient, sample-wise access for all dataset families.
+    Uses float16 for memory efficiency.
     """
-    def __init__(self, use_mmap: bool = True, cache_size: int = 1000):
+    def __init__(self, use_mmap: bool = True):
         self.use_mmap = use_mmap
-        self.cache_size = cache_size
-        self._file_cache: Dict[Path, np.ndarray] = {}
-        
-    def _load_file(self, path: Path) -> np.ndarray:
-        """Load a file with caching and memory mapping."""
-        if path in self._file_cache:
-            return self._file_cache[path]
-            
-        if self.use_mmap:
-            data = np.load(path, mmap_mode='r')
-        else:
-            data = np.load(path)
-            
-        # Cache the file if it's small enough
-        if data.nbytes < self.cache_size * 1024 * 1024:  # Convert MB to bytes
-            self._file_cache[path] = data
-            
-        return data
-        
-    def list_family_files(self, family: str) -> Tuple[List[Path], Optional[List[Path]]]:
-        """Get seismic and velocity files for a family."""
+        self.memory_tracker = MemoryTracker()
+
+    def list_family_files(self, family: str) -> Tuple[List[Path], List[Path], str]:
+        """Return (seis_files, vel_files, family_type) for a given family."""
         root = CFG.paths.families[family]
-        if (root / 'data').exists():  # FlatVel / CurveVel / Style
-            seis = sorted((root/'data').glob('*.npy'))
-            vel = sorted((root/'model').glob('*.npy')) if (root/'model').exists() else None
-        else:  # *Fault* families
-            seis = sorted(root.glob('seis*_*_*.npy'))
-            vel = sorted(root.glob('vel*_*_*.npy')) if (root/'vel2_1_0.npy').exists() else None
-        return seis, vel
-        
-    def stream_sequences(self, batch_size: int = 16, subset: str = "train") -> Iterator[torch.Tensor]:
-        """Stream sequences using Polars for memory efficiency."""
-        data_path = CFG.paths.root / f"{subset}.csv"
-        scan = (pl.scan_csv(data_path)
-                .with_row_index("row_id")
-                .group_by("sequence_id")
-                .agg(pl.all()))
-        
-        for df in scan.collect(streaming=True).iter_slices(n_rows=batch_size):
-            yield torch.from_numpy(df.to_numpy())
-            
-    def create_dataset(self, 
-                      seis_files: List[Path],
-                      vel_files: Optional[List[Path]] = None,
-                      augment: bool = False) -> Dataset:
-        """Create a memory-efficient dataset."""
+        if (root / 'data').exists():  # Vel/Style
+            seis_files = sorted((root/'data').glob('*.npy'))
+            vel_files = sorted((root/'model').glob('*.npy'))
+            family_type = 'VelStyle'
+        else:  # Fault
+            seis_files = sorted(root.glob('seis*_*_*.npy'))
+            vel_files = sorted(root.glob('vel*_*_*.npy'))
+            family_type = 'Fault'
+        return seis_files, vel_files, family_type
+
+    def create_dataset(self, seis_files: List[Path], vel_files: List[Path], 
+                      family_type: str, augment: bool = False) -> Dataset:
         return SeismicDataset(
-            seis_files=seis_files,
-            vel_files=vel_files,
-            augment=augment,
-            use_mmap=self.use_mmap
+            seis_files, 
+            vel_files, 
+            family_type, 
+            augment,
+            use_mmap=self.use_mmap,
+            memory_tracker=self.memory_tracker
         )
+
+    def create_loader(self, seis_files: List[Path], vel_files: List[Path],
+                     family_type: str, batch_size: int = 32, 
+                     shuffle: bool = True, num_workers: int = 4,
+                     distributed: bool = False) -> DataLoader:
+        dataset = self.create_dataset(seis_files, vel_files, family_type)
         
-    def create_loader(self,
-                     seis_files: List[Path],
-                     vel_files: Optional[List[Path]] = None,
-                     batch_size: int = 32,
-                     shuffle: bool = True) -> DataLoader:
-        """Create a DataLoader with optimized settings."""
-        dataset = self.create_dataset(seis_files, vel_files)
+        if distributed:
+            sampler = DistributedSampler(dataset)
+        else:
+            sampler = None
+            
         return DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=min(4, os.cpu_count()),
+            shuffle=shuffle and not distributed,
+            sampler=sampler,
+            num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2 if os.cpu_count() > 1 else None
+            persistent_workers=num_workers > 0
         )
-        
+
     def get_test_files(self) -> List[Path]:
-        """Get test files."""
         return sorted(CFG.paths.test.glob('*.npy'))
-        
-    def clear_cache(self):
-        """Clear the file cache."""
-        self._file_cache.clear()
 
 class SeismicDataset(Dataset):
     """
-    Memory-efficient dataset that uses memory mapping for large files.
-    Each sample:
-      x : (S, T, R) float32  seismic cube
-      y : (1, H, W) float32  velocity map  (None for test)
+    Memory-efficient dataset for all families.
+    For Vel/Style: sample-wise mmap access from large files.
+    For Fault: one sample per file.
+    Uses float16 for memory efficiency.
     """
-    def __init__(self,
-                 seis_files: List[Path],
-                 vel_files: Optional[List[Path]] = None,
-                 augment: bool = False,
-                 use_mmap: bool = True):
-        self.seis_files = seis_files
-        self.vel_files = vel_files
+    def __init__(self, seis_files: List[Path], vel_files: List[Path], family_type: str, 
+                 augment: bool = False, use_mmap: bool = True, memory_tracker: MemoryTracker = None):
+        self.family_type = family_type
         self.augment = augment
+        self.index = []
         self.use_mmap = use_mmap
-        assert vel_files is None or len(seis_files) == len(vel_files)
-        
-        # Pre-load file sizes for memory mapping
-        self.seis_sizes = [f.stat().st_size for f in seis_files]
-        if vel_files:
-            self.vel_sizes = [f.stat().st_size for f in vel_files]
-
-    def __len__(self): 
-        return len(self.seis_files)
-
-    def _load(self, f: Path, size: int) -> np.ndarray:
-        if self.use_mmap:
-            return np.load(f, mmap_mode='r')
+        self.memory_tracker = memory_tracker
+        if family_type == 'VelStyle':
+            for sfile, vfile in zip(seis_files, vel_files):
+                # Each file contains 500 samples
+                for i in range(500):
+                    self.index.append((sfile, vfile, i))
+        elif family_type == 'Fault':
+            for sfile, vfile in zip(seis_files, vel_files):
+                self.index.append((sfile, vfile, None))
         else:
-            return np.load(f)
+            raise ValueError(f"Unknown family_type: {family_type}")
+
+    def __len__(self):
+        return len(self.index)
 
     def __getitem__(self, idx):
-        # Load seismic data with memory mapping
-        x = self._load(self.seis_files[idx], self.seis_sizes[idx]).astype(np.float32)
-        
+        sfile, vfile, i = self.index[idx]
+        if self.family_type == 'VelStyle':
+            x = np.load(sfile, mmap_mode='r' if self.use_mmap else None)[i]
+            y = np.load(vfile, mmap_mode='r' if self.use_mmap else None)[i]
+        else:  # Fault
+            x = np.load(sfile)
+            y = np.load(vfile)
+            
+        # Convert to float16 for memory efficiency
+        x = x.astype(np.float16)
+        y = y.astype(np.float16)
+            
         # Normalize per-receiver
         mu = x.mean(axis=(1,2), keepdims=True)
         std = x.std(axis=(1,2), keepdims=True) + 1e-6
-        x = (x - mu)/std
+        x = (x - mu) / std
         
-        if self.vel_files is None:
-            y = np.zeros((1,70,70), np.float32)  # dummy
-        else:
-            y = self._load(self.vel_files[idx], self.vel_sizes[idx]).astype(np.float32)
+        # Track memory usage
+        if self.memory_tracker:
+            self.memory_tracker.update(x.nbytes + y.nbytes)
             
         return torch.from_numpy(x), torch.from_numpy(y) 
 
@@ -750,110 +746,72 @@ HybridLoss = JointLoss
 
 
 # %%
-# ## Training
-
-
-
-# %%
+"""
+Training script that uses DataManager for all data IO.
+"""
 import torch, random, numpy as np
-from config import CFG, save_cfg
+from config import CFG
 from data_manager import DataManager
-from model import SpecProjNet
-from losses import JointLoss
+from model import get_model
+from losses import get_loss_fn
 from pathlib import Path
 from tqdm import tqdm
-import argparse
 import torch.cuda.amp as amp
-import torch.distributed as dist
-import torch.multiprocessing as mp
+import logging
 
 def set_seed(seed:int):
-    torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
-def train(rank, world_size, dryrun: bool = False, fp16: bool = True, empty_cache: bool = True):
-    # Initialize distributed training
-    if world_size > 1:
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        torch.cuda.set_device(rank)
-    
+def train(dryrun: bool = False, fp16: bool = True):
     set_seed(CFG.seed)
-    save_dir = Path('outputs'); save_dir.mkdir(exist_ok=True)
+    save_dir = Path('outputs')
+    save_dir.mkdir(exist_ok=True)
     
-    # Initialize data manager
-    data_manager = DataManager(use_mmap=True, cache_size=1000)
-
-    # ----------- data ----------------------------------------------------- #
-    train_seis, train_vel = [], []
-    for fam in ('FlatVel_A','FlatVel_B'):
-        s, v = data_manager.list_family_files(fam)
-        # If dryrun and files are missing, mock data to avoid NoneType error
-        if dryrun and (not s or not v):
-            # Create mock data for dryrun
-            import torch
-            train_seis = [torch.randn(1, 1, 100, 100)]
-            train_vel = [torch.randn(1, 1, 70, 70)]
-            break
-        train_seis += s if s else []
-        train_vel += v if v else []
-    if dryrun and (not train_seis or not train_vel):
-        # If still empty, create mock data
-        import torch
-        train_seis = [torch.randn(1, 1, 100, 100)]
-        train_vel = [torch.randn(1, 1, 70, 70)]
-    train_loader = data_manager.create_loader(
-        train_seis, train_vel, 
-        batch_size=CFG.batch, 
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-
-    # ----------- model/optim --------------------------------------------- #
-    model = SpecProjNet(
-        backbone=CFG.backbone,
-        pretrained=True,
-        ema_decay=CFG.ema_decay,
-    ).to(CFG.env.device)
+    # Initialize DataManager with memory tracking
+    data_manager = DataManager(use_mmap=True)
     
-    if world_size > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model)
-        
-    opt = torch.optim.AdamW(model.parameters(),
-                           lr=CFG.lr, weight_decay=CFG.weight_decay)
-    scaler = amp.GradScaler(enabled=fp16)
-    loss_fn = JointLoss(λ_inv=CFG.lambda_inv,
-                       λ_fwd=CFG.lambda_fwd,
-                       λ_pde=CFG.lambda_pde)
-
-    best_mae = 1e9
+    # Get training files for each family
+    train_loaders = []
+    for family in CFG.families:
+        seis_files, vel_files, family_type = data_manager.list_family_files(family)
+        loader = data_manager.create_loader(
+            seis_files=seis_files,
+            vel_files=vel_files,
+            family_type=family_type,
+            batch_size=CFG.batch_size,
+            shuffle=True,
+            num_workers=CFG.num_workers,
+            distributed=CFG.distributed
+        )
+        train_loaders.append(loader)
+    
+    # Initialize model and loss
+    model = get_model()
+    loss_fn = get_loss_fn()
+    
+    # Training loop
     for epoch in range(CFG.epochs):
-        model.train()
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch}')
-        for seis, vel in pbar:
-            seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-            
-            with amp.autocast(enabled=fp16):
-                v_pred = model(seis)
-                loss, loss_dict = loss_fn(v_pred, vel, seis_batch=seis)
-                    
-            scaler.scale(loss).backward()
-            scaler.step(opt); scaler.update(); opt.zero_grad()
-            
-            # Update EMA
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                model.module.update_ema()
-            else:
-                model.update_ema()
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': float(loss),
-                **loss_dict,
-                'mem': f"{torch.cuda.max_memory_allocated()/1e9:.1f}GB"
-            })
-            
-            if dryrun:
-                break
+        for loader in train_loaders:
+            for batch_idx, (x, y) in enumerate(loader):
+                # Move to GPU if available
+                x = x.cuda()
+                y = y.cuda()
+                
+                # Forward pass
+                pred = model(x)
+                loss = loss_fn(pred, y)
+                
+                # Backward pass
+                loss.backward()
+                
+                # Log memory stats periodically
+                if batch_idx % 100 == 0:
+                    memory_stats = data_manager.memory_tracker.get_stats()
+                    logging.info(f"Memory stats: {memory_stats}")
+                
+                # Rest of training loop...
                 
         # Validation
         model.eval()
@@ -861,55 +819,30 @@ def train(rank, world_size, dryrun: bool = False, fp16: bool = True, empty_cache
         with torch.no_grad():
             for seis, vel in train_loader:  # Using train set for now
                 seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-                # Use EMA model for validation
-                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                    v_pred = model.module.get_ema_model()(seis)
-                else:
-                    v_pred = model.get_ema_model()(seis)
-                val_mae += F.l1_loss(v_pred, vel).item()
+                v_pred = model.get_ema_model()(seis)
+                val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
         val_mae /= len(train_loader)
         
         # Save best model
         if val_mae < best_mae:
             best_mae = val_mae
-            if rank == 0:  # Only save on main process
-                torch.save(model.state_dict(), save_dir/'best.pth')
-        if rank == 0:  # Only save on main process
-            torch.save(model.state_dict(), save_dir/'last.pth')
+            torch.save(model.state_dict(), save_dir/'best.pth')
+        torch.save(model.state_dict(), save_dir/'last.pth')
         
         print(f"Epoch {epoch}: val_mae = {val_mae:.4f}")
         
         # Clear cache periodically
-        data_manager.clear_cache()
-        if empty_cache:
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
-    if world_size > 1:
-        dist.destroy_process_group()
-
-def main():
-    parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument('--dryrun', action='store_true', help='Train one minibatch only')
-    parser.add_argument('--fp16', action='store_true', default=True, help='Enable mixed precision training')
-    parser.add_argument('--empty_cache', action='store_true', default=True, help='Clear CUDA cache after each epoch')
-    parser.add_argument('--world_size', type=int, default=torch.cuda.device_count(), help='Number of GPUs to use')
-    args = parser.parse_args()
-    
-    if args.world_size > 1:
-        mp.spawn(
-            train,
-            args=(args.world_size, args.dryrun, args.fp16, args.empty_cache),
-            nprocs=args.world_size,
-            join=True
-        )
-    else:
-        train(0, 1, args.dryrun, args.fp16, args.empty_cache)
 
 if __name__ == '__main__':
-    main() 
+    train() 
 
 
 # %%
+# All data IO in this file must go through DataManager (src/core/data_manager.py)
+# Do NOT load data directly in this file.
+#
 # ## Inference
 
 
@@ -932,7 +865,7 @@ def format_submission(vel_map, oid):
 
 def infer(weights='outputs/best.pth'):
     # Initialize data manager
-    data_manager = DataManager(use_mmap=True, cache_size=1000)
+    data_manager = DataManager()
     
     # Load model
     model = SpecProjNet(
@@ -944,11 +877,10 @@ def infer(weights='outputs/best.pth'):
     model.eval()
 
     test_files = data_manager.get_test_files()
+    # For test, family_type is not needed, but we pass 'Fault' for single-sample-per-file
     test_loader = data_manager.create_loader(
-        test_files, vel=None,
-        batch_size=1, shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        test_files, test_files, 'Fault',
+        batch_size=1, shuffle=False
     )
 
     rows = []
@@ -970,9 +902,6 @@ def infer(weights='outputs/best.pth'):
             vel = vel.cpu().float().numpy()[0,0]
             rows += format_submission(vel, Path(oid[0]).stem)
             
-    # Clear cache after inference
-    data_manager.clear_cache()
-    
     pd.DataFrame(rows).to_csv('submission.csv', index=False)
 
 if __name__ == '__main__':

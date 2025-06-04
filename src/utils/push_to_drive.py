@@ -20,6 +20,9 @@ from tqdm import tqdm
 import gc
 import weakref
 
+# All data IO in this file must go through DataManager (src/core/data_manager.py)
+# Do NOT load data directly in this file.
+
 KAGGLE_DATA_DIR = Path("/kaggle/input/waveform-inversion")
 WORK_DIR = Path("/kaggle/working")
 ARCHIVE_PATH = WORK_DIR / "waveform-inversion.zip"
@@ -180,7 +183,7 @@ def zip_families():
     output_dir = WORK_DIR / 'zipped_families'
     output_dir.mkdir(exist_ok=True)
     for family in families:
-        seis_files, vel_files = data_manager.list_family_files(family)
+        seis_files, vel_files, _ = data_manager.list_family_files(family)
         zip_path = output_dir / f"{family}.zip"
         added_files = set()
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:

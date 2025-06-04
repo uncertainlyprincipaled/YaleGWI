@@ -40,7 +40,7 @@ class _Env:
             self.kind = 'sagemaker'
         else:
             self.kind = 'local'
-        self.device = 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES', '') != '' else 'cpu'
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
 
 class Config:
@@ -70,6 +70,9 @@ class Config:
             cls._inst.lambda_inv = 1.0
             cls._inst.lambda_fwd = 1.0
             cls._inst.lambda_pde = 0.1
+
+            # Enable joint training by default in Kaggle
+            cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
 
         return cls._inst
 
