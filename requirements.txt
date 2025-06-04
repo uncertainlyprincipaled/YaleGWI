@@ -1,4 +1,5 @@
 torch>=2.0.0
+torchvision>=0.15.0
 numpy>=1.21.0
 pandas>=1.3.0
 matplotlib>=3.4.0
@@ -11,4 +12,6 @@ polars>=0.20.0
 google-auth-oauthlib>=0.4.6
 google-auth-httplib2>=0.1.0
 google-api-python-client>=2.0.0
-psutil>=5.9.0  # For memory monitoring 
+psutil>=5.9.0  # For memory monitoring
+timm>=0.9.0
+monai>=1.2.0 

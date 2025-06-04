@@ -5,24 +5,27 @@
 import torch, random, numpy as np
 from config import CFG, save_cfg
 from data_manager import DataManager
-from specproj_hybrid import HybridSpecProj
+from model import SpecProjNet
 from losses import JointLoss
 from pathlib import Path
 from tqdm import tqdm
 import argparse
 import torch.cuda.amp as amp
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 def set_seed(seed:int):
     torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
 
-def train(dryrun: bool = False, enable_joint: bool = False):
+def train(rank, world_size, dryrun: bool = False, fp16: bool = True, empty_cache: bool = True):
+    # Initialize distributed training
+    if world_size > 1:
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        torch.cuda.set_device(rank)
+    
     set_seed(CFG.seed)
     save_dir = Path('outputs'); save_dir.mkdir(exist_ok=True)
     
-    # Update config
-    CFG.enable_joint = enable_joint
-    save_cfg(save_dir)
-
     # Initialize data manager
     data_manager = DataManager(use_mmap=True, cache_size=1000)
 
@@ -34,16 +37,24 @@ def train(dryrun: bool = False, enable_joint: bool = False):
     train_loader = data_manager.create_loader(
         train_seis, train_vel, 
         batch_size=CFG.batch, 
-        shuffle=True
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
     )
 
     # ----------- model/optim --------------------------------------------- #
-    model = HybridSpecProj().to(CFG.env.device)
-    if CFG.env.world_size > 1:
+    model = SpecProjNet(
+        backbone=CFG.backbone,
+        pretrained=True,
+        ema_decay=CFG.ema_decay,
+    ).to(CFG.env.device)
+    
+    if world_size > 1:
         model = torch.nn.parallel.DistributedDataParallel(model)
+        
     opt = torch.optim.AdamW(model.parameters(),
                            lr=CFG.lr, weight_decay=CFG.weight_decay)
-    scaler = amp.GradScaler()
+    scaler = amp.GradScaler(enabled=fp16)
     loss_fn = JointLoss(λ_inv=CFG.lambda_inv,
                        λ_fwd=CFG.lambda_fwd,
                        λ_pde=CFG.lambda_pde)
@@ -55,16 +66,18 @@ def train(dryrun: bool = False, enable_joint: bool = False):
         for seis, vel in pbar:
             seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
             
-            with amp.autocast():
-                if CFG.is_joint():
-                    v_pred, p_pred = model(seis, mode="joint")
-                    loss, loss_dict = loss_fn(v_pred, vel, p_pred, seis, seis)
-                else:
-                    v_pred, _ = model(seis, mode="inverse")
-                    loss, loss_dict = loss_fn(v_pred, vel, seis_batch=seis)
+            with amp.autocast(enabled=fp16):
+                v_pred = model(seis)
+                loss, loss_dict = loss_fn(v_pred, vel, seis_batch=seis)
                     
             scaler.scale(loss).backward()
             scaler.step(opt); scaler.update(); opt.zero_grad()
+            
+            # Update EMA
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                model.module.update_ema()
+            else:
+                model.update_ema()
             
             # Update progress bar
             pbar.set_postfix({
@@ -82,24 +95,49 @@ def train(dryrun: bool = False, enable_joint: bool = False):
         with torch.no_grad():
             for seis, vel in train_loader:  # Using train set for now
                 seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-                v_pred, _ = model(seis, mode="inverse")
+                # Use EMA model for validation
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    v_pred = model.module.get_ema_model()(seis)
+                else:
+                    v_pred = model.get_ema_model()(seis)
                 val_mae += F.l1_loss(v_pred, vel).item()
         val_mae /= len(train_loader)
         
         # Save best model
         if val_mae < best_mae:
             best_mae = val_mae
-            torch.save(model.state_dict(), save_dir/'best.pth')
-        torch.save(model.state_dict(), save_dir/'last.pth')
+            if rank == 0:  # Only save on main process
+                torch.save(model.state_dict(), save_dir/'best.pth')
+        if rank == 0:  # Only save on main process
+            torch.save(model.state_dict(), save_dir/'last.pth')
         
         print(f"Epoch {epoch}: val_mae = {val_mae:.4f}")
         
         # Clear cache periodically
         data_manager.clear_cache()
+        if empty_cache:
+            torch.cuda.empty_cache()
+            
+    if world_size > 1:
+        dist.destroy_process_group()
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--dryrun', action='store_true', help='Train one minibatch only')
-    parser.add_argument('--enable_joint', action='store_true', help='Enable joint forward-inverse training')
+    parser.add_argument('--fp16', action='store_true', default=True, help='Enable mixed precision training')
+    parser.add_argument('--empty_cache', action='store_true', default=True, help='Clear CUDA cache after each epoch')
+    parser.add_argument('--world_size', type=int, default=torch.cuda.device_count(), help='Number of GPUs to use')
     args = parser.parse_args()
-    train(args.dryrun, args.enable_joint) 
+    
+    if args.world_size > 1:
+        mp.spawn(
+            train,
+            args=(args.world_size, args.dryrun, args.fp16, args.empty_cache),
+            nprocs=args.world_size,
+            join=True
+        )
+    else:
+        train(0, 1, args.dryrun, args.fp16, args.empty_cache)
+
+if __name__ == '__main__':
+    main() 

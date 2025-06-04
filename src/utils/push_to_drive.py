@@ -7,7 +7,7 @@ import json
 from typing import Optional, Iterator
 from google.colab import drive
 import shutil
-from data_manager import DataManager
+from src.core.data_manager import DataManager
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -83,80 +83,6 @@ def cleanup_memory():
     
     gc.collect()
 
-def chunked_zip_files(source_dir: Path, zip_path: Path, chunk_size: int = CHUNK_SIZE) -> Iterator[tuple[int, int]]:
-    """Create a zip file in chunks to manage memory usage."""
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        total_size = 0
-        for root, _, files in os.walk(source_dir):
-            for file in files:
-                file_path = Path(root) / file
-                arcname = str(file_path.relative_to(source_dir))  # Convert to string
-                
-                # Get file size
-                file_size = file_path.stat().st_size
-                total_size += file_size
-                
-                # Add file to zip in chunks
-                with open(file_path, 'rb') as f:
-                    while True:
-                        chunk = f.read(chunk_size)
-                        if not chunk:
-                            break
-                        zipf.writestr(arcname, chunk)
-                        # Clear chunk from memory
-                        del chunk
-                        gc.collect()
-                        yield file_size, total_size
-                
-                # Clear file handle
-                f = None
-                gc.collect()
-
-def zip_dataset():
-    """Create a zip archive of the dataset with memory monitoring."""
-    print("📦 Zipping dataset...")
-    if ARCHIVE_PATH.exists():
-        print(f"⚠️  Archive already exists at {ARCHIVE_PATH}")
-        if input("Overwrite? (y/N): ").lower() != 'y':
-            print("Aborting...")
-            sys.exit(0)
-        ARCHIVE_PATH.unlink()
-    
-    try:
-        initial_memory = get_memory_usage()
-        print(f"Initial memory usage: {initial_memory:.1f}MB")
-        
-        # Create progress bar
-        total_files = sum(1 for _ in KAGGLE_DATA_DIR.rglob('*') if _.is_file())
-        pbar = tqdm(total=total_files, desc="Zipping files")
-        
-        # Zip files in chunks
-        for file_size, total_size in chunked_zip_files(KAGGLE_DATA_DIR, ARCHIVE_PATH):
-            pbar.update(1)
-            current_memory = get_memory_usage()
-            pbar.set_postfix({
-                'memory': f"{current_memory:.1f}MB",
-                'size': f"{total_size/1024/1024:.1f}MB"
-            })
-            
-            # Periodically force cleanup
-            if current_memory > initial_memory * 1.5:  # If memory usage increased by 50%
-                cleanup_memory()
-        
-        pbar.close()
-        final_memory = get_memory_usage()
-        print(f"✅ Created {ARCHIVE_PATH}")
-        print(f"Final memory usage: {final_memory:.1f}MB")
-        print(f"Memory delta: {final_memory - initial_memory:.1f}MB")
-        
-        # Cleanup after zipping
-        cleanup_memory()
-        
-    except Exception as e:
-        print(f"❌ Failed to create zip: {e}")
-        cleanup_memory()
-        sys.exit(1)
-
 def get_drive_service():
     """Get authenticated Google Drive service."""
     creds = None
@@ -189,22 +115,22 @@ def get_drive_service():
     gc.collect()
     return service
 
-def upload_to_drive(folder_id: str):
-    """Upload the zip archive to Google Drive using the Drive API."""
-    print("📤 Uploading to Google Drive...")
+def upload_to_drive(folder_id: str, file_path: Path):
+    """Upload the given zip archive to Google Drive using the Drive API."""
+    print(f"📤 Uploading {file_path.name} to Google Drive...")
     try:
         service = get_drive_service()
         
         file_metadata = {
-            'name': ARCHIVE_PATH.name,
+            'name': file_path.name,
             'parents': [folder_id]
         }
         
         # Get file size for progress bar
-        file_size = ARCHIVE_PATH.stat().st_size
+        file_size = file_path.stat().st_size
         
         media = MediaFileUpload(
-            str(ARCHIVE_PATH),
+            str(file_path),
             mimetype='application/zip',
             resumable=True,
             chunksize=CHUNK_SIZE
@@ -242,10 +168,47 @@ def upload_to_drive(folder_id: str):
         cleanup_memory()
         sys.exit(1)
 
+def zip_families():
+    """Zip each family/subfolder separately using DataManager, avoiding duplicates."""
+    print("\U0001F4E6 Zipping families in batches...")
+    data_manager = DataManager()
+    families = [
+        'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
+        'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
+        'CurveFault_A', 'CurveFault_B'
+    ]
+    output_dir = WORK_DIR / 'zipped_families'
+    output_dir.mkdir(exist_ok=True)
+    for family in families:
+        seis_files, vel_files = data_manager.list_family_files(family)
+        zip_path = output_dir / f"{family}.zip"
+        added_files = set()
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for f in seis_files:
+                arcname = f.name
+                if arcname not in added_files:
+                    zipf.write(f, arcname=arcname)
+                    added_files.add(arcname)
+            if vel_files:
+                for f in vel_files:
+                    arcname = f.name
+                    if arcname not in added_files:
+                        zipf.write(f, arcname=arcname)
+                        added_files.add(arcname)
+        print(f"\u2705 Zipped {family} to {zip_path}")
+    print("\U0001F389 All families zipped!")
+    cleanup_memory()
+
+def upload_all_zipped_families(folder_id: str):
+    """Upload all zipped family archives to Google Drive."""
+    zipped_dir = WORK_DIR / 'zipped_families'
+    for zip_file in zipped_dir.glob('*.zip'):
+        print(f"Uploading {zip_file.name}...")
+        upload_to_drive(folder_id, zip_file)
+
 def main():
     """Main entry point."""
     import argparse
-    
     try:
         # Check if we're running in a Jupyter notebook
         in_notebook = False
@@ -254,25 +217,18 @@ def main():
             in_notebook = IPython.get_ipython() is not None
         except (ImportError, NameError):
             pass
-
         if in_notebook:
-            # We're in a notebook, use default folder ID from config
             folder_id = get_drive_folder_id()
         else:
-            # We're in a regular Python environment, parse arguments
             parser = argparse.ArgumentParser(description="Push dataset to Google Drive")
             parser.add_argument("--folder-id", help="Google Drive folder ID")
             args = parser.parse_args()
-            
             if args.folder_id:
                 save_config(args.folder_id)
             folder_id = get_drive_folder_id()
-        
-        zip_dataset()
-        upload_to_drive(folder_id)
-        
+        zip_families()
+        upload_all_zipped_families(folder_id)
     finally:
-        # Final cleanup
         cleanup_memory()
 
 if __name__ == "__main__":

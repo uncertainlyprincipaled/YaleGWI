@@ -63,13 +63,17 @@ class SpecProjUNet(nn.Module):
         self.unet_up   = SmallUNet(in_ch=5, out_ch=1, base=chans, depth=depth)
         self.unet_down = SmallUNet(in_ch=5, out_ch=1, base=chans, depth=depth)
         self.fuse = nn.Conv2d(2, 1, 1)
+        
+        # Initialize 1→5 convolution with Dirac kernels
+        self.expand = nn.Conv2d(1, 5, 1, bias=False)
+        nn.init.dirac_(self.expand.weight)
 
     def forward(self, x):            # x (B,S,T,R)
         up, down = self.mask(x)      # still (B,S,T,R)
         # merge source dim into batch for UNet (expect 5 channels)
         B,S,T,R = up.shape
-        up   = up  .reshape(B*S, 1, T, R).repeat(1,5,1,1)
-        down = down.reshape(B*S, 1, T, R).repeat(1,5,1,1)
+        up   = self.expand(up.reshape(B*S, 1, T, R))
+        down = self.expand(down.reshape(B*S, 1, T, R))
         vu  = self.unet_up (up )
         vd  = self.unet_down(down)
         fused = self.fuse(torch.cat([vu, vd], 1))

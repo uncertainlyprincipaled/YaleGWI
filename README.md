@@ -1,42 +1,51 @@
 # SpecProj-UNet for Seismic Waveform Inversion
 
-This project implements a physics-guided neural network for seismic waveform inversion using spectral projectors and UNet architecture.
+## Overview
+A deep learning solution for seismic waveform inversion using a HGNet/ConvNeXt backbone with:
+- EMA (Exponential Moving Average) for stable training
+- AMP (Automatic Mixed Precision) for faster training
+- Distributed Data Parallel (DDP) for multi-GPU training
+- Test Time Augmentation (TTA) for improved inference
 
-## Project Structure
+## Quick Start
 
-```
-.
-├── src/
-│   ├── core/                 # Core implementation files
-│   │   ├── config.py        # Configuration and paths
-│   │   ├── data_utils.py    # Data loading and preprocessing
-│   │   ├── proj_mask.py     # Spectral projector implementation
-│   │   ├── specproj_unet.py # UNet architecture
-│   │   ├── losses.py        # Loss functions
-│   │   ├── train.py         # Training script
-│   │   └── infer.py         # Inference script
-│   └── utils/
-│       ├── update_kaggle_notebook.py  # Script to update Kaggle notebook
-│       └── watch_and_update.py       # File watcher for automatic updates
-├── kaggle_notebook.py       # Generated Kaggle notebook
-└── requirements.txt         # Project dependencies
+### Installation
+```bash
+pip install -r requirements.txt
 ```
 
-## Environment-Specific Setup
+### Basic Usage
+1. Train the model:
+```bash
+# Single GPU
+python src/core/train.py
+
+# Multi-GPU
+torchrun --nproc_per_node=N src/core/train.py
+```
+
+2. Generate predictions:
+```bash
+python src/core/infer.py
+```
+
+## Environment Setup
 
 ### Local Development
-- Clone the repository using git:
-  ```bash
-  git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
-  cd YaleGWI
-  ```
-- Install dependencies:
-  ```bash
-  pip install -r requirements.txt
-  ```
-- Download the dataset manually or using `kagglehub` as needed.
+1. Clone the repository:
+```bash
+git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+cd YaleGWI
+```
 
-### Configuration Flags
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Download the dataset manually or using `kagglehub` as needed.
+
+### Configuration
 The following flags can be set in `src/core/config.py` or via environment variables:
 
 - `enable_joint`: Enable joint forward-inverse paradigm (default: False)
@@ -52,9 +61,10 @@ export GWI_LATENT_H=32
 export GWI_LATENT_W=32
 ```
 
-### Google Colab
-**Note:** The repository cloning logic has been removed from `setup.py`. You must run the following code block in your first Colab cell to set up the environment:
+### Cloud Environments
 
+#### Google Colab
+1. Install Kaggle CLI and set up authentication:
 ```python
 # Install Kaggle CLI if needed
 !pip install kaggle
@@ -66,7 +76,10 @@ files.upload()  # Then move kaggle.json to ~/.kaggle/
 !mkdir -p ~/.kaggle
 !cp kaggle.json ~/.kaggle/
 !chmod 600 ~/.kaggle/kaggle.json
+```
 
+2. Download data and set up environment:
+```python
 # Download the competition data
 !kaggle competitions download -c waveform-inversion
 !unzip -q waveform-inversion.zip -d /content/data
@@ -75,12 +88,8 @@ files.upload()  # Then move kaggle.json to ~/.kaggle/
 %cd YaleGWI
 ```
 
-### Alternative: Load Dataset from Google Drive (Faster, More Reliable)
-
-To avoid throttled Kaggle-to-Colab downloads, we recommend uploading the dataset once from Kaggle to your own Google Drive. Then you can mount it from any Colab session.
-
-#### 1. In Kaggle:
-First, set up rclone with Google Drive:
+#### Alternative: Google Drive Setup (Recommended)
+1. In Kaggle:
 ```bash
 # Install rclone
 !pip install -q rclone
@@ -88,17 +97,12 @@ First, set up rclone with Google Drive:
 # Configure Google Drive (run this once)
 !rclone config
 # Follow the prompts to set up a new remote named "gdrive"
-# You'll need to authenticate with Google Drive
-```
 
-Then run the push script:
-```python
 # Run the push script
 !python3 src/utils/push_to_drive.py
 ```
 
-#### 2. In Colab:
-Mount your Google Drive and unzip the uploaded dataset:
+2. In Colab:
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
@@ -114,70 +118,54 @@ drive.mount('/content/drive')
 !pip install -r requirements.txt
 ```
 
-This method prevents redundant downloads and enables fast access across sessions. The dataset will be cached in your Google Drive, making subsequent Colab sessions much faster to start up.
-
-### Kaggle Notebooks
-To use this project in Kaggle:
-
+#### Kaggle Notebooks
 1. Create a new notebook in the [Waveform Inversion competition](https://www.kaggle.com/competitions/waveform-inversion)
 
-2. Add the following code to your first cell to automatically set up the environment and create cells:
-   ```python
-   # Clone repository (ignore error if already exists)
-   !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git || true
-   %cd YaleGWI
-   
-   # Install dependencies
-   !pip install -r requirements.txt
-   
-   # Import the notebook utility
-   from src.utils.notebook_utils import setup_kaggle_notebook
-   
-   # This will:
-   # 1. Set up the environment
-   # 2. Create and populate cells from kaggle_notebook.py
-   # 3. Execute each cell in sequence
-   setup_kaggle_notebook()
-   ```
+2. Add the following code to your first cell:
+```python
+# Clone repository (ignore error if already exists)
+!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git || true
+%cd YaleGWI
 
-**Note:** 
-- If you see a message about the destination path already existing, this is normal - it means the repository was already cloned.
-- The dependency installation may show "Requirement already satisfied" for many packages - this is expected as Kaggle notebooks come with many pre-installed packages.
-- CUDA-related packages may take a moment to download - this is normal.
+# Install dependencies
+!pip install -r requirements.txt
 
-The project will automatically detect the Kaggle environment and configure paths accordingly. The dataset is already available in Kaggle's input directory, so no additional download is needed.
+# Import the notebook utility
+from src.utils.notebook_utils import setup_kaggle_notebook
 
-The cells will be created with proper formatting and will be executed automatically. You can then modify and re-run individual cells as needed.
+# This will:
+# 1. Set up the environment
+# 2. Create and populate cells from kaggle_notebook.py
+# 3. Execute each cell in sequence
+setup_kaggle_notebook()
+```
 
-### AWS SageMaker
-- Clone the repository and ensure it is available in the appropriate directory (e.g., `/opt/ml/code/YaleGWI`).
-- The setup script will configure paths and expect the dataset in `/opt/ml/input/data`.
-
-## Automatic Notebook Updates
-
-The project includes an automatic update system that keeps the Kaggle notebook (`kaggle_notebook.py`) in sync with changes to the source files. There are two ways to use this:
-
-1. **Manual Update**: Run the update script directly:
-   ```bash
-   python src/utils/update_kaggle_notebook.py
-   ```
-
-2. **Automatic Updates**: Start the file watcher to automatically update the notebook when source files change:
-   ```bash
-   python src/utils/watch_and_update.py
-   ```
-
-The file watcher will monitor all Python files in the `src` directory and its subdirectories. When a file is modified, it will automatically run the update script to regenerate the Kaggle notebook.
+#### AWS SageMaker
+- Clone the repository to `/opt/ml/code/YaleGWI`
+- Dataset should be placed in `/opt/ml/input/data`
 
 ## Development Workflow
 
+### Automatic Notebook Updates
+The project includes an automatic update system that keeps the Kaggle notebook (`kaggle_notebook.py`) in sync with changes to the source files.
+
+1. **Manual Update**:
+```bash
+python src/utils/update_kaggle_notebook.py
+```
+
+2. **Automatic Updates**:
+```bash
+python src/utils/watch_and_update.py
+```
+
+### Development Process
 1. Make changes to the source files in `src/core/`
-2. The changes will be automatically reflected in `kaggle_notebook.py` if the file watcher is running
+2. Changes will be automatically reflected in `kaggle_notebook.py` if the file watcher is running
 3. If the file watcher is not running, manually run the update script
 4. Test your changes in the Kaggle notebook
 
 ## Requirements
-
 Install the required packages:
 ```bash
 pip install -r requirements.txt

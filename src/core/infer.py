@@ -6,7 +6,7 @@ import torch, pandas as pd
 from pathlib import Path
 from config import CFG
 from data_manager import DataManager
-from specproj_hybrid import HybridSpecProj
+from model import SpecProjNet
 
 def format_submission(vel_map, oid):
     # keep *odd* x-columns only (1,3,…,69)
@@ -17,26 +17,43 @@ def format_submission(vel_map, oid):
                       for i,v in enumerate(row.tolist())}})
     return rows
 
-def infer(weights='outputs/last.pth'):
+def infer(weights='outputs/best.pth'):
     # Initialize data manager
     data_manager = DataManager(use_mmap=True, cache_size=1000)
     
-    model = HybridSpecProj().to(CFG.env.device)
+    # Load model
+    model = SpecProjNet(
+        backbone=CFG.backbone,
+        pretrained=False,
+        ema_decay=0.0,  # No EMA for inference
+    ).to(CFG.env.device)
     model.load_state_dict(torch.load(weights, map_location=CFG.env.device))
     model.eval()
 
     test_files = data_manager.get_test_files()
     test_loader = data_manager.create_loader(
         test_files, vel=None,
-        batch_size=1, shuffle=False
+        batch_size=1, shuffle=False,
+        num_workers=4,
+        pin_memory=True,
     )
 
     rows = []
     with torch.no_grad(), torch.cuda.amp.autocast():
         for seis, oid in test_loader:
             seis = seis.to(CFG.env.device)
-            # Always use inverse mode for inference
-            vel, _ = model(seis, mode="inverse")
+            
+            # Original prediction
+            vel = model(seis)
+            
+            # TTA: Flip prediction
+            seis_flip = seis.flip(-1)  # Flip receiver dimension
+            vel_flip = model(seis_flip)
+            vel_flip = vel_flip.flip(-1)  # Flip back
+            
+            # Average predictions
+            vel = (vel + vel_flip) / 2
+            
             vel = vel.cpu().float().numpy()[0,0]
             rows += format_submission(vel, Path(oid[0]).stem)
             

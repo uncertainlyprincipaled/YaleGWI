@@ -84,4 +84,7 @@ def main():
     observer.join()
 
 if __name__ == '__main__':
-    main() 
+    if os.environ.get("AUTOUPDATE") == "1":
+        main()
+    else:
+        print("File watcher disabled. Set AUTOUPDATE=1 to enable.") 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os, json
 from pathlib import Path
 from typing import Literal, NamedTuple
+import torch
 
 # --------------------------------------------------------------------------- #
 #  Detect runtime (Kaggle / Colab / SageMaker / local) and expose a singleton #
@@ -58,18 +59,27 @@ class Config:
             cls._inst.weight_decay = 1e-3
             cls._inst.epochs  = 30
             cls._inst.lambda_pde = 0.1
+            cls._inst.dtype = "float16"  # Default dtype for tensors
 
-            # Joint forward-inverse paradigm flags
-            cls._inst.enable_joint = False  # Master switch for joint mode
-            cls._inst.latent_h = 16        # Latent space height
-            cls._inst.latent_w = 16        # Latent space width
-            cls._inst.lambda_fwd = 1.0     # Forward loss weight
-            cls._inst.lambda_inv = 1.0     # Inverse loss weight
+            # Model parameters
+            cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
+            cls._inst.ema_decay = 0.99
+            cls._inst.pretrained = True
+
+            # Loss weights
+            cls._inst.lambda_inv = 1.0
+            cls._inst.lambda_fwd = 1.0
+            cls._inst.lambda_pde = 0.1
+
         return cls._inst
 
     def is_joint(self) -> bool:
         """Helper to check if joint forward-inverse mode is enabled."""
         return self.enable_joint
+
+    def torch_dtype(self):
+        """Helper to get the torch dtype based on config."""
+        return getattr(torch, self.dtype)
 
 CFG = Config()
 

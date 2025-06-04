@@ -58,6 +58,18 @@ def setup_kaggle_notebook():
         if not Path('kaggle_notebook.py').exists():
             raise FileNotFoundError("kaggle_notebook.py not found. Make sure you're in the YaleGWI directory")
         
+        # Check if competition data is available
+        data_dir = Path('/kaggle/input/waveform-inversion')
+        if not data_dir.exists():
+            print("\n⚠️  Competition data not found!")
+            print("\nPlease add the competition dataset to your notebook:")
+            print("1. Click on the 'Data' tab")
+            print("2. Click 'Add Data'")
+            print("3. Search for 'Waveform Inversion'")
+            print("4. Click 'Add' on the competition dataset")
+            print("\nAfter adding the dataset, re-run this cell.")
+            return
+        
         # Set environment
         os.environ['GWI_ENV'] = 'kaggle'
         
@@ -70,5 +82,10 @@ def setup_kaggle_notebook():
         create_notebook_cells('kaggle_notebook.py')
         
     except Exception as e:
-        print(f"Error setting up notebook: {str(e)}", file=sys.stderr)
+        print(f"\n❌ Error setting up notebook: {str(e)}", file=sys.stderr)
+        if "kaggle_notebook.py not found" in str(e):
+            print("\nMake sure you've cloned the repository correctly:")
+            print("1. Run the first cell to clone the repository")
+            print("2. Wait for it to complete")
+            print("3. Then run this cell again")
         raise 
