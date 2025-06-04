@@ -33,7 +33,20 @@ def train(rank, world_size, dryrun: bool = False, fp16: bool = True, empty_cache
     train_seis, train_vel = [], []
     for fam in ('FlatVel_A','FlatVel_B'):
         s, v = data_manager.list_family_files(fam)
-        train_seis += s; train_vel += v
+        # If dryrun and files are missing, mock data to avoid NoneType error
+        if dryrun and (not s or not v):
+            # Create mock data for dryrun
+            import torch
+            train_seis = [torch.randn(1, 1, 100, 100)]
+            train_vel = [torch.randn(1, 1, 70, 70)]
+            break
+        train_seis += s if s else []
+        train_vel += v if v else []
+    if dryrun and (not train_seis or not train_vel):
+        # If still empty, create mock data
+        import torch
+        train_seis = [torch.randn(1, 1, 100, 100)]
+        train_vel = [torch.randn(1, 1, 70, 70)]
     train_loader = data_manager.create_loader(
         train_seis, train_vel, 
         batch_size=CFG.batch, 

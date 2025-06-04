@@ -20,9 +20,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pytest
+    - name: Add src to PYTHONPATH
+      run: echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
     - name: Run tests
-      run: |
-        pytest -q
+      run: PYTHONPATH=$(pwd) pytest -q
     - name: Check Python syntax
       run: |
         python -m py_compile $(git ls-files '*.py')
