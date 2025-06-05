@@ -1,0 +1,89 @@
+SpecProj-UNet: A Physics-Guided Neural Network for Seismic Waveform Inversion
+====================================================================
+
+1. Overview
+-----------
+The SpecProj-UNet is a hybrid deep learning architecture that combines physics-guided spectral projections with modern neural network components for seismic waveform inversion. The model addresses the challenge of reconstructing subsurface velocity models from seismic wavefield measurements while maintaining physical consistency.
+
+2. Core Components
+-----------------
+2.1 Spectral Projection Layer (PhysMask)
+- Purpose: Splits wavefield into up-going and down-going components
+- Implementation: Uses learned background slowness (c) and temperature (τ) parameters
+- Physics Basis: Implements frequency-wavenumber domain filtering
+- Key Equations:
+  * Ratio = ω / √(ω² + (c·k)²)
+  * Mask_up = sigmoid(Ratio/τ)
+  * Mask_down = sigmoid(-Ratio/τ)
+
+2.2 Spectral Assembler
+- Purpose: Reconstructs wavefield from up/down components
+- Implementation: Uses ε-regularized Moore-Penrose inverse
+- Physics Basis: Implements projection operator Π†
+- Key Equation: Π† = (Π^T Π + εI)^(-1) Π^T
+
+2.3 Invertible U-Net (IUNet)
+- Purpose: Latent space translation between wavefield and velocity domains
+- Architecture: Series of coupling layers with invertible transformations
+- Key Features:
+  * Approximately 24M parameters
+  * Coupling layers for invertible transformations
+  * Maintains information preservation
+
+2.4 Hybrid Decoders
+- Velocity Decoder: SmallUNet architecture
+- Wavefield Decoder: Simple convolutional decoder
+- Purpose: Map latent representations to physical quantities
+
+3. Theoretical Foundations
+-------------------------
+3.1 Physics-Guided Learning
+- Incorporates wave equation constraints
+- Uses PDE residuals for regularization
+- Maintains physical consistency through spectral projections
+
+3.2 Joint Forward-Inverse Learning
+- Simultaneously learns:
+  * Inverse mapping: seismic data → velocity model
+  * Forward mapping: velocity model → wavefield
+- Benefits:
+  * Improved generalization
+  * Better physical consistency
+  * More stable training
+
+3.3 Loss Functions
+- Inverse Loss: L1 loss on velocity prediction
+- Forward Loss: L1 loss on wavefield prediction
+- PDE Residual: Acoustic wave equation residual
+- Combined Loss: L = λ_inv·L_inv + λ_fwd·L_fwd + λ_pde·L_pde
+
+4. Implementation Details
+------------------------
+4.1 Memory Efficiency
+- Uses float16 precision
+- Implements memory-mapped data loading
+- Tracks memory usage during training
+
+4.2 Training Features
+- EMA (Exponential Moving Average)
+- AMP (Automatic Mixed Precision)
+- Distributed Data Parallel (DDP)
+- Test Time Augmentation (TTA)
+
+5. References
+------------
+[1] ICLR25FWI Paper (Section 1) - Mathematical formulation of spectral projections
+[2] "Invertible Neural Networks for Normalizing Flows" - IUNet architecture inspiration
+[3] "U-Net: Convolutional Networks for Biomedical Image Segmentation" - Base architecture
+[4] "Physics-Informed Neural Networks" - PDE residual implementation
+[5] "Deep Learning for Seismic Waveform Inversion" - Domain-specific applications
+
+6. Future Directions
+-------------------
+- Integration with more sophisticated wave equations
+- Extension to 3D seismic data
+- Incorporation of uncertainty quantification
+- Development of interpretable components
+- Integration with traditional FWI methods
+
+Note: This model represents a significant advancement in physics-guided deep learning for seismic inversion, combining traditional physical principles with modern neural network architectures to achieve both accuracy and physical consistency. 

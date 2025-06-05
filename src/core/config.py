@@ -60,6 +60,8 @@ class Config:
             cls._inst.epochs  = 30
             cls._inst.lambda_pde = 0.1
             cls._inst.dtype = "float16"  # Default dtype for tensors
+            cls._inst.num_workers = 4  # Number of workers for data loading
+            cls._inst.distributed = False  # Whether to use distributed training
 
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"

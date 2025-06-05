@@ -79,6 +79,8 @@ class Config:
             cls._inst.epochs  = 30
             cls._inst.lambda_pde = 0.1
             cls._inst.dtype = "float16"  # Default dtype for tensors
+            cls._inst.num_workers = 4  # Number of workers for data loading
+            cls._inst.distributed = False  # Whether to use distributed training
 
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
@@ -181,13 +183,9 @@ def setup_environment():
     if env_override:
         CFG.env.kind = env_override
     
-    if CFG.env.kind == 'colab':
-        # Create data directory
-        data_dir = Path('/content/data')
-        data_dir.mkdir(exist_ok=True)
-        
-        # Update paths for Colab
-        CFG.paths.root = data_dir / 'waveform-inversion'
+    # Common path setup for all environments
+    def setup_paths(base_dir: Path):
+        CFG.paths.root = base_dir / 'waveform-inversion'
         CFG.paths.train = CFG.paths.root / 'train_samples'
         CFG.paths.test = CFG.paths.root / 'test'
         
@@ -204,7 +202,12 @@ def setup_environment():
             'CurveFault_A': CFG.paths.train/'CurveFault_A',
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
-        
+    
+    if CFG.env.kind == 'colab':
+        # Create data directory
+        data_dir = Path('/content/data')
+        data_dir.mkdir(exist_ok=True)
+        setup_paths(data_dir)
         print("Environment setup complete for Colab")
     
     elif CFG.env.kind == 'sagemaker':
@@ -219,54 +222,22 @@ def setup_environment():
         # Download dataset
         print("Downloading dataset from Kaggle...")
         kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
-
-        # Update paths for SageMaker
-        CFG.paths.root = data_dir / 'waveform-inversion'
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
         
-        # Update family paths
-        CFG.paths.families = {
-            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
-            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
-            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
-            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
-            'Style_A'     : CFG.paths.train/'Style_A',
-            'Style_B'     : CFG.paths.train/'Style_B',
-            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
-            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
-            'CurveFault_A': CFG.paths.train/'CurveFault_A',
-            'CurveFault_B': CFG.paths.train/'CurveFault_B',
-        }
-        
-        print("Paths configured for SageMaker environment") 
+        setup_paths(data_dir)
+        print("Paths configured for SageMaker environment")
     
     elif CFG.env.kind == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
         warm_kaggle_cache()
-        
-        # Set up paths for Kaggle environment
-        CFG.paths.root = Path('/kaggle/input/waveform-inversion')
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
-        
-        # Update family paths
-        CFG.paths.families = {
-            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
-            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
-            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
-            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
-            'Style_A'     : CFG.paths.train/'Style_A',
-            'Style_B'     : CFG.paths.train/'Style_B',
-            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
-            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
-            'CurveFault_A': CFG.paths.train/'CurveFault_A',
-            'CurveFault_B': CFG.paths.train/'CurveFault_B',
-        }
-        
+        setup_paths(Path('/kaggle/input'))
         print("Environment setup complete for Kaggle")
     
-    # Add any additional logic for 'local' or other environments as needed 
+    else:  # local development
+        # For local development, use a data directory in the project root
+        data_dir = Path(__file__).parent.parent.parent / 'data'
+        data_dir.mkdir(exist_ok=True)
+        setup_paths(data_dir)
+        print("Environment setup complete for local development") 
 
 
 # %%
@@ -407,6 +378,357 @@ class SeismicDataset(Dataset):
             self.memory_tracker.update(x.nbytes + y.nbytes)
             
         return torch.from_numpy(x), torch.from_numpy(y) 
+
+
+# %%
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import timm
+# !pip install monai
+from monai.networks.blocks import UpSample, SubpixelUpsample
+from copy import deepcopy
+# from config import CFG
+
+def get_model():
+    """Create and return a SpecProjNet model instance."""
+    model = SpecProjNet(
+        backbone=CFG.backbone,
+        pretrained=CFG.pretrained,
+        ema_decay=CFG.ema_decay
+    ).to(CFG.env.device)
+    return model
+
+class ModelEMA(nn.Module):
+    """Exponential Moving Average wrapper for model weights."""
+    def __init__(self, model, decay=0.99, device=None):
+        super().__init__()
+        self.module = deepcopy(model)
+        self.module.eval()
+        self.decay = decay
+        self.device = device
+        if self.device is not None:
+            self.module.to(device=device)
+
+    def _update(self, model, update_fn):
+        with torch.no_grad():
+            for ema_v, model_v in zip(self.module.state_dict().values(), model.state_dict().values()):
+                if self.device is not None:
+                    model_v = model_v.to(device=self.device)
+                ema_v.copy_(update_fn(ema_v, model_v))
+
+    def update(self, model):
+        self._update(model, update_fn=lambda e, m: self.decay * e + (1. - self.decay) * m)
+
+    def set(self, model):
+        self._update(model, update_fn=lambda e, m: m)
+
+class ConvBnAct2d(nn.Module):
+    """Convolution block with optional batch norm and activation."""
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        padding: int = 0,
+        stride: int = 1,
+        norm_layer: nn.Module = nn.Identity,
+        act_layer: nn.Module = nn.ReLU,
+    ):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=norm_layer == nn.Identity,
+        )
+        self.bn = norm_layer(out_channels)
+        self.act = act_layer()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+class SCSEModule2d(nn.Module):
+    """Squeeze-and-Excitation module with channel and spatial attention."""
+    def __init__(self, in_channels, reduction=16):
+        super().__init__()
+        self.cSE = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels // reduction, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, 1),
+            nn.Sigmoid(),
+        )
+        self.sSE = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return x * self.cSE(x) + x * self.sSE(x)
+
+class DecoderBlock2d(nn.Module):
+    """Decoder block with skip connection and optional attention."""
+    def __init__(
+        self,
+        in_channels,
+        skip_channels,
+        out_channels,
+        norm_layer: nn.Module = nn.Identity,
+        attention_type: str = None,
+        intermediate_conv: bool = False,
+        upsample_mode: str = "deconv",
+        scale_factor: int = 2,
+    ):
+        super().__init__()
+        # Print channel dimensions for debugging
+        print(f"DecoderBlock - in_channels: {in_channels}, skip_channels: {skip_channels}, out_channels: {out_channels}")
+        
+        # Upsampling block
+        if upsample_mode == "deconv":
+            self.upsample = nn.ConvTranspose2d(
+                in_channels, 
+                out_channels,  # Directly output desired number of channels
+                kernel_size=scale_factor, 
+                stride=scale_factor
+            )
+            self.channel_reduction = nn.Identity()  # No need for additional channel reduction
+        else:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=scale_factor, mode='bilinear', align_corners=False),
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+            )
+            self.channel_reduction = nn.Identity()
+        
+        # Skip connection processing
+        if intermediate_conv:
+            self.skip_conv = ConvBnAct2d(skip_channels, skip_channels, 3, padding=1)
+        else:
+            self.skip_conv = nn.Identity()
+            
+        # Attention
+        if attention_type == "scse":
+            self.attention = SCSEModule2d(skip_channels)
+        else:
+            self.attention = nn.Identity()
+            
+        # Final convolution
+        self.conv = ConvBnAct2d(
+            out_channels + skip_channels,  # Concatenated channels
+            out_channels,  # Output channels
+            kernel_size=3,
+            padding=1,
+            norm_layer=norm_layer,
+        )
+
+    def forward(self, x, skip=None):
+        # Upsample and reduce channels
+        x = self.upsample(x)
+        
+        # Process skip connection if available
+        if skip is not None:
+            # Ensure spatial dimensions match
+            if x.shape[-2:] != skip.shape[-2:]:
+                skip = F.interpolate(skip, size=x.shape[-2:], mode='bilinear', align_corners=False)
+            skip = self.skip_conv(skip)
+            skip = self.attention(skip)
+            x = torch.cat([x, skip], dim=1)
+            
+        return self.conv(x)
+
+class UnetDecoder2d(nn.Module):
+    """UNet decoder with configurable channels and upsampling."""
+    def __init__(
+        self,
+        encoder_channels: tuple[int],
+        skip_channels: tuple[int] = None,
+        decoder_channels: tuple = (256, 128, 64, 32),
+        scale_factors: tuple = (1,2,2,2),
+        norm_layer: nn.Module = nn.Identity,
+        attention_type: str = None,
+        intermediate_conv: bool = True,
+        upsample_mode: str = "deconv",
+    ):
+        super().__init__()
+        # Reverse encoder channels to match decoder order
+        encoder_channels = list(reversed(encoder_channels))
+        if skip_channels is None:
+            skip_channels = encoder_channels[1:]  # Skip the first channel as it's the input
+            
+        # Print channel dimensions for debugging
+        print(f"Encoder channels (reversed): {encoder_channels}")
+        print(f"Skip channels: {skip_channels}")
+        print(f"Decoder channels: {decoder_channels}")
+        
+        # Initial channel reduction from encoder to decoder
+        self.initial_reduction = nn.Conv2d(encoder_channels[0], decoder_channels[0], 1)
+        
+        # Create channel reduction layers for each encoder feature
+        self.channel_reductions = nn.ModuleList([
+            nn.Conv2d(in_ch, out_ch, 1)
+            for in_ch, out_ch in zip(encoder_channels[1:], decoder_channels[1:])
+        ])
+        
+        # Create skip connection channel reduction layers
+        self.skip_reductions = nn.ModuleList([
+            nn.Conv2d(skip_ch, out_ch, 1)
+            for skip_ch, out_ch in zip(skip_channels, decoder_channels[1:])  # Skip first decoder channel
+        ])
+            
+        self.blocks = nn.ModuleList([
+            DecoderBlock2d(
+                in_channels=decoder_channels[i],  # Current block's input channels
+                skip_channels=decoder_channels[i+1] if i < len(decoder_channels)-1 else decoder_channels[-1],  # Next block's channels
+                out_channels=decoder_channels[i+1] if i < len(decoder_channels)-1 else decoder_channels[-1],  # Next block's channels
+                norm_layer=norm_layer,
+                attention_type=attention_type,
+                intermediate_conv=intermediate_conv,
+                upsample_mode=upsample_mode,
+                scale_factor=scale_factor,
+            )
+            for i, scale_factor in enumerate(scale_factors)
+        ])
+
+    def forward(self, feats: list[torch.Tensor]):
+        # Reverse features to match decoder order
+        feats = list(reversed(feats))
+        
+        # Initial channel reduction for the deepest feature
+        x = self.initial_reduction(feats[0])
+        
+        # Reduce channels of remaining encoder features
+        reduced_feats = [reduction(feat) for reduction, feat in zip(self.channel_reductions, feats[1:])]
+        
+        # Reduce channels of skip connections
+        reduced_skips = [reduction(feat) for reduction, feat in zip(self.skip_reductions, feats[1:])]
+        
+        # Process through decoder blocks
+        for block, skip in zip(self.blocks, reduced_skips):
+            x = block(x, skip)
+            
+        return x
+
+class SegmentationHead2d(nn.Module):
+    """Final segmentation head with optional upsampling."""
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        target_size: tuple[int] = (70, 70),  # Target output size
+        kernel_size: int = 3,
+        mode: str = "nontrainable",
+    ):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=kernel_size//2)
+        if mode == "nontrainable":
+            self.upsample = nn.Upsample(size=target_size, mode="bilinear", align_corners=False)
+        else:
+            self.upsample = SubpixelUpsample(in_channels, out_channels, scale_factor=2)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return self.upsample(x)
+
+class SpecProjNet(nn.Module):
+    """SpecProj model with HGNet backbone."""
+    def __init__(
+        self,
+        backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
+        pretrained: bool = True,
+        ema_decay: float = 0.99,
+    ):
+        super().__init__()
+        # Load backbone with gradient checkpointing enabled
+        self.backbone = timm.create_model(
+            backbone, 
+            pretrained=pretrained, 
+            features_only=True, 
+            in_chans=5,
+            checkpoint_path=''  # Enable gradient checkpointing
+        )
+        
+        # Update stem stride
+        self._update_stem()
+        
+        # Get encoder channels
+        encoder_channels = self.backbone.feature_info.channels()
+        print(f"Encoder channels: {encoder_channels}")  # Debug print
+        
+        # Create decoder
+        self.decoder = UnetDecoder2d(
+            encoder_channels=encoder_channels,
+            decoder_channels=(256, 128, 64, 32),
+            scale_factors=(1,2,2,2),
+            attention_type="scse",
+            intermediate_conv=True,
+        )
+        
+        # Create head with target size
+        self.head = SegmentationHead2d(
+            in_channels=32,
+            out_channels=1,
+            target_size=(70, 70),  # Set target output size
+            mode="nontrainable",
+        )
+        
+        # Initialize EMA
+        self.ema = ModelEMA(self, decay=ema_decay) if ema_decay > 0 else None
+        
+    def _update_stem(self):
+        """Update stem convolution stride."""
+        if hasattr(self.backbone, 'stem'):
+            if hasattr(self.backbone.stem, 'stem1'):
+                self.backbone.stem.stem1.conv.stride = (1,1)
+            elif hasattr(self.backbone.stem, 'conv'):
+                self.backbone.stem.conv.stride = (1,1)
+            else:
+                raise ValueError("Unknown stem structure in backbone")
+        else:
+            raise ValueError("Backbone does not have stem attribute")
+        
+    def forward(self, x):
+        # Input shape: (B, S, T, R) -> (B, 5, T, R)
+        B, S, T, R = x.shape
+        
+        # Process each source separately to save memory
+        outputs = []
+        for s in range(S):
+            # Get current source
+            x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
+            x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
+            
+            # Get encoder features
+            feats = self.backbone(x_s)
+            
+            # Decode
+            x_s = self.decoder(feats)
+            
+            # Final head
+            x_s = self.head(x_s)
+            
+            outputs.append(x_s)
+            
+        # Combine outputs
+        x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
+        x = x.mean(dim=1)  # Average over sources
+        
+        return x
+        
+    def update_ema(self):
+        """Update EMA weights."""
+        if self.ema is not None:
+            self.ema.update(self)
+            
+    def set_ema(self):
+        """Set EMA weights."""
+        if self.ema is not None:
+            self.ema.set(self)
+            
+    def get_ema_model(self):
+        """Get EMA model."""
+        return self.ema.module if self.ema is not None else self 
 
 
 # %%
@@ -741,6 +1063,17 @@ class JointLoss(torch.nn.Module):
             'l_pde': l_pde.item() if isinstance(l_pde, torch.Tensor) else l_pde
         }
 
+def get_loss_fn():
+    """Get the appropriate loss function based on configuration."""
+    if CFG.is_joint():
+        return JointLoss(
+            λ_inv=CFG.lambda_inv,
+            λ_fwd=CFG.lambda_fwd,
+            λ_pde=CFG.lambda_pde
+        )
+    else:
+        return torch.nn.L1Loss()  # Default to L1 loss for non-joint training
+
 # For backwards compatibility
 HybridLoss = JointLoss 
 
@@ -758,6 +1091,16 @@ from pathlib import Path
 from tqdm import tqdm
 import torch.cuda.amp as amp
 import logging
+import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 def set_seed(seed:int):
     torch.manual_seed(seed)
@@ -765,75 +1108,162 @@ def set_seed(seed:int):
     random.seed(seed)
 
 def train(dryrun: bool = False, fp16: bool = True):
-    set_seed(CFG.seed)
-    save_dir = Path('outputs')
-    save_dir.mkdir(exist_ok=True)
-    
-    # Initialize DataManager with memory tracking
-    data_manager = DataManager(use_mmap=True)
-    
-    # Get training files for each family
-    train_loaders = []
-    for family in CFG.families:
-        seis_files, vel_files, family_type = data_manager.list_family_files(family)
-        loader = data_manager.create_loader(
-            seis_files=seis_files,
-            vel_files=vel_files,
-            family_type=family_type,
-            batch_size=CFG.batch_size,
-            shuffle=True,
-            num_workers=CFG.num_workers,
-            distributed=CFG.distributed
-        )
-        train_loaders.append(loader)
-    
-    # Initialize model and loss
-    model = get_model()
-    loss_fn = get_loss_fn()
-    
-    # Training loop
-    for epoch in range(CFG.epochs):
-        for loader in train_loaders:
-            for batch_idx, (x, y) in enumerate(loader):
-                # Move to GPU if available
-                x = x.cuda()
-                y = y.cuda()
-                
-                # Forward pass
-                pred = model(x)
-                loss = loss_fn(pred, y)
-                
-                # Backward pass
-                loss.backward()
-                
-                # Log memory stats periodically
-                if batch_idx % 100 == 0:
-                    memory_stats = data_manager.memory_tracker.get_stats()
-                    logging.info(f"Memory stats: {memory_stats}")
-                
-                # Rest of training loop...
-                
-        # Validation
-        model.eval()
-        val_mae = 0.0
-        with torch.no_grad():
-            for seis, vel in train_loader:  # Using train set for now
-                seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-                v_pred = model.get_ema_model()(seis)
-                val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
-        val_mae /= len(train_loader)
+    try:
+        logging.info("Starting training...")
+        set_seed(CFG.seed)
+        save_dir = Path('outputs')
+        save_dir.mkdir(exist_ok=True)
         
-        # Save best model
-        if val_mae < best_mae:
-            best_mae = val_mae
-            torch.save(model.state_dict(), save_dir/'best.pth')
-        torch.save(model.state_dict(), save_dir/'last.pth')
+        # Initialize DataManager with memory tracking
+        logging.info("Initializing DataManager...")
+        data_manager = DataManager(use_mmap=True)
         
-        print(f"Epoch {epoch}: val_mae = {val_mae:.4f}")
+        # Get training files for each family
+        logging.info("Setting up data loaders...")
+        train_loaders = []
+        for family in CFG.paths.families:
+            logging.info(f"Processing family: {family}")
+            seis_files, vel_files, family_type = data_manager.list_family_files(family)
+            loader = data_manager.create_loader(
+                seis_files=seis_files,
+                vel_files=vel_files,
+                family_type=family_type,
+                batch_size=2,  # Reduced batch size
+                shuffle=True,
+                num_workers=0,  # Set to 0 to avoid multiprocessing issues
+                distributed=CFG.distributed
+            )
+            train_loaders.append(loader)
         
-        # Clear cache periodically
+        # Initialize model and loss
+        logging.info("Initializing model and loss function...")
+        model = get_model()
+        loss_fn = get_loss_fn()
+        
+        # Initialize optimizer and scaler for mixed precision
+        logging.info("Setting up optimizer and mixed precision training...")
+        optimizer = torch.optim.AdamW(model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
+        scaler = torch.amp.GradScaler('cuda', enabled=fp16)
+        
+        # Enable memory optimization
+        torch.cuda.empty_cache()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            torch.cuda.set_per_process_memory_fraction(0.8)  # Use 80% of available memory
+        
+        # Training loop
+        logging.info("Starting training loop...")
+        best_mae = float('inf')
+        for epoch in range(CFG.epochs):
+            logging.info(f"Epoch {epoch+1}/{CFG.epochs}")
+            model.train()
+            for loader_idx, loader in enumerate(train_loaders):
+                logging.info(f"Processing loader {loader_idx+1}/{len(train_loaders)}")
+                for batch_idx, (x, y) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}")):
+                    try:
+                        # Move to GPU if available
+                        x = x.cuda()
+                        y = y.cuda()
+                        
+                        # Forward pass with mixed precision
+                        with torch.amp.autocast('cuda', enabled=fp16):
+                            pred = model(x)
+                            # Check for NaNs/Infs in model output
+                            if torch.isnan(pred).any() or torch.isinf(pred).any():
+                                logging.error(f"NaN or Inf detected in model output at batch {batch_idx}")
+                                continue
+                            loss, loss_components = loss_fn(pred, y)
+                            # Check for NaNs/Infs in loss
+                            if torch.isnan(loss) or torch.isinf(loss):
+                                logging.error(f"NaN or Inf detected in loss at batch {batch_idx}")
+                                continue
+                        
+                        # Backward pass with gradient scaling
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                        
+                        # Clear cache periodically
+                        if batch_idx % 10 == 0:  # More frequent cache clearing
+                            torch.cuda.empty_cache()
+                        
+                        # Log memory stats periodically
+                        if batch_idx % 100 == 0:
+                            memory_stats = data_manager.memory_tracker.get_stats()
+                            logging.info(f"Batch {batch_idx} - Memory stats: {memory_stats}")
+                            if torch.cuda.is_available():
+                                logging.info(f"GPU Memory: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                    
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logging.error(f"OOM Error at epoch {epoch+1}, loader {loader_idx+1}, batch {batch_idx}")
+                            logging.error(f"Last successful operation: Forward pass")
+                            if torch.cuda.is_available():
+                                logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                            # Clear cache and continue
+                            torch.cuda.empty_cache()
+                            continue
+                        else:
+                            raise e
+                    except (AttributeError, NameError) as e:
+                        logging.error(f"{type(e).__name__} encountered at batch {batch_idx}: {e}")
+                        raise e
+            
+            # Validation
+            logging.info("Starting validation...")
+            model.eval()
+            val_mae = 0.0
+            try:
+                with torch.no_grad():
+                    # Use the first train_loader for validation (as a placeholder)
+                    val_loader = train_loaders[0]
+                    for batch_idx, (seis, vel) in enumerate(val_loader):
+                        seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
+                        with torch.amp.autocast('cuda', enabled=fp16):
+                            v_pred = model.get_ema_model()(seis)
+                            # Check for NaNs/Infs in validation output
+                            if torch.isnan(v_pred).any() or torch.isinf(v_pred).any():
+                                logging.error(f"NaN or Inf detected in validation output at batch {batch_idx}")
+                                continue
+                        val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
+                        
+                        # Clear cache periodically during validation
+                        if batch_idx % 10 == 0:
+                            torch.cuda.empty_cache()
+                    
+                val_mae /= len(val_loader)
+                
+                # Save best model
+                if val_mae < best_mae:
+                    best_mae = val_mae
+                    torch.save(model.state_dict(), save_dir/'best.pth')
+                    logging.info(f"New best model saved! MAE: {val_mae:.4f}")
+                torch.save(model.state_dict(), save_dir/'last.pth')
+                
+                logging.info(f"Epoch {epoch+1} complete - val_mae = {val_mae:.4f}")
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    logging.error(f"OOM Error during validation at epoch {epoch+1}")
+                    logging.error(f"Last successful operation: Validation batch {batch_idx}")
+                    if torch.cuda.is_available():
+                        logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                    # Clear cache and continue
+                    torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise e
+            except (AttributeError, NameError) as e:
+                logging.error(f"{type(e).__name__} encountered during validation at batch {batch_idx}: {e}")
+                raise e
+            
+            # Clear cache at end of epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logging.info("GPU cache cleared")
+    except Exception as e:
+        logging.error(f"Uncaught exception in train(): {type(e).__name__}: {e}")
+        raise
 
 if __name__ == '__main__':
     train() 

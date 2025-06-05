@@ -44,13 +44,9 @@ def setup_environment():
     if env_override:
         CFG.env.kind = env_override
     
-    if CFG.env.kind == 'colab':
-        # Create data directory
-        data_dir = Path('/content/data')
-        data_dir.mkdir(exist_ok=True)
-        
-        # Update paths for Colab
-        CFG.paths.root = data_dir / 'waveform-inversion'
+    # Common path setup for all environments
+    def setup_paths(base_dir: Path):
+        CFG.paths.root = base_dir / 'waveform-inversion'
         CFG.paths.train = CFG.paths.root / 'train_samples'
         CFG.paths.test = CFG.paths.root / 'test'
         
@@ -67,7 +63,12 @@ def setup_environment():
             'CurveFault_A': CFG.paths.train/'CurveFault_A',
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
-        
+    
+    if CFG.env.kind == 'colab':
+        # Create data directory
+        data_dir = Path('/content/data')
+        data_dir.mkdir(exist_ok=True)
+        setup_paths(data_dir)
         print("Environment setup complete for Colab")
     
     elif CFG.env.kind == 'sagemaker':
@@ -82,51 +83,19 @@ def setup_environment():
         # Download dataset
         print("Downloading dataset from Kaggle...")
         kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
-
-        # Update paths for SageMaker
-        CFG.paths.root = data_dir / 'waveform-inversion'
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
         
-        # Update family paths
-        CFG.paths.families = {
-            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
-            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
-            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
-            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
-            'Style_A'     : CFG.paths.train/'Style_A',
-            'Style_B'     : CFG.paths.train/'Style_B',
-            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
-            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
-            'CurveFault_A': CFG.paths.train/'CurveFault_A',
-            'CurveFault_B': CFG.paths.train/'CurveFault_B',
-        }
-        
-        print("Paths configured for SageMaker environment") 
+        setup_paths(data_dir)
+        print("Paths configured for SageMaker environment")
     
     elif CFG.env.kind == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
         warm_kaggle_cache()
-        
-        # Set up paths for Kaggle environment
-        CFG.paths.root = Path('/kaggle/input/waveform-inversion')
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
-        
-        # Update family paths
-        CFG.paths.families = {
-            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
-            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
-            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
-            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
-            'Style_A'     : CFG.paths.train/'Style_A',
-            'Style_B'     : CFG.paths.train/'Style_B',
-            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
-            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
-            'CurveFault_A': CFG.paths.train/'CurveFault_A',
-            'CurveFault_B': CFG.paths.train/'CurveFault_B',
-        }
-        
+        setup_paths(Path('/kaggle/input'))
         print("Environment setup complete for Kaggle")
     
-    # Add any additional logic for 'local' or other environments as needed 
+    else:  # local development
+        # For local development, use a data directory in the project root
+        data_dir = Path(__file__).parent.parent.parent / 'data'
+        data_dir.mkdir(exist_ok=True)
+        setup_paths(data_dir)
+        print("Environment setup complete for local development") 

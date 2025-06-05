@@ -55,5 +55,16 @@ class JointLoss(torch.nn.Module):
             'l_pde': l_pde.item() if isinstance(l_pde, torch.Tensor) else l_pde
         }
 
+def get_loss_fn():
+    """Get the appropriate loss function based on configuration."""
+    if CFG.is_joint():
+        return JointLoss(
+            λ_inv=CFG.lambda_inv,
+            λ_fwd=CFG.lambda_fwd,
+            λ_pde=CFG.lambda_pde
+        )
+    else:
+        return torch.nn.L1Loss()  # Default to L1 loss for non-joint training
+
 # For backwards compatibility
 HybridLoss = JointLoss 
