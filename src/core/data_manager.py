@@ -130,6 +130,10 @@ class SeismicDataset(Dataset):
         std = x.std(axis=(1,2), keepdims=True) + 1e-6
         x = (x - mu) / std
         
+        # Add source dimension if not present
+        if len(x.shape) == 3:  # (T,R) -> (1,T,R)
+            x = x[None]
+        
         # Track memory usage
         if self.memory_tracker:
             self.memory_tracker.update(x.nbytes + y.nbytes)

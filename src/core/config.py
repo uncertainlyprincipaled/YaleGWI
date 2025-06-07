@@ -63,11 +63,19 @@ class Config:
             cls._inst.num_workers = 4  # Number of workers for data loading
             cls._inst.distributed = False  # Whether to use distributed training
 
+            # Memory optimization settings
+            cls._inst.memory_efficient = True  # Enable memory efficient operations
+            cls._inst.use_amp = True  # Enable automatic mixed precision
+            cls._inst.gradient_checkpointing = True  # Enable gradient checkpointing
+
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
             cls._inst.ema_decay = 0.99
             cls._inst.pretrained = True
 
+            # Inference weight path (default for Kaggle dataset)
+            cls._inst.weight_path = "/kaggle/input/yalegwi/best.pth"
+            
             # Loss weights
             cls._inst.lambda_inv = 1.0
             cls._inst.lambda_fwd = 1.0

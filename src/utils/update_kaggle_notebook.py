@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 from typing import List
 
-def extract_code_blocks(content: str) -> List[str]:
+def extract_code_blocks(content: str, source_path: str = None) -> List[tuple[str, str]]:
     """Extract code blocks from Python file."""
     blocks = []
     current_block = []
@@ -11,18 +11,20 @@ def extract_code_blocks(content: str) -> List[str]:
     for line in content.split('\n'):
         if line.startswith('# %%'):
             if current_block:
-                blocks.append('\n'.join(current_block))
+                blocks.append(('\n'.join(current_block), source_path))
                 current_block = []
         else:
             current_block.append(line)
     
     if current_block:
-        blocks.append('\n'.join(current_block))
+        blocks.append(('\n'.join(current_block), source_path))
     
     return blocks
 
-def create_notebook_block(content: str) -> str:
+def create_notebook_block(content: str, source_path: str = None) -> str:
     """Create a notebook code block."""
+    if source_path:
+        return f'# %%\n# Source: {source_path}\n{content}\n\n'
     return f'# %%\n{content}\n\n'
 
 def update_kaggle_notebook():
@@ -48,19 +50,19 @@ def update_kaggle_notebook():
     all_blocks = []
     
     # Add header comment
-    all_blocks.append("# SpecProj-UNet for Seismic Waveform Inversion\n"
+    all_blocks.append(("# SpecProj-UNet for Seismic Waveform Inversion\n"
                      "# This notebook implements a physics-guided neural network for seismic waveform inversion\n"
-                     "# using spectral projectors and UNet architecture.")
+                     "# using spectral projectors and UNet architecture.", "header"))
     
     # Add imports block
-    all_blocks.append("import os\n"
+    all_blocks.append(("import os\n"
                      "import torch\n"
                      "import numpy as np\n"
                      "from pathlib import Path\n"
                      "from tqdm.notebook import tqdm\n"
                      "import pandas as pd\n"
                      "import matplotlib.pyplot as plt\n"
-                     "import polars as pl")  # Add polars import
+                     "import polars as pl", "imports"))
     
     # Process each file
     for file in files:
@@ -71,13 +73,14 @@ def update_kaggle_notebook():
             
         with open(file_path, 'r') as f:
             content = f.read()
-            blocks = extract_code_blocks(content)
+            # Use just the filename as the source path
+            blocks = extract_code_blocks(content, file)
             all_blocks.extend(blocks)
     
     # Create notebook content
     notebook_content = []
-    for block in all_blocks:
-        notebook_content.append(create_notebook_block(block))
+    for block, source_path in all_blocks:
+        notebook_content.append(create_notebook_block(block, source_path))
     
     # Write to kaggle_notebook.py
     notebook_path = project_root / 'kaggle_notebook.py'

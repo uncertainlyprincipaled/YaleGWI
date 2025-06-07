@@ -2,10 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
-# !pip install monai
-from monai.networks.blocks import UpSample, SubpixelUpsample
 from copy import deepcopy
-# from config import CFG
+from config import CFG
 
 def get_model():
     """Create and return a SpecProjNet model instance."""
@@ -227,6 +225,58 @@ class UnetDecoder2d(nn.Module):
             
         return x
 
+class CustomUpSample(nn.Module):
+    """Memory-efficient upsampling module that combines bilinear upsampling with convolution."""
+    def __init__(self, in_channels, out_channels, scale_factor=2, mode='bilinear'):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.mode = mode
+        # Use 1x1 conv for channel reduction to save memory
+        self.conv = nn.Conv2d(in_channels, out_channels, 1)
+        # Use 3x3 conv for spatial features
+        self.spatial_conv = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        
+        # Enable gradient checkpointing if configured
+        if CFG.gradient_checkpointing:
+            self.conv = torch.utils.checkpoint.checkpoint_sequential(self.conv, 1)
+            self.spatial_conv = torch.utils.checkpoint.checkpoint_sequential(self.spatial_conv, 1)
+        
+    def forward(self, x):
+        # Use mixed precision if configured
+        with torch.cuda.amp.autocast(enabled=CFG.use_amp):
+            # Upsample first to reduce memory usage during convolution
+            x = F.interpolate(x, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
+            # Apply convolutions
+            x = self.conv(x)
+            x = self.spatial_conv(x)
+        return x
+
+class CustomSubpixelUpsample(nn.Module):
+    """Memory-efficient subpixel upsampling using pixel shuffle."""
+    def __init__(self, in_channels, out_channels, scale_factor=2):
+        super().__init__()
+        self.scale_factor = scale_factor
+        # Use 1x1 conv for initial channel reduction
+        self.conv1 = nn.Conv2d(in_channels, out_channels * (scale_factor ** 2) // 2, 1)
+        # Use 3x3 conv for spatial features
+        self.conv2 = nn.Conv2d(out_channels * (scale_factor ** 2) // 2, 
+                              out_channels * (scale_factor ** 2), 3, padding=1)
+        self.pixel_shuffle = nn.PixelShuffle(scale_factor)
+        
+        # Enable gradient checkpointing if configured
+        if CFG.gradient_checkpointing:
+            self.conv1 = torch.utils.checkpoint.checkpoint_sequential(self.conv1, 1)
+            self.conv2 = torch.utils.checkpoint.checkpoint_sequential(self.conv2, 1)
+        
+    def forward(self, x):
+        # Use mixed precision if configured
+        with torch.cuda.amp.autocast(enabled=CFG.use_amp):
+            # Progressive channel reduction to save memory
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x = self.pixel_shuffle(x)
+        return x
+
 class SegmentationHead2d(nn.Module):
     """Final segmentation head with optional upsampling."""
     def __init__(
@@ -238,15 +288,32 @@ class SegmentationHead2d(nn.Module):
         mode: str = "nontrainable",
     ):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=kernel_size//2)
+        # Use 1x1 conv for initial channel reduction
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1)
+        # Use 3x3 conv for spatial features
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, padding=kernel_size//2)
+        
+        # Enable gradient checkpointing if configured
+        self.use_checkpoint = CFG.gradient_checkpointing
+        
         if mode == "nontrainable":
             self.upsample = nn.Upsample(size=target_size, mode="bilinear", align_corners=False)
         else:
-            self.upsample = SubpixelUpsample(in_channels, out_channels, scale_factor=2)
+            # Using custom subpixel upsampling
+            self.upsample = CustomSubpixelUpsample(out_channels, out_channels, scale_factor=2)
 
     def forward(self, x):
-        x = self.conv(x)
-        return self.upsample(x)
+        # Use mixed precision if configured
+        with torch.cuda.amp.autocast(enabled=CFG.use_amp):
+            # Progressive channel reduction to save memory
+            if self.use_checkpoint:
+                x = torch.utils.checkpoint.checkpoint(self.conv1, x)
+                x = torch.utils.checkpoint.checkpoint(self.conv2, x)
+            else:
+                x = self.conv1(x)
+                x = self.conv2(x)
+            x = self.upsample(x)
+        return x
 
 class SpecProjNet(nn.Module):
     """SpecProj model with HGNet backbone."""
@@ -306,7 +373,21 @@ class SpecProjNet(nn.Module):
             raise ValueError("Backbone does not have stem attribute")
         
     def forward(self, x):
-        # Input shape: (B, S, T, R) -> (B, 5, T, R)
+        # Debug prints
+        # print(f"Input tensor shape: {x.shape}")
+        # print(f"Input tensor type: {x.dtype}")
+        
+        # Handle different input shapes
+        if len(x.shape) == 5:  # (B, S, C, T, R)
+            B, S, C, T, R = x.shape
+            # Reshape to combine source and channel dimensions
+            x = x.reshape(B, S*C, T, R)
+        elif len(x.shape) == 3:  # (B, T, R)
+            x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
+        elif len(x.shape) == 2:  # (T, R)
+            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
+            
+        # print(f"Final shape before unpacking: {x.shape}")
         B, S, T, R = x.shape
         
         # Process each source separately to save memory
