@@ -373,9 +373,19 @@ class SpecProjNet(nn.Module):
             raise ValueError("Backbone does not have stem attribute")
         
     def forward(self, x):
-        # Debug prints
-        # print(f"Input tensor shape: {x.shape}")
-        # print(f"Input tensor type: {x.dtype}")
+        # Input shape assertions
+        assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
+        assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
+        if x.ndim == 5:
+            B, S, C, T, R = x.shape
+            assert C == 1 or C == 5, f"Expected channel dim 1 or 5, got {C}"
+        elif x.ndim == 3:
+            B, T, R = x.shape
+        elif x.ndim == 2:
+            T, R = x.shape
+        # Optionally, check for NaN/Inf
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            raise ValueError("Input contains NaN or Inf values!")
         
         # Handle different input shapes
         if len(x.shape) == 5:  # (B, S, C, T, R)

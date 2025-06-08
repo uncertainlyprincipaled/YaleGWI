@@ -39,15 +39,40 @@ class DataManager:
     def list_family_files(self, family: str) -> Tuple[List[Path], List[Path], str]:
         """Return (seis_files, vel_files, family_type) for a given family."""
         root = CFG.paths.families[family]
-        if (root / 'data').exists():  # Vel/Style
+        if not root.exists():
+            raise ValueError(f"Family directory not found: {root}")
+            
+        # First try YaleGWI-style structure (data/model subdirectories)
+        if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
             vel_files = sorted((root/'model').glob('*.npy'))
-            family_type = 'VelStyle'
-        else:  # Fault
-            seis_files = sorted(root.glob('seis*_*_*.npy'))
-            vel_files = sorted(root.glob('vel*_*_*.npy'))
-            family_type = 'Fault'
-        return seis_files, vel_files, family_type
+            if seis_files and vel_files:
+                family_type = 'VelStyle'
+                return seis_files, vel_files, family_type
+                
+        # Then try OpenFWI-style structure (flat directory with seis/vel files)
+        seis_files = sorted(root.glob('seis*.npy'))
+        vel_files = sorted(root.glob('vel*.npy'))
+        if seis_files and vel_files:
+            # Pair by filename (replace 'seis' with 'vel')
+            paired_seis = []
+            paired_vel = []
+            for sfile in seis_files:
+                vfile = root / sfile.name.replace('seis', 'vel')
+                if vfile.exists():
+                    paired_seis.append(sfile)
+                    paired_vel.append(vfile)
+                else:
+                    print(f"[Warning] No matching velocity file for {sfile}")
+            if paired_seis and paired_vel:
+                family_type = 'PerSample'
+                return paired_seis, paired_vel, family_type
+                
+        # If we get here, we couldn't find a valid data structure
+        raise ValueError(f"Could not find valid data structure for family {family} at {root}. "
+                       f"Directory exists: {root.exists()}, "
+                       f"Contains data/model: {(root/'data').exists() and (root/'model').exists()}, "
+                       f"Contains seis/vel files: {bool(seis_files) and bool(vel_files)}")
 
     def create_dataset(self, seis_files: List[Path], vel_files: List[Path], 
                       family_type: str, augment: bool = False) -> Dataset:
@@ -83,6 +108,49 @@ class DataManager:
 
     def get_test_files(self) -> List[Path]:
         return sorted(CFG.paths.test.glob('*.npy'))
+
+    def get_balanced_family_files(self, target_count=1000):
+        """
+        For each family, return (seis_files, vel_files, family_type) with up to target_count samples.
+        Supplement Fault families with OpenFWI if needed, and downsample large families if needed.
+        """
+        from config import CFG
+        import numpy as np
+        from pathlib import Path
+        openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+        families = list(CFG.paths.families.keys())
+        balanced = {}
+        for family in families:
+            # Get base files
+            base_seis, base_vel, family_type = self.list_family_files(family)
+            base_count = len(base_seis)
+            # Get OpenFWI files if available
+            openfwi_seis, openfwi_vel = [], []
+            if openfwi_path.exists() and (openfwi_path / family).exists():
+                openfwi_family = openfwi_path / family
+                openfwi_seis = sorted(openfwi_family.glob('seis*.npy'))
+                openfwi_vel = [openfwi_family / f.name.replace('seis', 'vel') for f in openfwi_seis if (openfwi_family / f.name.replace('seis', 'vel')).exists()]
+            # Combine
+            all_seis = base_seis + openfwi_seis
+            all_vel = base_vel + openfwi_vel
+            # Pair up to min length
+            min_len = min(len(all_seis), len(all_vel))
+            all_seis = all_seis[:min_len]
+            all_vel = all_vel[:min_len]
+            # Shuffle
+            idx = np.arange(len(all_seis))
+            np.random.shuffle(idx)
+            all_seis = [all_seis[i] for i in idx]
+            all_vel = [all_vel[i] for i in idx]
+            # Subsample or pad
+            if len(all_seis) >= target_count:
+                final_seis = all_seis[:target_count]
+                final_vel = all_vel[:target_count]
+            else:
+                final_seis = all_seis
+                final_vel = all_vel
+            balanced[family] = (final_seis, final_vel, family_type)
+        return balanced
 
 class SeismicDataset(Dataset):
     """

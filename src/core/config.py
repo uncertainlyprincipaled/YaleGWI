@@ -12,23 +12,24 @@ import torch
 #  Detect runtime (Kaggle / Colab / SageMaker / local) and expose a singleton #
 # --------------------------------------------------------------------------- #
 
-class _KagglePaths(NamedTuple):
-    root : Path = Path('/kaggle/input/waveform-inversion')
-    train: Path = root / 'train_samples'
-    test : Path = root / 'test'
-    # folders visible in the screenshot
-    families = {
-        'FlatVel_A'   : train/'FlatVel_A',
-        'FlatVel_B'   : train/'FlatVel_B',
-        'CurveVel_A'  : train/'CurveVel_A',
-        'CurveVel_B'  : train/'CurveVel_B',
-        'Style_A'     : train/'Style_A',
-        'Style_B'     : train/'Style_B',
-        'FlatFault_A' : train/'FlatFault_A',
-        'FlatFault_B' : train/'FlatFault_B',
-        'CurveFault_A': train/'CurveFault_A',
-        'CurveFault_B': train/'CurveFault_B',
-    }
+class _KagglePaths:
+    def __init__(self):
+        self.root: Path = Path('/kaggle/input/waveform-inversion')
+        self.train: Path = self.root / 'train_samples'
+        self.test: Path = self.root / 'test'
+        # folders visible in the screenshot
+        self.families = {
+            'FlatVel_A'   : self.train/'FlatVel_A',
+            'FlatVel_B'   : self.train/'FlatVel_B',
+            'CurveVel_A'  : self.train/'CurveVel_A',
+            'CurveVel_B'  : self.train/'CurveVel_B',
+            'Style_A'     : self.train/'Style_A',
+            'Style_B'     : self.train/'Style_B',
+            'FlatFault_A' : self.train/'FlatFault_A',
+            'FlatFault_B' : self.train/'FlatFault_B',
+            'CurveFault_A': self.train/'CurveFault_A',
+            'CurveFault_B': self.train/'CurveFault_B',
+        }
 
 class _Env:
     def __init__(self):
@@ -83,6 +84,32 @@ class Config:
 
             # Enable joint training by default in Kaggle
             cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
+
+            # Detect OpenFWI-style if present
+            openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+            if openfwi_path.exists():
+                cls._inst.paths.families = {f.name: f for f in openfwi_path.iterdir() if f.is_dir()}
+                cls._inst.dataset_style = 'openfwi'
+            else:
+                # Explicit YaleGWI logic
+                train = cls._inst.paths.train
+                cls._inst.paths.families = {
+                    'FlatVel_A'   : train/'FlatVel_A',
+                    'FlatVel_B'   : train/'FlatVel_B',
+                    'CurveVel_A'  : train/'CurveVel_A',
+                    'CurveVel_B'  : train/'CurveVel_B',
+                    'Style_A'     : train/'Style_A',
+                    'Style_B'     : train/'Style_B',
+                    'FlatFault_A' : train/'FlatFault_A',
+                    'FlatFault_B' : train/'FlatFault_B',
+                    'CurveFault_A': train/'CurveFault_A',
+                    'CurveFault_B': train/'CurveFault_B',
+                }
+                cls._inst.dataset_style = 'yalegwi'
+
+            # Optionally, exclude families with too few samples (e.g., Fault families with < 10 samples)
+            cls._inst.families_to_exclude = []
+            # This can be populated after EDA or by a config file/parameter
 
         return cls._inst
 

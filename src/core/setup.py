@@ -89,8 +89,25 @@ def setup_environment():
     
     elif CFG.env.kind == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
-        warm_kaggle_cache()
-        setup_paths(Path('/kaggle/input'))
+        # warm_kaggle_cache()
+        # Use the competition data path directly
+        CFG.paths.root = Path('/kaggle/input/waveform-inversion')
+        CFG.paths.train = CFG.paths.root / 'train_samples'
+        CFG.paths.test = CFG.paths.root / 'test'
+        
+        # Update family paths
+        CFG.paths.families = {
+            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
+            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
+            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
+            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
+            'Style_A'     : CFG.paths.train/'Style_A',
+            'Style_B'     : CFG.paths.train/'Style_B',
+            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
+            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
+            'CurveFault_A': CFG.paths.train/'CurveFault_A',
+            'CurveFault_B': CFG.paths.train/'CurveFault_B',
+        }
         print("Environment setup complete for Kaggle")
     
     else:  # local development

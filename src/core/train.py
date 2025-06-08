@@ -37,12 +37,12 @@ def train(dryrun: bool = False, fp16: bool = True):
         logging.info("Initializing DataManager...")
         data_manager = DataManager(use_mmap=True)
         
-        # Get training files for each family
-        logging.info("Setting up data loaders...")
+        # Get balanced training files for each family
+        logging.info("Setting up balanced data loaders...")
         train_loaders = []
-        for family in CFG.paths.families:
+        balanced_families = data_manager.get_balanced_family_files(target_count=1000)
+        for family, (seis_files, vel_files, family_type) in balanced_families.items():
             logging.info(f"Processing family: {family}")
-            seis_files, vel_files, family_type = data_manager.list_family_files(family)
             loader = data_manager.create_loader(
                 seis_files=seis_files,
                 vel_files=vel_files,

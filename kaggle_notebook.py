@@ -1,10 +1,12 @@
 # %%
+# Source: header
 # SpecProj-UNet for Seismic Waveform Inversion
 # This notebook implements a physics-guided neural network for seismic waveform inversion
 # using spectral projectors and UNet architecture.
 
 
 # %%
+# Source: imports
 import os
 import torch
 import numpy as np
@@ -16,11 +18,13 @@ import polars as pl
 
 
 # %%
+# Source: config.py
 # ## Configuration and Environment Setup
 
 
 
 # %%
+# Source: config.py
 from __future__ import annotations
 import os, json
 from pathlib import Path
@@ -31,23 +35,24 @@ import torch
 #  Detect runtime (Kaggle / Colab / SageMaker / local) and expose a singleton #
 # --------------------------------------------------------------------------- #
 
-class _KagglePaths(NamedTuple):
-    root : Path = Path('/kaggle/input/waveform-inversion')
-    train: Path = root / 'train_samples'
-    test : Path = root / 'test'
-    # folders visible in the screenshot
-    families = {
-        'FlatVel_A'   : train/'FlatVel_A',
-        'FlatVel_B'   : train/'FlatVel_B',
-        'CurveVel_A'  : train/'CurveVel_A',
-        'CurveVel_B'  : train/'CurveVel_B',
-        'Style_A'     : train/'Style_A',
-        'Style_B'     : train/'Style_B',
-        'FlatFault_A' : train/'FlatFault_A',
-        'FlatFault_B' : train/'FlatFault_B',
-        'CurveFault_A': train/'CurveFault_A',
-        'CurveFault_B': train/'CurveFault_B',
-    }
+class _KagglePaths:
+    def __init__(self):
+        self.root: Path = Path('/kaggle/input/waveform-inversion')
+        self.train: Path = self.root / 'train_samples'
+        self.test: Path = self.root / 'test'
+        # folders visible in the screenshot
+        self.families = {
+            'FlatVel_A'   : self.train/'FlatVel_A',
+            'FlatVel_B'   : self.train/'FlatVel_B',
+            'CurveVel_A'  : self.train/'CurveVel_A',
+            'CurveVel_B'  : self.train/'CurveVel_B',
+            'Style_A'     : self.train/'Style_A',
+            'Style_B'     : self.train/'Style_B',
+            'FlatFault_A' : self.train/'FlatFault_A',
+            'FlatFault_B' : self.train/'FlatFault_B',
+            'CurveFault_A': self.train/'CurveFault_A',
+            'CurveFault_B': self.train/'CurveFault_B',
+        }
 
 class _Env:
     def __init__(self):
@@ -82,11 +87,19 @@ class Config:
             cls._inst.num_workers = 4  # Number of workers for data loading
             cls._inst.distributed = False  # Whether to use distributed training
 
+            # Memory optimization settings
+            cls._inst.memory_efficient = True  # Enable memory efficient operations
+            cls._inst.use_amp = True  # Enable automatic mixed precision
+            cls._inst.gradient_checkpointing = True  # Enable gradient checkpointing
+
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
             cls._inst.ema_decay = 0.99
             cls._inst.pretrained = True
 
+            # Inference weight path (default for Kaggle dataset)
+            cls._inst.weight_path = "/kaggle/input/yalegwi/best.pth"
+            
             # Loss weights
             cls._inst.lambda_inv = 1.0
             cls._inst.lambda_fwd = 1.0
@@ -94,6 +107,32 @@ class Config:
 
             # Enable joint training by default in Kaggle
             cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
+
+            # Detect OpenFWI-style if present
+            openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+            if openfwi_path.exists():
+                cls._inst.paths.families = {f.name: f for f in openfwi_path.iterdir() if f.is_dir()}
+                cls._inst.dataset_style = 'openfwi'
+            else:
+                # Explicit YaleGWI logic
+                train = cls._inst.paths.train
+                cls._inst.paths.families = {
+                    'FlatVel_A'   : train/'FlatVel_A',
+                    'FlatVel_B'   : train/'FlatVel_B',
+                    'CurveVel_A'  : train/'CurveVel_A',
+                    'CurveVel_B'  : train/'CurveVel_B',
+                    'Style_A'     : train/'Style_A',
+                    'Style_B'     : train/'Style_B',
+                    'FlatFault_A' : train/'FlatFault_A',
+                    'FlatFault_B' : train/'FlatFault_B',
+                    'CurveFault_A': train/'CurveFault_A',
+                    'CurveFault_B': train/'CurveFault_B',
+                }
+                cls._inst.dataset_style = 'yalegwi'
+
+            # Optionally, exclude families with too few samples (e.g., Fault families with < 10 samples)
+            cls._inst.families_to_exclude = []
+            # This can be populated after EDA or by a config file/parameter
 
         return cls._inst
 
@@ -137,6 +176,7 @@ def save_cfg(out_dir: Path):
 
 
 # %%
+# Source: setup.py
 import os
 import subprocess
 from pathlib import Path
@@ -228,8 +268,25 @@ def setup_environment():
     
     elif CFG.env.kind == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
-        warm_kaggle_cache()
-        setup_paths(Path('/kaggle/input'))
+        # warm_kaggle_cache()
+        # Use the competition data path directly
+        CFG.paths.root = Path('/kaggle/input/waveform-inversion')
+        CFG.paths.train = CFG.paths.root / 'train_samples'
+        CFG.paths.test = CFG.paths.root / 'test'
+        
+        # Update family paths
+        CFG.paths.families = {
+            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
+            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
+            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
+            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
+            'Style_A'     : CFG.paths.train/'Style_A',
+            'Style_B'     : CFG.paths.train/'Style_B',
+            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
+            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
+            'CurveFault_A': CFG.paths.train/'CurveFault_A',
+            'CurveFault_B': CFG.paths.train/'CurveFault_B',
+        }
         print("Environment setup complete for Kaggle")
     
     else:  # local development
@@ -241,6 +298,7 @@ def setup_environment():
 
 
 # %%
+# Source: data_manager.py
 """
 DataManager is the single source of truth for all data IO in this project.
 All data loading, streaming, and batching must go through DataManager.
@@ -282,15 +340,40 @@ class DataManager:
     def list_family_files(self, family: str) -> Tuple[List[Path], List[Path], str]:
         """Return (seis_files, vel_files, family_type) for a given family."""
         root = CFG.paths.families[family]
-        if (root / 'data').exists():  # Vel/Style
+        if not root.exists():
+            raise ValueError(f"Family directory not found: {root}")
+            
+        # First try YaleGWI-style structure (data/model subdirectories)
+        if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
             vel_files = sorted((root/'model').glob('*.npy'))
-            family_type = 'VelStyle'
-        else:  # Fault
-            seis_files = sorted(root.glob('seis*_*_*.npy'))
-            vel_files = sorted(root.glob('vel*_*_*.npy'))
-            family_type = 'Fault'
-        return seis_files, vel_files, family_type
+            if seis_files and vel_files:
+                family_type = 'VelStyle'
+                return seis_files, vel_files, family_type
+                
+        # Then try OpenFWI-style structure (flat directory with seis/vel files)
+        seis_files = sorted(root.glob('seis*.npy'))
+        vel_files = sorted(root.glob('vel*.npy'))
+        if seis_files and vel_files:
+            # Pair by filename (replace 'seis' with 'vel')
+            paired_seis = []
+            paired_vel = []
+            for sfile in seis_files:
+                vfile = root / sfile.name.replace('seis', 'vel')
+                if vfile.exists():
+                    paired_seis.append(sfile)
+                    paired_vel.append(vfile)
+                else:
+                    print(f"[Warning] No matching velocity file for {sfile}")
+            if paired_seis and paired_vel:
+                family_type = 'PerSample'
+                return paired_seis, paired_vel, family_type
+                
+        # If we get here, we couldn't find a valid data structure
+        raise ValueError(f"Could not find valid data structure for family {family} at {root}. "
+                       f"Directory exists: {root.exists()}, "
+                       f"Contains data/model: {(root/'data').exists() and (root/'model').exists()}, "
+                       f"Contains seis/vel files: {bool(seis_files) and bool(vel_files)}")
 
     def create_dataset(self, seis_files: List[Path], vel_files: List[Path], 
                       family_type: str, augment: bool = False) -> Dataset:
@@ -326,6 +409,49 @@ class DataManager:
 
     def get_test_files(self) -> List[Path]:
         return sorted(CFG.paths.test.glob('*.npy'))
+
+    def get_balanced_family_files(self, target_count=1000):
+        """
+        For each family, return (seis_files, vel_files, family_type) with up to target_count samples.
+        Supplement Fault families with OpenFWI if needed, and downsample large families if needed.
+        """
+        from config import CFG
+        import numpy as np
+        from pathlib import Path
+        openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+        families = list(CFG.paths.families.keys())
+        balanced = {}
+        for family in families:
+            # Get base files
+            base_seis, base_vel, family_type = self.list_family_files(family)
+            base_count = len(base_seis)
+            # Get OpenFWI files if available
+            openfwi_seis, openfwi_vel = [], []
+            if openfwi_path.exists() and (openfwi_path / family).exists():
+                openfwi_family = openfwi_path / family
+                openfwi_seis = sorted(openfwi_family.glob('seis*.npy'))
+                openfwi_vel = [openfwi_family / f.name.replace('seis', 'vel') for f in openfwi_seis if (openfwi_family / f.name.replace('seis', 'vel')).exists()]
+            # Combine
+            all_seis = base_seis + openfwi_seis
+            all_vel = base_vel + openfwi_vel
+            # Pair up to min length
+            min_len = min(len(all_seis), len(all_vel))
+            all_seis = all_seis[:min_len]
+            all_vel = all_vel[:min_len]
+            # Shuffle
+            idx = np.arange(len(all_seis))
+            np.random.shuffle(idx)
+            all_seis = [all_seis[i] for i in idx]
+            all_vel = [all_vel[i] for i in idx]
+            # Subsample or pad
+            if len(all_seis) >= target_count:
+                final_seis = all_seis[:target_count]
+                final_vel = all_vel[:target_count]
+            else:
+                final_seis = all_seis
+                final_vel = all_vel
+            balanced[family] = (final_seis, final_vel, family_type)
+        return balanced
 
 class SeismicDataset(Dataset):
     """
@@ -373,6 +499,10 @@ class SeismicDataset(Dataset):
         std = x.std(axis=(1,2), keepdims=True) + 1e-6
         x = (x - mu) / std
         
+        # Add source dimension if not present
+        if len(x.shape) == 3:  # (T,R) -> (1,T,R)
+            x = x[None]
+        
         # Track memory usage
         if self.memory_tracker:
             self.memory_tracker.update(x.nbytes + y.nbytes)
@@ -381,14 +511,348 @@ class SeismicDataset(Dataset):
 
 
 # %%
+# Source: eda.py
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from data_manager import DataManager
+from config import CFG
+from pathlib import Path
+from typing import Dict, List, Tuple
+from src.core.setup import setup_environment  # Ensure correct paths
+setup_environment()  # Set up paths before any EDA code
+
+def summarize_array(arr):
+    # Convert to float32 for statistics to avoid overflow
+    arr_float32 = arr.astype(np.float32)
+    stats = {
+        'min': np.nanmin(arr_float32),
+        'max': np.nanmax(arr_float32),
+        'mean': np.nanmean(arr_float32),
+        'std': np.nanstd(arr_float32),
+        'nan_count': np.isnan(arr).sum(),
+        'inf_count': np.isinf(arr).sum(),
+        'shape': arr.shape
+    }
+    return stats
+
+def eda_on_family(family, n_shape_samples=3):
+    dm = DataManager()
+    seis_files, vel_files, family_type = dm.list_family_files(family)
+    seis_stats = []
+    vel_stats = []
+    seis_shapes = []
+    vel_shapes = []
+    for idx, (sfile, vfile) in enumerate(zip(seis_files, vel_files)):
+        if idx >= 3:  # Only process first 3 files per family
+            break
+        sdata = np.load(sfile, mmap_mode='r')
+        vdata = np.load(vfile, mmap_mode='r')
+        # Handle both batched and per-sample files
+        if sdata.ndim == 3:  # (sources, receivers, timesteps)
+            seis_stats.append(summarize_array(sdata))
+            vel_stats.append(summarize_array(vdata))
+            seis_shapes.append(sdata.shape)
+            vel_shapes.append(vdata.shape)
+        elif sdata.ndim == 4:  # (batch, sources, receivers, timesteps)
+            n_samples = sdata.shape[0]
+            n_pick = min(10, n_samples)
+            if n_samples > 1:
+                pick_indices = np.linspace(0, n_samples - 1, n_pick, dtype=int)
+            else:
+                pick_indices = [0]
+            for i in pick_indices:
+                seis_stats.append(summarize_array(sdata[i]))
+                vel_stats.append(summarize_array(vdata[i]))
+                seis_shapes.append(sdata[i].shape)
+                vel_shapes.append(vdata[i].shape)
+        else:
+            print(f"Unexpected shape for {sfile}: {sdata.shape}")
+        # Print a few sample shapes for validation
+        if idx < n_shape_samples:
+            print(f"Sample {idx} - Seis shape: {sdata.shape}, Vel shape: {vdata.shape}")
+    # Shape validation
+    expected_seis_shapes = [(5, 72, 72), (500, 5, 72, 72)]  # Updated to match actual shapes
+    expected_vel_shapes = [(1, 70, 70), (500, 1, 70, 70)]  # Updated to match actual shapes
+    for shape in seis_shapes[:n_shape_samples]:
+        if shape not in expected_seis_shapes:
+            print(f"[!] Unexpected seis shape: {shape} in family {family}")
+    for shape in vel_shapes[:n_shape_samples]:
+        if shape not in expected_vel_shapes:
+            print(f"[!] Unexpected vel shape: {shape} in family {family}")
+    return seis_stats, vel_stats
+
+def print_summary(stats, name):
+    print(f"Summary for {name}:")
+    for k in ['min', 'max', 'mean', 'std', 'nan_count', 'inf_count']:
+        vals = [s[k] for s in stats]
+        if k in ['nan_count', 'inf_count']:
+            print(f"  {k}: min={np.min(vals)}, max={np.max(vals)}, mean={np.mean(vals)}, sum={np.sum(vals)}")
+        else:
+            # Use float32 for numerical stability
+            vals = np.array(vals, dtype=np.float32)
+            print(f"  {k}: min={vals.min()}, max={vals.max()}, mean={vals.mean()}, sum={vals.sum()}")
+    print(f"  Total samples: {len(stats)}")
+
+def plot_family_distributions(family_stats: Dict[str, Tuple[List, List]]):
+    """Plot distributions of key statistics across families."""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle('Distribution of Key Statistics Across Families')
+    
+    # Velocity ranges
+    vel_ranges = []
+    family_names = []
+    for family, (_, vel_stats) in family_stats.items():
+        vel_mins = [s['min'] for s in vel_stats]
+        vel_maxs = [s['max'] for s in vel_stats]
+        vel_ranges.append((np.mean(vel_mins), np.mean(vel_maxs)))
+        family_names.append(family)
+    
+    # Plot velocity ranges
+    vel_mins, vel_maxs = zip(*vel_ranges)
+    axes[0,0].bar(family_names, vel_mins, label='Min Velocity')
+    axes[0,0].bar(family_names, vel_maxs, bottom=vel_mins, label='Max Velocity')
+    axes[0,0].set_title('Velocity Ranges by Family')
+    axes[0,0].set_ylabel('Velocity (m/s)')
+    axes[0,0].legend()
+    plt.setp(axes[0,0].xaxis.get_majorticklabels(), rotation=45)
+    
+    # Seismic amplitude ranges
+    seis_ranges = []
+    for family, (seis_stats, _) in family_stats.items():
+        seis_mins = [s['min'] for s in seis_stats]
+        seis_maxs = [s['max'] for s in seis_stats]
+        seis_ranges.append((np.mean(seis_mins), np.mean(seis_maxs)))
+    
+    # Plot seismic ranges
+    seis_mins, seis_maxs = zip(*seis_ranges)
+    axes[0,1].bar(family_names, seis_mins, label='Min Amplitude')
+    axes[0,1].bar(family_names, seis_maxs, bottom=seis_mins, label='Max Amplitude')
+    axes[0,1].set_title('Seismic Amplitude Ranges by Family')
+    axes[0,1].set_ylabel('Amplitude')
+    axes[0,1].legend()
+    plt.setp(axes[0,1].xaxis.get_majorticklabels(), rotation=45)
+    
+    # Velocity standard deviations
+    vel_stds = []
+    for family, (_, vel_stats) in family_stats.items():
+        stds = [s['std'] for s in vel_stats]
+        vel_stds.append(np.mean(stds))
+    
+    axes[1,0].bar(family_names, vel_stds)
+    axes[1,0].set_title('Average Velocity Standard Deviation by Family')
+    axes[1,0].set_ylabel('Standard Deviation (m/s)')
+    plt.setp(axes[1,0].xaxis.get_majorticklabels(), rotation=45)
+    
+    # Sample counts
+    sample_counts = []
+    for family, (seis_stats, _) in family_stats.items():
+        sample_counts.append(len(seis_stats))
+    
+    axes[1,1].bar(family_names, sample_counts)
+    axes[1,1].set_title('Number of Samples by Family')
+    axes[1,1].set_ylabel('Sample Count')
+    plt.setp(axes[1,1].xaxis.get_majorticklabels(), rotation=45)
+    
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+    return fig
+
+def analyze_family_correlations(family_stats: Dict[str, Tuple[List, List]]):
+    """Analyze correlations between seismic and velocity statistics."""
+    correlations = {}
+    for family, (seis_stats, vel_stats) in family_stats.items():
+        # Extract statistics
+        seis_means = [s['mean'] for s in seis_stats]
+        seis_stds = [s['std'] for s in seis_stats]
+        vel_means = [v['mean'] for v in vel_stats]
+        vel_stds = [v['std'] for v in vel_stats]
+        
+        # Calculate correlations
+        correlations[family] = {
+            'mean_corr': np.corrcoef(seis_means, vel_means)[0,1],
+            'std_corr': np.corrcoef(seis_stds, vel_stds)[0,1]
+        }
+    
+    return correlations
+
+def extract_and_plot_geometry(family_stats: Dict[str, Tuple[List, List]]):
+    """
+    Attempt to extract and plot receiver/source geometry for a few representative families only.
+    Assumes seismic data shape is (sources, receivers, timesteps) or (sources, timesteps, receivers).
+    """
+    print("\nReceiver/Source Geometry per Family:")
+    # Only plot for the first 2 families
+    max_plots = 2
+    plotted = 0
+    for family, (seis_stats, _) in family_stats.items():
+        if plotted >= max_plots:
+            print(f"(Skipping plots for remaining families...)")
+            break
+        if len(seis_stats) == 0:
+            print(f"{family}: No samples found.")
+            continue
+        shape = seis_stats[0]['shape']
+        if len(shape) == 3:
+            n_sources, n_receivers, n_timesteps = shape
+            print(f"{family}: sources={n_sources}, receivers={n_receivers}, timesteps={n_timesteps}")
+            plt.figure()
+            plt.title(f"{family} - Receiver/Source Geometry")
+            plt.scatter(range(n_receivers), [0]*n_receivers, label='Receivers', marker='x')
+            plt.scatter([0]*n_sources, range(n_sources), label='Sources', marker='o')
+            plt.xlabel('Receiver Index')
+            plt.ylabel('Source Index')
+            plt.legend()
+            plt.show()
+            plt.close()
+            plotted += 1
+        elif len(shape) == 2:
+            n1, n2 = shape
+            print(f"{family}: 2D seismic shape: {shape}")
+        else:
+            print(f"{family}: Unexpected seismic shape: {shape}")
+
+
+def summarize_array_shapes(family_stats: Dict[str, Tuple[List, List]]):
+    """
+    Summarize array shapes for seismic and velocity data per family.
+    """
+    print("\nArray Shape Summary per Family:")
+    for family, (seis_stats, vel_stats) in family_stats.items():
+        seis_shapes = [tuple(s['shape']) for s in seis_stats]
+        vel_shapes = [tuple(s['shape']) for s in vel_stats]
+        unique_seis_shapes = set(seis_shapes)
+        unique_vel_shapes = set(vel_shapes)
+        print(f"{family}: Seismic shapes: {unique_seis_shapes}")
+        print(f"{family}: Velocity shapes: {unique_vel_shapes}")
+        if len(unique_seis_shapes) > 1 or len(unique_vel_shapes) > 1:
+            print(f"  [!] Shape inconsistency detected in {family}")
+
+
+def summarize_family_sizes(family_stats: Dict[str, Tuple[List, List]]):
+    """
+    Print a summary of family sizes and highlight imbalances.
+    """
+    print("\nFamily Size Summary:")
+    sizes = {family: len(seis_stats) for family, (seis_stats, _) in family_stats.items()}
+    for family, size in sizes.items():
+        print(f"{family}: {size} samples")
+    min_size = min(sizes.values())
+    max_size = max(sizes.values())
+    print(f"\nSmallest family: {min_size} samples, Largest family: {max_size} samples")
+    print("Families with < 10 samples:")
+    for family, size in sizes.items():
+        if size < 10:
+            print(f"  [!] {family}: {size} samples (very small)")
+
+# --- New: Supplement/Downsample Check ---
+def check_balancing_requirements(target_count=1000):
+    """
+    For each family, print base and OpenFWI sample counts, and how many to supplement or downsample.
+    """
+    print("\n=== Data Balancing Requirements ===")
+    from config import CFG
+    import os
+    # Detect OpenFWI path
+    openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+    base_families = list(CFG.paths.families.keys())
+    # If OpenFWI is not available, skip
+    if not openfwi_path.exists():
+        print("OpenFWI dataset not found. Skipping balancing check.")
+        return
+    print(f"Target samples per family: {target_count}")
+    print(f"{'Family':<15} {'Base':>6} {'OpenFWI':>8} {'To Add':>8} {'To Down':>8}")
+    print("-"*50)
+    for family in base_families:
+        # Count base samples
+        dm = DataManager()
+        base_seis, base_vel, _ = dm.list_family_files(family)
+        base_count = len(base_seis)
+        # Count OpenFWI samples
+        openfwi_family = openfwi_path / family
+        openfwi_seis = sorted(openfwi_family.glob('seis*.npy')) if openfwi_family.exists() else []
+        openfwi_count = len(openfwi_seis)
+        # Compute how many to add or downsample
+        to_add = max(0, target_count - base_count)
+        to_down = max(0, (base_count + openfwi_count) - target_count) if (base_count + openfwi_count) > target_count else 0
+        print(f"{family:<15} {base_count:>6} {openfwi_count:>8} {to_add:>8} {to_down:>8}")
+    print("-"*50)
+
+def count_samples_base(base_path, family):
+    fam_dir = base_path / family
+    # Check for data/ subfolder
+    data_dir = fam_dir / 'data' if (fam_dir / 'data').exists() else fam_dir
+    seis_files = sorted(data_dir.glob('seis*.npy'))
+    total_samples = 0
+    for f in seis_files:
+        arr = np.load(f, mmap_mode='r')
+        # If batched, count first dimension; else count as 1
+        n = arr.shape[0] if arr.ndim > 2 else 1
+        total_samples += n
+    return total_samples
+
+def count_samples_openfwi(openfwi_path, family):
+    fam_dir = openfwi_path / family
+    seis_files = sorted(fam_dir.glob('seis*.npy'))
+    return len(seis_files)
+
+def main():
+    from config import CFG
+    families = list(CFG.paths.families.keys())
+    family_stats = {}
+    
+    for family in families:
+        print(f"\n--- EDA for family: {family} ---")
+        seis_stats, vel_stats = eda_on_family(family)
+        family_stats[family] = (seis_stats, vel_stats)
+        print_summary(seis_stats, f"{family} seis")
+        print_summary(vel_stats, f"{family} vel")
+    
+    # Generate distribution plots
+    fig = plot_family_distributions(family_stats)
+    plt.show()
+    
+    # Analyze correlations
+    correlations = analyze_family_correlations(family_stats)
+    print("\nCorrelations between seismic and velocity statistics:")
+    for family, corrs in correlations.items():
+        print(f"{family}:")
+        print(f"  Mean correlation: {corrs['mean_corr']:.3f}")
+        print(f"  Std correlation: {corrs['std_corr']:.3f}")
+
+    # New EDA: Geometry, shape, and size summaries
+    extract_and_plot_geometry(family_stats)
+    summarize_array_shapes(family_stats)
+    summarize_family_sizes(family_stats)
+
+    # --- Print explicit sample counts for each family ---
+    print("\nSample counts per family (Base and OpenFWI):")
+    base_path = CFG.paths.train.parent  # This should point to 'train_samples'
+    openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+    print(f"{'Family':<15} {'Base':>6} {'OpenFWI':>8}")
+    print("-"*32)
+    for fam in families:
+        base_count = count_samples_base(base_path, fam)
+        openfwi_count = count_samples_openfwi(openfwi_path, fam)
+        print(f"{fam:<15} {base_count:>6} {openfwi_count:>8}")
+    print("-"*32)
+
+    # Check balancing requirements
+    check_balancing_requirements()
+
+if __name__ == "__main__":
+    main() 
+
+
+# %%
+# Source: model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
-# !pip install monai
-from monai.networks.blocks import UpSample, SubpixelUpsample
 from copy import deepcopy
-# from config import CFG
+from config import CFG
 
 def get_model():
     """Create and return a SpecProjNet model instance."""
@@ -610,6 +1074,58 @@ class UnetDecoder2d(nn.Module):
             
         return x
 
+class CustomUpSample(nn.Module):
+    """Memory-efficient upsampling module that combines bilinear upsampling with convolution."""
+    def __init__(self, in_channels, out_channels, scale_factor=2, mode='bilinear'):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.mode = mode
+        # Use 1x1 conv for channel reduction to save memory
+        self.conv = nn.Conv2d(in_channels, out_channels, 1)
+        # Use 3x3 conv for spatial features
+        self.spatial_conv = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        
+        # Enable gradient checkpointing if configured
+        if CFG.gradient_checkpointing:
+            self.conv = torch.utils.checkpoint.checkpoint_sequential(self.conv, 1)
+            self.spatial_conv = torch.utils.checkpoint.checkpoint_sequential(self.spatial_conv, 1)
+        
+    def forward(self, x):
+        # Use mixed precision if configured
+        with torch.cuda.amp.autocast(enabled=CFG.use_amp):
+            # Upsample first to reduce memory usage during convolution
+            x = F.interpolate(x, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
+            # Apply convolutions
+            x = self.conv(x)
+            x = self.spatial_conv(x)
+        return x
+
+class CustomSubpixelUpsample(nn.Module):
+    """Memory-efficient subpixel upsampling using pixel shuffle."""
+    def __init__(self, in_channels, out_channels, scale_factor=2):
+        super().__init__()
+        self.scale_factor = scale_factor
+        # Use 1x1 conv for initial channel reduction
+        self.conv1 = nn.Conv2d(in_channels, out_channels * (scale_factor ** 2) // 2, 1)
+        # Use 3x3 conv for spatial features
+        self.conv2 = nn.Conv2d(out_channels * (scale_factor ** 2) // 2, 
+                              out_channels * (scale_factor ** 2), 3, padding=1)
+        self.pixel_shuffle = nn.PixelShuffle(scale_factor)
+        
+        # Enable gradient checkpointing if configured
+        if CFG.gradient_checkpointing:
+            self.conv1 = torch.utils.checkpoint.checkpoint_sequential(self.conv1, 1)
+            self.conv2 = torch.utils.checkpoint.checkpoint_sequential(self.conv2, 1)
+        
+    def forward(self, x):
+        # Use mixed precision if configured
+        with torch.cuda.amp.autocast(enabled=CFG.use_amp):
+            # Progressive channel reduction to save memory
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x = self.pixel_shuffle(x)
+        return x
+
 class SegmentationHead2d(nn.Module):
     """Final segmentation head with optional upsampling."""
     def __init__(
@@ -621,15 +1137,32 @@ class SegmentationHead2d(nn.Module):
         mode: str = "nontrainable",
     ):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=kernel_size//2)
+        # Use 1x1 conv for initial channel reduction
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1)
+        # Use 3x3 conv for spatial features
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, padding=kernel_size//2)
+        
+        # Enable gradient checkpointing if configured
+        self.use_checkpoint = CFG.gradient_checkpointing
+        
         if mode == "nontrainable":
             self.upsample = nn.Upsample(size=target_size, mode="bilinear", align_corners=False)
         else:
-            self.upsample = SubpixelUpsample(in_channels, out_channels, scale_factor=2)
+            # Using custom subpixel upsampling
+            self.upsample = CustomSubpixelUpsample(out_channels, out_channels, scale_factor=2)
 
     def forward(self, x):
-        x = self.conv(x)
-        return self.upsample(x)
+        # Use mixed precision if configured
+        with torch.cuda.amp.autocast(enabled=CFG.use_amp):
+            # Progressive channel reduction to save memory
+            if self.use_checkpoint:
+                x = torch.utils.checkpoint.checkpoint(self.conv1, x)
+                x = torch.utils.checkpoint.checkpoint(self.conv2, x)
+            else:
+                x = self.conv1(x)
+                x = self.conv2(x)
+            x = self.upsample(x)
+        return x
 
 class SpecProjNet(nn.Module):
     """SpecProj model with HGNet backbone."""
@@ -689,7 +1222,31 @@ class SpecProjNet(nn.Module):
             raise ValueError("Backbone does not have stem attribute")
         
     def forward(self, x):
-        # Input shape: (B, S, T, R) -> (B, 5, T, R)
+        # Input shape assertions
+        assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
+        assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
+        if x.ndim == 5:
+            B, S, C, T, R = x.shape
+            assert C == 1 or C == 5, f"Expected channel dim 1 or 5, got {C}"
+        elif x.ndim == 3:
+            B, T, R = x.shape
+        elif x.ndim == 2:
+            T, R = x.shape
+        # Optionally, check for NaN/Inf
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            raise ValueError("Input contains NaN or Inf values!")
+        
+        # Handle different input shapes
+        if len(x.shape) == 5:  # (B, S, C, T, R)
+            B, S, C, T, R = x.shape
+            # Reshape to combine source and channel dimensions
+            x = x.reshape(B, S*C, T, R)
+        elif len(x.shape) == 3:  # (B, T, R)
+            x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
+        elif len(x.shape) == 2:  # (T, R)
+            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
+            
+        # print(f"Final shape before unpacking: {x.shape}")
         B, S, T, R = x.shape
         
         # Process each source separately to save memory
@@ -732,11 +1289,13 @@ class SpecProjNet(nn.Module):
 
 
 # %%
+# Source: proj_mask.py
 # ## Model Architecture - Spectral Projector
 
 
 
 # %%
+# Source: proj_mask.py
 import torch, math
 from torch import nn
 from config import CFG
@@ -843,6 +1402,7 @@ def split_and_reassemble(x: torch.Tensor, mask: PhysMask, assembler: SpectralAss
 
 
 # %%
+# Source: iunet.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -919,6 +1479,7 @@ def create_iunet() -> IUNet:
 
 
 # %%
+# Source: specproj_hybrid.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1005,11 +1566,13 @@ SpecProjUNet = HybridSpecProj
 
 
 # %%
+# Source: losses.py
 # ## Loss Functions
 
 
 
 # %%
+# Source: losses.py
 import torch
 import torch.nn.functional as F
 from config import CFG
@@ -1079,6 +1642,7 @@ HybridLoss = JointLoss
 
 
 # %%
+# Source: train.py
 """
 Training script that uses DataManager for all data IO.
 """
@@ -1118,12 +1682,12 @@ def train(dryrun: bool = False, fp16: bool = True):
         logging.info("Initializing DataManager...")
         data_manager = DataManager(use_mmap=True)
         
-        # Get training files for each family
-        logging.info("Setting up data loaders...")
+        # Get balanced training files for each family
+        logging.info("Setting up balanced data loaders...")
         train_loaders = []
-        for family in CFG.paths.families:
+        balanced_families = data_manager.get_balanced_family_files(target_count=1000)
+        for family, (seis_files, vel_files, family_type) in balanced_families.items():
             logging.info(f"Processing family: {family}")
-            seis_files, vel_files, family_type = data_manager.list_family_files(family)
             loader = data_manager.create_loader(
                 seis_files=seis_files,
                 vel_files=vel_files,
@@ -1270,6 +1834,7 @@ if __name__ == '__main__':
 
 
 # %%
+# Source: infer.py
 # All data IO in this file must go through DataManager (src/core/data_manager.py)
 # Do NOT load data directly in this file.
 #
@@ -1278,8 +1843,12 @@ if __name__ == '__main__':
 
 
 # %%
+# Source: infer.py
 import torch, pandas as pd
 from pathlib import Path
+import os
+import time
+from tqdm import tqdm
 from config import CFG
 from data_manager import DataManager
 from model import SpecProjNet
@@ -1293,7 +1862,34 @@ def format_submission(vel_map, oid):
                       for i,v in enumerate(row.tolist())}})
     return rows
 
-def infer(weights='outputs/best.pth'):
+def estimate_inference_time(test_files=None, batch_size=4, disable_tta=False):
+    if test_files is None:
+        data_manager = DataManager()
+        test_files = data_manager.get_test_files()
+    sample_size = min(10, len(test_files))
+    print(len(test_files))
+    sample_files = test_files[:sample_size]  # Only use a small sample!
+    try:
+        start_time = time.time()
+        # Run inference on the sample, not the full set!
+        infer(weights=CFG.weight_path, batch_size=batch_size, disable_tta=disable_tta, test_files=sample_files)
+        elapsed = time.time() - start_time
+        # Estimate total time
+        total_samples = len(test_files)
+        estimated_time = (elapsed / sample_size) * total_samples
+        return estimated_time
+    except Exception as e:
+        print(f"Error during time estimation: {str(e)}")
+        return None
+
+def infer(weights=None, batch_size=8, disable_tta=False, test_files=None):
+    """Run inference with batching and checkpointing."""
+    # Use CFG.weight_path as default if weights not provided
+    weights = weights or CFG.weight_path
+    # Check for existence and provide a clear error if missing
+    if not Path(weights).exists():
+        raise FileNotFoundError(f"Model weights not found at {weights}. If running on Kaggle, make sure to add the dataset containing the weights (e.g., 'yalegwi') to your notebook.")
+    
     # Initialize data manager
     data_manager = DataManager()
     
@@ -1303,37 +1899,69 @@ def infer(weights='outputs/best.pth'):
         pretrained=False,
         ema_decay=0.0,  # No EMA for inference
     ).to(CFG.env.device)
-    model.load_state_dict(torch.load(weights, map_location=CFG.env.device))
+    
+    # Load state dict and remove 'ema.module.' prefix if present
+    state_dict = torch.load(weights, map_location=CFG.env.device)
+    if any(k.startswith('ema.module.') for k in state_dict.keys()):
+        state_dict = {k.replace('ema.module.', ''): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model.eval()
 
-    test_files = data_manager.get_test_files()
+    if test_files is None:
+        test_files = data_manager.get_test_files()
     # For test, family_type is not needed, but we pass 'Fault' for single-sample-per-file
     test_loader = data_manager.create_loader(
         test_files, test_files, 'Fault',
-        batch_size=1, shuffle=False
+        batch_size=batch_size,
+        shuffle=False
     )
 
     rows = []
-    with torch.no_grad(), torch.cuda.amp.autocast():
-        for seis, oid in test_loader:
-            seis = seis.to(CFG.env.device)
+    with torch.no_grad(), torch.amp.autocast('cuda'):
+        for seis, oid in tqdm(test_loader, desc="Inference"):
+            seis = seis.to(CFG.env.device).to(torch.float16)
             
             # Original prediction
             vel = model(seis)
             
-            # TTA: Flip prediction
-            seis_flip = seis.flip(-1)  # Flip receiver dimension
-            vel_flip = model(seis_flip)
-            vel_flip = vel_flip.flip(-1)  # Flip back
+            if not disable_tta:
+                # TTA: Flip prediction
+                seis_flip = seis.flip(-1)
+                vel_flip = model(seis_flip)
+                vel_flip = vel_flip.flip(-1)
+                vel = (vel + vel_flip) / 2
             
-            # Average predictions
-            vel = (vel + vel_flip) / 2
+            # Keep in float16 until final conversion
+            vel = vel.cpu().numpy()
             
-            vel = vel.cpu().float().numpy()[0,0]
-            rows += format_submission(vel, Path(oid[0]).stem)
-            
+            # Process batch results
+            for b in range(vel.shape[0]):
+                oid_str = Path(oid[b]).stem if isinstance(oid[b], (str, Path)) else str(oid[b])
+                rows += format_submission(vel[b,0], oid_str)
+                
+            # Save intermediate results less frequently
+            if len(rows) % 25000 == 0:
+                print(f"Saving intermediate results: {len(rows)} predictions processed")
+                pd.DataFrame(rows).to_csv('submission_partial.csv', index=False)
+                rows = []  # <-- Add this line to free memory
+    
+    # Save final results
+    print(f"Saving final results: {len(rows)} predictions processed")
     pd.DataFrame(rows).to_csv('submission.csv', index=False)
+    if Path('submission_partial.csv').exists():
+        Path('submission_partial.csv').unlink()  # Remove partial file
 
 if __name__ == '__main__':
-    infer() 
+    # Estimate time first
+    est_time = estimate_inference_time(None, disable_tta=False)
+    if est_time is not None:
+        print(f"Estimated inference time: {est_time/60:.1f} minutes")
+        # If inference time is > 8 hours, fail loudly
+        if est_time > 8 * 60 * 60:
+            raise ValueError("Estimated inference time is > 8 hours, please run with disable_tta=True")
+    else:
+        print("Could not estimate inference time, proceeding with full inference")
+    
+    # Run full inference
+    infer(disable_tta=True) 
 

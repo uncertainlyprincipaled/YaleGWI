@@ -37,6 +37,7 @@ def update_kaggle_notebook():
         'config.py',  # Process config first to create base CFG
         'setup.py',   # Then setup to configure environment
         'data_manager.py',  # New unified data management interface
+        'eda.py', # EDA for families   
         'model.py',   # Add model definitions and factory functions
         'proj_mask.py',
         'iunet.py',      # Add IU-Net for latent translation

@@ -1,0 +1,282 @@
+# Model Tuning and Ensembling Refactoring Plan
+
+## 1. Overview
+
+### Current State Analysis
+- Model Initialization:
+  - Currently using HGNetV2 backbone with pretrained weights
+  - No family-specific initialization
+  - Basic EMA implementation
+  - Single model training approach
+
+- Training Process:
+  - 4-5 hours for 10 epochs on Kaggle
+  - No cross-validation
+  - Basic loss function with L1 and PDE components
+  - No ensemble strategy
+
+### Success Metrics
+- Performance Metrics:
+  - MAE improvement
+  - Physical consistency score
+  - Inference time
+  - Memory usage
+  - Boundary IoU score
+  - CRF energy reduction
+  - Bayesian uncertainty calibration
+
+- Code Quality Metrics:
+  - Test coverage
+  - Documentation completeness
+  - Code modularity
+  - Configuration flexibility
+
+### Constraints
+- Computational Constraints:
+  - Keep ensemble models lightweight
+  - Use efficient weight optimization
+  - Implement memory-efficient training
+  - Consider inference time requirements
+  - Optimize CRF message passing for GPU
+  - Use efficient mean-field approximation
+
+- Physical Constraints:
+  - Maintain wave equation consistency
+  - Preserve geological structure
+  - Ensure physical interpretability
+  - Validate against known solutions
+  - Ensure CRF respects physical boundaries
+  - Maintain structural consistency
+
+- Implementation Constraints:
+  - Maintain code modularity
+  - Ensure backward compatibility
+  - Keep configuration flexible
+  - Document all changes
+  - Make CRF integration optional
+  - Start with non-trainable CRF
+
+## 2. Proposed Changes Specifications
+
+### A. Family-Based Model Initialization
+1. Create family-specific initialization strategies:
+   - FlatVel: Initialize with smooth velocity gradients
+   - CurveVel: Initialize with curved velocity patterns
+   - Fault: Initialize with sharp discontinuities
+   - Style: Initialize with learned style embeddings
+
+2. Implement physics-guided initialization:
+   - Use spectral projector masks for initial feature extraction
+   - Initialize weights based on wave equation properties
+   - Add family-specific bias terms
+
+### B. Training Strategy
+1. Implement physics-based validation:
+   - Split data by geological regions
+   - Validate on different geological structures
+   - Add physical consistency metrics
+
+2. Multi-platform training:
+   - Train on Kaggle, SageMaker, and Colab
+   - Save checkpoints with metadata
+   - Compare performance across platforms
+
+3. Add cross-validation:
+   - Implement k-fold CV based on geological families
+   - Use stratified sampling for validation
+   - Track performance per family
+
+### C. Ensemble Strategy
+1. Base Models:
+   - SpecProj-UNet (current) - Provides spectral projector bias and local translation invariance
+   - E(n)-Equivariant Graph Neural Network (EGNN) - Handles receiver geometry and SE(2/3) equivariance
+   - SE(3)-Transformer - Adds continuous SO(3) equivariance for 3D wavefields
+   - Heat-kernel Diffusion Network - Approximates wave equation propagator
+   - [Stretch] MeshCNN - For unstructured velocity field prediction
+
+2. Ensemble Methods:
+   a) Static Weighting:
+      - Weight based on physical consistency scores
+      - Use family-specific performance metrics
+      - Consider geometric equivariance properties
+      - Implement in config.py
+
+   b) Dynamic Weighting:
+      - Lightweight meta-learner
+      - Features: geological family, survey geometry, data stats
+      - Output: model weights based on geometric properties
+      - Consider equivariance preservation
+
+   c) Bayesian Uncertainty Estimation:
+      - Monte Carlo dropout for uncertainty
+      - Ensemble weight adjustment based on uncertainty
+      - Confidence-aware predictions
+      - Geometric consistency checks
+
+3. Model Integration Strategy:
+   a) Stage-wise Training:
+      - Keep SpecProj-UNet as backbone predictor
+      - Train EGNN and diffusion networks on residuals
+      - Use snapshot ensembling during cyclic-LR training
+      - Stack predictions with geometric-aware blending
+
+   b) Geometric Priors:
+      - EGNN: Treat receivers as nodes, learn over relative offsets
+      - SE(3)-Transformer: Handle 3D survey rotations
+      - Heat-kernel: Approximate wave equation propagator
+      - MeshCNN: Handle unstructured velocity fields
+
+   c) Evaluation Metrics:
+      - Per-trace MAE and structural similarity (SSIM)
+      - Geometric consistency scores
+      - Physical constraint satisfaction
+      - Boundary preservation metrics
+
+### D. CRF Integration
+1. Add Continuous CRF Layer:
+   - Create `crf.py` implementing a locally-connected continuous CRF
+   - Use mean-field updates for efficient inference
+   - Start with non-trainable variant
+   - Add basic boundary-aware pairwise potentials
+
+2. Model Pipeline Integration:
+   - Add CRF as post-processing step after CNN decoder
+   - Use CNN features for pairwise potentials
+   - Implement efficient message passing
+   - Defer joint training mode to stretch goals
+
+3. Hyperparameter Tuning:
+   - Window size (d) for local connectivity
+   - Number of mean-field iterations
+   - Pairwise potential weights (λ₁, λ₂)
+   - Temperature parameter for soft assignments
+
+4. Validation Metrics:
+   - Add boundary IoU for structural accuracy
+   - Track CRF energy during training
+   - Monitor convergence of mean-field updates
+   - Compare with baseline CNN-only results
+
+## 3. Implementation Timeline (15 Days)
+
+### Phase 1: Core Setup (Days 1-3)
+- Day 1: Model registry and geometric-aware checkpoint management
+- Day 2: Family-specific data loaders with geometric features
+- Day 3: Cross-validation framework with geometric metrics
+
+### Phase 2: Model Development (Days 4-6)
+- Day 4: EGNN implementation for receiver geometry
+- Day 5: Heat-kernel diffusion network integration
+- Day 6: SE(3)-Transformer for 3D equivariance
+
+### Phase 3: Ensemble Framework (Days 7-9)
+- Day 7: Geometric-aware static weighting
+- Day 8: Equivariance-preserving dynamic weighting
+- Day 9: Geometric consistency checks and uncertainty
+
+### Phase 4: Training and Validation (Days 10-12)
+- Day 10: Multi-platform training with geometric priors
+- Day 11: Physics-based validation with equivariance tests
+- Day 12: Performance tracking with geometric metrics
+
+### Phase 5: Final Tuning (Days 13-15)
+- Day 13: Geometric-aware TTA
+- Day 14: PDE-based refinement with heat kernels
+- Day 15: Final validation and submission prep
+
+## 4. Implementation Prompts
+
+### Core Infrastructure Prompts
+1. "Create a ModelRegistry class that manages model initialization and loading"
+2. "Implement a CheckpointManager for saving/loading model states with metadata"
+3. "Design a FamilyDataLoader that handles family-specific data loading"
+4. "Create a CrossValidation framework based on geological families"
+
+### Model Improvement Prompts
+1. "Implement simplified family-specific initialization strategies in model.py"
+2. "Add minimal CRF integration with non-trainable weights"
+3. "Enhance loss function with boundary-gradient penalty"
+4. "Refine EMA implementation with family-specific tracking"
+
+### Ensemble Framework Prompts
+1. "Create an EnsembleBase class with static weighting"
+2. "Implement a lightweight MetaLearner for dynamic weight prediction"
+3. "Add Bayesian uncertainty estimation via MC Dropout"
+4. "Create ensemble evaluation metrics"
+
+### Training Pipeline Prompts
+1. "Set up multi-platform training infrastructure"
+2. "Implement physics-based validation"
+3. "Create performance tracking system"
+4. "Design model comparison framework"
+
+## Risk Mitigation
+
+### High-Risk Areas
+1. Geometric Model Integration:
+   - Start with EGNN (simplest equivariant model)
+   - Validate equivariance properties
+   - Test on small datasets first
+   - Fallback: Use simpler geometric features
+
+2. Multi-platform training:
+   - Start with Kaggle and one other platform
+   - Use cloud credits efficiently
+   - Implement early stopping
+   - Monitor geometric consistency
+
+3. Equivariance Preservation:
+   - Start with SE(2) equivariance
+   - Validate rotation/translation invariance
+   - Test on synthetic data first
+   - Implement incrementally
+
+4. Heat-kernel Approximation:
+   - Start with basic diffusion operator
+   - Validate against known solutions
+   - Monitor computational overhead
+   - Use efficient message passing
+
+### Contingency Plans
+1. If behind schedule:
+   - Focus on EGNN integration
+   - Defer SE(3)-Transformer
+   - Simplify geometric features
+
+2. If performance issues:
+   - Reduce model complexity
+   - Use fewer ensemble members
+   - Focus on most effective geometric priors
+
+3. If training time issues:
+   - Reduce number of epochs
+   - Use smaller validation sets
+   - Implement early stopping
+   - Optimize geometric computations
+
+4. If equivariance issues:
+   - Reduce model complexity
+   - Use simpler geometric features
+   - Fall back to basic CNN predictions
+   - Focus on most critical symmetries
+
+## Success Criteria
+
+### Minimum Viable Product
+- Working ensemble of 2-3 lightweight models
+- Basic family-based initialization (core families)
+- Static weighting implementation
+- Minimal non-trainable CRF integration
+- Enhanced loss function (L1 + boundary penalty)
+- Bayesian uncertainty estimation
+- Simple adaptive TTA
+- Valid submission with improved MAE
+
+### Stretch Goals
+- Trainable CRF with learned potentials
+- Advanced physics-guided initialization
+- Comprehensive multi-platform training
+- PDE-based post-processing
+- Advanced boundary-aware CRF
+- Transformer-based attention integration
+- Knowledge distillation 
