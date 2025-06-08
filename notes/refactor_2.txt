@@ -3,17 +3,18 @@
 ## 1. Overview
 
 ### Current State Analysis
-- Model Initialization:
-  - Currently using HGNetV2 backbone with pretrained weights
-  - No family-specific initialization
+- Model Architecture:
+  - SpecProj-UNet with physics-guided initialization
   - Basic EMA implementation
   - Single model training approach
+  - Mixed precision training (fp16/bfloat16)
+  - Memory-efficient attention enabled
 
 - Training Process:
   - 4-5 hours for 10 epochs on Kaggle
-  - No cross-validation
   - Basic loss function with L1 and PDE components
-  - No ensemble strategy
+  - No cross-validation
+  - Basic data augmentation
 
 ### Success Metrics
 - Performance Metrics:
@@ -47,14 +48,6 @@
   - Validate against known solutions
   - Ensure CRF respects physical boundaries
   - Maintain structural consistency
-
-- Implementation Constraints:
-  - Maintain code modularity
-  - Ensure backward compatibility
-  - Keep configuration flexible
-  - Document all changes
-  - Make CRF integration optional
-  - Start with non-trainable CRF
 
 ## 2. Proposed Changes Specifications
 
