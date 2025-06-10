@@ -140,9 +140,15 @@ def setup_environment():
         data_dir.mkdir(exist_ok=True)
         setup_paths(data_dir)
 
-        # Download datasets using kagglehub
-        print("Downloading dataset from Kaggle...")
-        kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
+        # Setup S3 client and sync data
+        try:
+            s3 = boto3.client('s3', region_name=CFG.env.aws_region)
+            print("Syncing data from S3...")
+            s3.sync(f's3://{CFG.env.s3_bucket}/raw/', str(CFG.paths.root))
+            print("S3 data sync complete")
+        except ClientError as e:
+            logging.error(f"Failed to sync data from S3: {e}")
+            raise
         
         print("Environment setup complete for Colab")
     

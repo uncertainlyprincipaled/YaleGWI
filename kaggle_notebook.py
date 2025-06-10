@@ -61,7 +61,6 @@ class _KagglePaths:
         self.aws_train: Optional[Path] = None
         self.aws_test: Optional[Path] = None
         self.aws_output: Optional[Path] = None
-        self.s3_bucket: Optional[str] = None
 
 class _Env:
     def __init__(self):
@@ -83,7 +82,7 @@ class _Env:
         # AWS-specific settings
         if self.kind == 'aws':
             self.aws_region = os.environ.get('AWS_REGION', 'us-east-1')
-            self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi')
+            self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi-data')
             self.ebs_mount = Path('/mnt')
             self.use_spot = os.environ.get('USE_SPOT', 'true').lower() == 'true'
             self.spot_interruption_probability = float(os.environ.get('SPOT_INTERRUPTION_PROB', '0.1'))
@@ -144,7 +143,6 @@ class Config:
                 cls._inst.paths.aws_train = cls._inst.paths.aws_root / 'train_samples'
                 cls._inst.paths.aws_test = cls._inst.paths.aws_root / 'test'
                 cls._inst.paths.aws_output = cls._inst.env.ebs_mount / 'output'
-                cls._inst.paths.s3_bucket = cls._inst.env.s3_bucket
                 
                 # Update paths for AWS environment
                 cls._inst.paths.root = cls._inst.paths.aws_root
@@ -370,9 +368,15 @@ def setup_environment():
         data_dir.mkdir(exist_ok=True)
         setup_paths(data_dir)
 
-        # Download datasets using kagglehub
-        print("Downloading dataset from Kaggle...")
-        kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
+        # Setup S3 client and sync data
+        try:
+            s3 = boto3.client('s3', region_name=CFG.env.aws_region)
+            print("Syncing data from S3...")
+            s3.sync(f's3://{CFG.env.s3_bucket}/raw/', str(CFG.paths.root))
+            print("S3 data sync complete")
+        except ClientError as e:
+            logging.error(f"Failed to sync data from S3: {e}")
+            raise
         
         print("Environment setup complete for Colab")
     
