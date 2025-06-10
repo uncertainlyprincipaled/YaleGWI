@@ -9,8 +9,9 @@ def get_model():
     """Create and return a SpecProjNet model instance."""
     model = SpecProjNet(
         backbone=CFG.backbone,
-        pretrained=CFG.pretrained,
-        ema_decay=CFG.ema_decay
+        pretrained=False,  # Always False to prevent downloading
+        ema_decay=CFG.ema_decay,
+        weights_path=CFG.weight_path  # Pass the weights path from CFG
     ).to(CFG.env.device)
     return model
 
@@ -320,8 +321,9 @@ class SpecProjNet(nn.Module):
     def __init__(
         self,
         backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
-        pretrained: bool = True,
+        pretrained: bool = False,  # Changed to False to prevent downloading
         ema_decay: float = 0.99,
+        weights_path: str = None,  # Added parameter for local weights path
     ):
         super().__init__()
         # Load backbone with gradient checkpointing enabled
@@ -332,6 +334,20 @@ class SpecProjNet(nn.Module):
             in_chans=5,
             checkpoint_path=''  # Enable gradient checkpointing
         )
+        
+        # Load local weights if provided
+        if weights_path:
+            try:
+                state_dict = torch.load(weights_path, map_location='cpu')
+                # Try loading with strict=False to handle missing keys
+                missing_keys, unexpected_keys = self.backbone.load_state_dict(state_dict, strict=False)
+                if missing_keys:
+                    print(f"Warning: Missing keys in state dict: {missing_keys}")
+                if unexpected_keys:
+                    print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
+            except Exception as e:
+                print(f"Warning: Could not load weights from {weights_path}: {str(e)}")
+                print("Continuing with randomly initialized weights")
         
         # Update stem stride
         self._update_stem()

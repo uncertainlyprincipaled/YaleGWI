@@ -1,11 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from data_manager import DataManager
-from config import CFG
+# from data_manager import DataManager
+# from config import CFG
 from pathlib import Path
 from typing import Dict, List, Tuple
-from src.core.setup import setup_environment  # Ensure correct paths
+# from src.core.setup import setup_environment  # Ensure correct paths
 setup_environment()  # Set up paths before any EDA code
 
 def summarize_array(arr):
@@ -218,10 +218,12 @@ def summarize_array_shapes(family_stats: Dict[str, Tuple[List, List]]):
 
 def summarize_family_sizes(family_stats: Dict[str, Tuple[List, List]]):
     """
-    Print a summary of family sizes and highlight imbalances.
+    Print a summary of family sizes and highlight imbalances, using the true number of samples per family.
     """
     print("\nFamily Size Summary:")
-    sizes = {family: len(seis_stats) for family, (seis_stats, _) in family_stats.items()}
+    from config import CFG
+    base_path = CFG.paths.train
+    sizes = {family: count_samples_base(base_path, family) for family in family_stats.keys()}
     for family, size in sizes.items():
         print(f"{family}: {size} samples")
     min_size = min(sizes.values())
@@ -238,7 +240,7 @@ def check_balancing_requirements(target_count=1000):
     For each family, print base and OpenFWI sample counts, and how many to supplement or downsample.
     """
     print("\n=== Data Balancing Requirements ===")
-    from config import CFG
+    # from config import CFG
     import os
     # Detect OpenFWI path
     openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
@@ -252,13 +254,9 @@ def check_balancing_requirements(target_count=1000):
     print("-"*50)
     for family in base_families:
         # Count base samples
-        dm = DataManager()
-        base_seis, base_vel, _ = dm.list_family_files(family)
-        base_count = len(base_seis)
+        base_count = count_samples_base(CFG.paths.train, family)
         # Count OpenFWI samples
-        openfwi_family = openfwi_path / family
-        openfwi_seis = sorted(openfwi_family.glob('seis*.npy')) if openfwi_family.exists() else []
-        openfwi_count = len(openfwi_seis)
+        openfwi_count = count_samples_openfwi(openfwi_path, family)
         # Compute how many to add or downsample
         to_add = max(0, target_count - base_count)
         to_down = max(0, (base_count + openfwi_count) - target_count) if (base_count + openfwi_count) > target_count else 0
@@ -267,24 +265,50 @@ def check_balancing_requirements(target_count=1000):
 
 def count_samples_base(base_path, family):
     fam_dir = base_path / family
-    # Check for data/ subfolder
-    data_dir = fam_dir / 'data' if (fam_dir / 'data').exists() else fam_dir
-    seis_files = sorted(data_dir.glob('seis*.npy'))
+    # Vel/Style: data/ subfolder with data*.npy files (batched)
+    if (fam_dir / 'data').exists():
+        data_dir = fam_dir / 'data'
+        files = sorted(data_dir.glob('*.npy'))
+        total_samples = 0
+        for f in files:
+            arr = np.load(f, mmap_mode='r')
+            total_samples += arr.shape[0]  # Each file: (500, ...)
+        return total_samples
+    else:
+        # Fault: seis*.npy files in family folder (not batched)
+        seis_files = sorted(fam_dir.glob('seis*.npy'))
+        return len(seis_files)
+
+def count_samples_openfwi(openfwi_path, family):
+    fam_dir = openfwi_path / family
+    # Look for both seis*.npy and data*.npy files
+    files = list(fam_dir.glob('seis*.npy')) + list(fam_dir.glob('data*.npy'))
     total_samples = 0
-    for f in seis_files:
+    for f in files:
         arr = np.load(f, mmap_mode='r')
         # If batched, count first dimension; else count as 1
         n = arr.shape[0] if arr.ndim > 2 else 1
         total_samples += n
     return total_samples
 
-def count_samples_openfwi(openfwi_path, family):
-    fam_dir = openfwi_path / family
-    seis_files = sorted(fam_dir.glob('seis*.npy'))
-    return len(seis_files)
+def print_samples_per_file(base_path, family):
+    """
+    For each .npy file in the family directory, print the filename, shape, and number of samples (first dimension if batched, else 1).
+    """
+    fam_dir = base_path / family
+    files = list(fam_dir.glob('seis*.npy')) + list(fam_dir.glob('vel*.npy'))
+    print(f"\nSamples per file for family: {family}")
+    for f in files:
+        arr = np.load(f, mmap_mode='r')
+        shape = arr.shape
+        if len(shape) > 1:
+            n_samples = shape[0]
+        else:
+            n_samples = 1
+        print(f"  {f.name}: shape = {shape}, samples in file = {n_samples}")
 
 def main():
-    from config import CFG
+    # from config import CFG
     families = list(CFG.paths.families.keys())
     family_stats = {}
     
@@ -314,7 +338,7 @@ def main():
 
     # --- Print explicit sample counts for each family ---
     print("\nSample counts per family (Base and OpenFWI):")
-    base_path = CFG.paths.train.parent  # This should point to 'train_samples'
+    base_path = CFG.paths.train  # This should point to 'train_samples'
     openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
     print(f"{'Family':<15} {'Base':>6} {'OpenFWI':>8}")
     print("-"*32)
@@ -324,8 +348,26 @@ def main():
         print(f"{fam:<15} {base_count:>6} {openfwi_count:>8}")
     print("-"*32)
 
+    # Check samples per file for large Fault/Curve families
+    for fam in ['FlatFault_A', 'FlatFault_B', 'CurveFault_A', 'CurveFault_B']:
+        print_samples_per_file(base_path, fam)
+
     # Check balancing requirements
     check_balancing_requirements()
+
+    # Check OpenFWI file shapes
+    families = ['FlatVel_A', 'FlatFault_A', 'CurveVel_A']
+    openfwi_root = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+
+    for fam in families:
+        fam_dir = openfwi_root / fam
+        # This needs to be updated to check for both seis*.npy and data*.npy files 
+
+        files = sorted(fam_dir.glob('seis*.npy'))[:3] + sorted(fam_dir.glob('data*.npy'))[:3]
+        print(f"\nFamily: {fam}")
+        for f in files:
+            arr = np.load(f, mmap_mode='r')
+            print(f"  {f.name}: shape = {arr.shape}")
 
 if __name__ == "__main__":
     main() 

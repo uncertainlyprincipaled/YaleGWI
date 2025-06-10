@@ -67,4 +67,107 @@ Install the required packages:
 pip install -r requirements.txt
 ```
 
+## Features
+
+- **Physics-Guided Architecture**: Uses spectral projectors to inject wave-equation priors
+- **Mixed Precision Training**: Supports both fp16 and bfloat16 for efficient training
+- **Memory Optimization**: Implements efficient attention and memory management
+- **Family-Aware Training**: Stratified sampling by geological families
+- **Robust Training**: Includes gradient clipping, early stopping, and learning rate scheduling
+- **Comprehensive Checkpointing**: Saves full training state for easy resumption
+
+## Project Structure
+
+```
+.
+├── src/
+│   ├── core/
+│   │   ├── config.py      # Configuration management
+│   │   ├── train.py       # Training loop implementation
+│   │   ├── model.py       # Model architecture
+│   │   └── losses.py      # Loss functions
+│   └── utils/
+│       ├── data.py        # Data loading utilities
+│       └── metrics.py     # Evaluation metrics
+├── notebooks/             # Jupyter notebooks for analysis
+├── tests/                 # Unit tests
+└── outputs/              # Training outputs and checkpoints
+```
+
+## Usage
+
+### Training
+
+```python
+from src.core.train import train
+
+# Start training with default settings
+train(fp16=True)  # Enable mixed precision training
+```
+
+### Inference
+
+```python
+from src.core.model import get_model
+import torch
+
+# Load model and weights
+model = get_model()
+model.load_state_dict(torch.load('outputs/best.pth'))
+
+# Run inference
+predictions = model(input_data)
+```
+
+## Key Components
+
+### Model Architecture
+- SpecProj-UNet: Combines UNet with spectral projectors for physics-guided learning
+- EMA: Exponential Moving Average for model weights
+- Mixed Precision: Automatic mixed precision training support
+
+### Training Features
+- Gradient Clipping: Prevents exploding gradients
+- Early Stopping: Stops training when validation performance plateaus
+- Learning Rate Scheduling: Adaptive learning rate adjustment
+- Memory Management: Efficient GPU memory usage
+- Comprehensive Checkpointing: Saves full training state
+
+### Loss Functions
+- L1 Loss: Basic reconstruction loss
+- PDE Residual: Physics-based consistency term
+- Joint Loss: Combines multiple loss components
+
+## Development
+
+### Running Tests
+```bash
+pytest tests/
+```
+
+### Code Style
+We use black for code formatting and flake8 for linting:
+```bash
+black src/
+flake8 src/
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Based on the Kaggle competition "Seismic Waveform Inversion"
+- Inspired by various physics-guided deep learning approaches
+- Uses PyTorch for deep learning implementation
+
 

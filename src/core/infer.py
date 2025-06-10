@@ -1,126 +1,84 @@
-# All data IO in this file must go through DataManager (src/core/data_manager.py)
-# Do NOT load data directly in this file.
-#
-# ## Inference
-
-# %%
-import torch, pandas as pd
-from pathlib import Path
-import os
-import time
+"""
+Inference script that uses DataManager for all data IO.
+All data IO in this file must go through DataManager (src/core/data_manager.py)
+Do NOT load data directly in this file.
+"""
+import torch
 from tqdm import tqdm
-from config import CFG
-from data_manager import DataManager
+from torch.amp import autocast
 from model import SpecProjNet
+from data_manager import DataManager
+from config import CFG
+import pandas as pd
+import os
+from pathlib import Path
+import csv
 
 def format_submission(vel_map, oid):
-    # keep *odd* x-columns only (1,3,…,69)
-    cols = vel_map[:,1::2]
+    # vel_map: (70, 70) numpy array
+    # oid: string (file stem)
     rows = []
-    for y,row in enumerate(cols):
-        rows.append({'oid_ypos': f'{oid}_y_{y}', **{f'x_{2*i+1}':v
-                      for i,v in enumerate(row.tolist())}})
+    for y in range(vel_map.shape[0]):
+        row = {'oid_ypos': f'{oid}_y_{y}'}
+        for i, x in enumerate(range(1, 70, 2)):
+            row[f'x_{x}'] = float(vel_map[y, x])
+        rows.append(row)
     return rows
 
-def estimate_inference_time(test_files=None, batch_size=4, disable_tta=False):
-    if test_files is None:
-        data_manager = DataManager()
-        test_files = data_manager.get_test_files()
-    sample_size = min(10, len(test_files))
-    print(len(test_files))
-    sample_files = test_files[:sample_size]  # Only use a small sample!
-    try:
-        start_time = time.time()
-        # Run inference on the sample, not the full set!
-        infer(weights=CFG.weight_path, batch_size=batch_size, disable_tta=disable_tta, test_files=sample_files)
-        elapsed = time.time() - start_time
-        # Estimate total time
-        total_samples = len(test_files)
-        estimated_time = (elapsed / sample_size) * total_samples
-        return estimated_time
-    except Exception as e:
-        print(f"Error during time estimation: {str(e)}")
-        return None
+def infer():
+    # Use weights path from config
+    weights = CFG.weight_path
 
-def infer(weights=None, batch_size=8, disable_tta=False, test_files=None):
-    """Run inference with batching and checkpointing."""
-    # Use CFG.weight_path as default if weights not provided
-    weights = weights or CFG.weight_path
-    # Check for existence and provide a clear error if missing
-    if not Path(weights).exists():
-        raise FileNotFoundError(f"Model weights not found at {weights}. If running on Kaggle, make sure to add the dataset containing the weights (e.g., 'yalegwi') to your notebook.")
-    
-    # Initialize data manager
-    data_manager = DataManager()
-    
-    # Load model
+    # Model setup
     model = SpecProjNet(
         backbone=CFG.backbone,
         pretrained=False,
-        ema_decay=0.0,  # No EMA for inference
+        ema_decay=0.99,
     ).to(CFG.env.device)
-    
-    # Load state dict and remove 'ema.module.' prefix if present
-    state_dict = torch.load(weights, map_location=CFG.env.device)
-    if any(k.startswith('ema.module.') for k in state_dict.keys()):
-        state_dict = {k.replace('ema.module.', ''): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
+    print("Model created")
+    checkpoint = torch.load(weights, map_location=CFG.env.device, weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.set_ema()
+    print("Weights loaded and EMA set")
     model.eval()
+    print("Model set to eval")
 
-    if test_files is None:
-        test_files = data_manager.get_test_files()
-    # For test, family_type is not needed, but we pass 'Fault' for single-sample-per-file
+    # Data setup
+    data_manager = DataManager()
+    test_files = data_manager.get_test_files()
+    print("Number of test files:", len(test_files))
+    # test_files = test_files[:10]  # Uncomment for debugging only
+    test_dataset = data_manager.create_dataset(test_files, None, 'test')
     test_loader = data_manager.create_loader(
-        test_files, test_files, 'Fault',
-        batch_size=batch_size,
-        shuffle=False
+        test_files, None, 'test',
+        batch_size=2,  # or your preferred batch size
+        shuffle=False,
+        num_workers=0
     )
+    print("Test loader created")
 
-    rows = []
-    with torch.no_grad(), torch.amp.autocast('cuda'):
-        for seis, oid in tqdm(test_loader, desc="Inference"):
-            seis = seis.to(CFG.env.device).to(torch.float16)
-            
-            # Original prediction
-            vel = model(seis)
-            
-            if not disable_tta:
-                # TTA: Flip prediction
-                seis_flip = seis.flip(-1)
-                vel_flip = model(seis_flip)
-                vel_flip = vel_flip.flip(-1)
-                vel = (vel + vel_flip) / 2
-            
-            # Keep in float16 until final conversion
-            vel = vel.cpu().numpy()
-            
-            # Process batch results
-            for b in range(vel.shape[0]):
-                oid_str = Path(oid[b]).stem if isinstance(oid[b], (str, Path)) else str(oid[b])
-                rows += format_submission(vel[b,0], oid_str)
-                
-            # Save intermediate results less frequently
-            if len(rows) % 25000 == 0:
-                print(f"Saving intermediate results: {len(rows)} predictions processed")
-                pd.DataFrame(rows).to_csv('submission_partial.csv', index=False)
-                rows = []  # <-- Add this line to free memory
-    
-    # Save final results
-    print(f"Saving final results: {len(rows)} predictions processed")
-    pd.DataFrame(rows).to_csv('submission.csv', index=False)
-    if Path('submission_partial.csv').exists():
-        Path('submission_partial.csv').unlink()  # Remove partial file
+    # Prepare CSV header
+    x_cols = [f'x_{x}' for x in range(1, 70, 2)]
+    fieldnames = ['oid_ypos'] + x_cols
 
-if __name__ == '__main__':
-    # Estimate time first
-    est_time = estimate_inference_time(None, disable_tta=False)
-    if est_time is not None:
-        print(f"Estimated inference time: {est_time/60:.1f} minutes")
-        # If inference time is > 8 hours, fail loudly
-        if est_time > 8 * 60 * 60:
-            raise ValueError("Estimated inference time is > 8 hours, please run with disable_tta=True")
-    else:
-        print("Could not estimate inference time, proceeding with full inference")
-    
-    # Run full inference
-    infer(disable_tta=True) 
+    print("Starting inference loop")
+    with open('submission.csv', 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        with torch.no_grad():
+            for batch_idx, (seis, _) in enumerate(tqdm(test_loader, desc="Processing test files")):
+                seis = seis.to(CFG.env.device, non_blocking=True).float()
+                with autocast('cuda', enabled=CFG.use_amp):
+                    preds = model(seis)
+                preds = preds.cpu().numpy()
+                for i in range(preds.shape[0]):
+                    vel_map = preds[i]
+                    if vel_map.shape[0] == 1:
+                        vel_map = vel_map[0]
+                    oid = Path(test_files[batch_idx * test_loader.batch_size + i]).stem
+                    rows = format_submission(vel_map, oid)
+                    writer.writerows(rows)  # Write this batch's rows immediately
+    print("Inference complete and submission.csv saved.")
+
+if __name__ == "__main__":
+    infer() 

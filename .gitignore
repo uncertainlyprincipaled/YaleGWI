@@ -1,3 +1,11 @@
+# Environment files
+.env/
+.env/aws/
+.env/kaggle/
+.env/aws/credentials
+.env/aws/config
+.env/kaggle/credentials
+
 # Python
 __pycache__/
 *.py[cod]

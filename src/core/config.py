@@ -5,11 +5,14 @@
 from __future__ import annotations
 import os, json
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Optional
 import torch
+import boto3
+from botocore.exceptions import ClientError
+import logging
 
 # --------------------------------------------------------------------------- #
-#  Detect runtime (Kaggle / Colab / SageMaker / local) and expose a singleton #
+#  Detect runtime (Kaggle / Colab / SageMaker / AWS / local) and expose a singleton #
 # --------------------------------------------------------------------------- #
 
 class _KagglePaths:
@@ -30,19 +33,46 @@ class _KagglePaths:
             'CurveFault_A': self.train/'CurveFault_A',
             'CurveFault_B': self.train/'CurveFault_B',
         }
+        # Add AWS-specific paths
+        self.aws_root: Optional[Path] = None
+        self.aws_train: Optional[Path] = None
+        self.aws_test: Optional[Path] = None
+        self.aws_output: Optional[Path] = None
+        self.s3_bucket: Optional[str] = None
 
 class _Env:
     def __init__(self):
-        if 'KAGGLE_URL_BASE' in os.environ:
-            self.kind: Literal['kaggle','colab','sagemaker','local'] = 'kaggle'
+        # Environment detection
+        if os.environ.get("AWS_EXECUTION_ENV") or Path("/home/ec2-user").exists():
+            self.kind: Literal['kaggle','colab','sagemaker','aws','local'] = 'aws'
+        elif 'KAGGLE_URL_BASE' in os.environ:
+            self.kind = 'kaggle'
         elif 'COLAB_GPU' in os.environ:
             self.kind = 'colab'
         elif 'SM_NUM_CPUS' in os.environ:
             self.kind = 'sagemaker'
         else:
             self.kind = 'local'
+            
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+        
+        # AWS-specific settings
+        if self.kind == 'aws':
+            self.aws_region = os.environ.get('AWS_REGION', 'us-east-1')
+            self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi')
+            self.ebs_mount = Path('/mnt')
+            self.use_spot = os.environ.get('USE_SPOT', 'true').lower() == 'true'
+            self.spot_interruption_probability = float(os.environ.get('SPOT_INTERRUPTION_PROB', '0.1'))
+            
+            # Load AWS credentials from environment file
+            aws_creds_path = Path(__file__).parent.parent.parent / '.env/aws/credentials'
+            if aws_creds_path.exists():
+                with open(aws_creds_path) as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            os.environ[key] = value
 
 class Config:
     """Read-only singleton accessed via `CFG`."""
@@ -85,13 +115,20 @@ class Config:
             # Enable joint training by default in Kaggle
             cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
 
-            # Detect OpenFWI-style if present
-            openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-            if openfwi_path.exists():
-                cls._inst.paths.families = {f.name: f for f in openfwi_path.iterdir() if f.is_dir()}
-                cls._inst.dataset_style = 'openfwi'
-            else:
-                # Explicit YaleGWI logic
+            # AWS-specific settings
+            if cls._inst.env.kind == 'aws':
+                cls._inst.paths.aws_root = cls._inst.env.ebs_mount / 'waveform-inversion'
+                cls._inst.paths.aws_train = cls._inst.paths.aws_root / 'train_samples'
+                cls._inst.paths.aws_test = cls._inst.paths.aws_root / 'test'
+                cls._inst.paths.aws_output = cls._inst.env.ebs_mount / 'output'
+                cls._inst.paths.s3_bucket = cls._inst.env.s3_bucket
+                
+                # Update paths for AWS environment
+                cls._inst.paths.root = cls._inst.paths.aws_root
+                cls._inst.paths.train = cls._inst.paths.aws_train
+                cls._inst.paths.test = cls._inst.paths.aws_test
+                
+                # Update family paths for AWS
                 train = cls._inst.paths.train
                 cls._inst.paths.families = {
                     'FlatVel_A'   : train/'FlatVel_A',
@@ -105,11 +142,25 @@ class Config:
                     'CurveFault_A': train/'CurveFault_A',
                     'CurveFault_B': train/'CurveFault_B',
                 }
-                cls._inst.dataset_style = 'yalegwi'
+            
+            # Always use base dataset for now
+            train = cls._inst.paths.train
+            cls._inst.paths.families = {
+                'FlatVel_A'   : train/'FlatVel_A',
+                'FlatVel_B'   : train/'FlatVel_B',
+                'CurveVel_A'  : train/'CurveVel_A',
+                'CurveVel_B'  : train/'CurveVel_B',
+                'Style_A'     : train/'Style_A',
+                'Style_B'     : train/'Style_B',
+                'FlatFault_A' : train/'FlatFault_A',
+                'FlatFault_B' : train/'FlatFault_B',
+                'CurveFault_A': train/'CurveFault_A',
+                'CurveFault_B': train/'CurveFault_B',
+            }
+            cls._inst.dataset_style = 'yalegwi'
 
-            # Optionally, exclude families with too few samples (e.g., Fault families with < 10 samples)
+            # Optionally, exclude families with too few samples
             cls._inst.families_to_exclude = []
-            # This can be populated after EDA or by a config file/parameter
 
         return cls._inst
 

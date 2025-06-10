@@ -28,11 +28,14 @@ import polars as pl
 from __future__ import annotations
 import os, json
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Optional
 import torch
+import boto3
+from botocore.exceptions import ClientError
+import logging
 
 # --------------------------------------------------------------------------- #
-#  Detect runtime (Kaggle / Colab / SageMaker / local) and expose a singleton #
+#  Detect runtime (Kaggle / Colab / SageMaker / AWS / local) and expose a singleton #
 # --------------------------------------------------------------------------- #
 
 class _KagglePaths:
@@ -53,19 +56,46 @@ class _KagglePaths:
             'CurveFault_A': self.train/'CurveFault_A',
             'CurveFault_B': self.train/'CurveFault_B',
         }
+        # Add AWS-specific paths
+        self.aws_root: Optional[Path] = None
+        self.aws_train: Optional[Path] = None
+        self.aws_test: Optional[Path] = None
+        self.aws_output: Optional[Path] = None
+        self.s3_bucket: Optional[str] = None
 
 class _Env:
     def __init__(self):
-        if 'KAGGLE_URL_BASE' in os.environ:
-            self.kind: Literal['kaggle','colab','sagemaker','local'] = 'kaggle'
+        # Environment detection
+        if os.environ.get("AWS_EXECUTION_ENV") or Path("/home/ec2-user").exists():
+            self.kind: Literal['kaggle','colab','sagemaker','aws','local'] = 'aws'
+        elif 'KAGGLE_URL_BASE' in os.environ:
+            self.kind = 'kaggle'
         elif 'COLAB_GPU' in os.environ:
             self.kind = 'colab'
         elif 'SM_NUM_CPUS' in os.environ:
             self.kind = 'sagemaker'
         else:
             self.kind = 'local'
+            
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+        
+        # AWS-specific settings
+        if self.kind == 'aws':
+            self.aws_region = os.environ.get('AWS_REGION', 'us-east-1')
+            self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi')
+            self.ebs_mount = Path('/mnt')
+            self.use_spot = os.environ.get('USE_SPOT', 'true').lower() == 'true'
+            self.spot_interruption_probability = float(os.environ.get('SPOT_INTERRUPTION_PROB', '0.1'))
+            
+            # Load AWS credentials from environment file
+            aws_creds_path = Path(__file__).parent.parent.parent / '.env/aws/credentials'
+            if aws_creds_path.exists():
+                with open(aws_creds_path) as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            os.environ[key] = value
 
 class Config:
     """Read-only singleton accessed via `CFG`."""
@@ -108,13 +138,20 @@ class Config:
             # Enable joint training by default in Kaggle
             cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
 
-            # Detect OpenFWI-style if present
-            openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-            if openfwi_path.exists():
-                cls._inst.paths.families = {f.name: f for f in openfwi_path.iterdir() if f.is_dir()}
-                cls._inst.dataset_style = 'openfwi'
-            else:
-                # Explicit YaleGWI logic
+            # AWS-specific settings
+            if cls._inst.env.kind == 'aws':
+                cls._inst.paths.aws_root = cls._inst.env.ebs_mount / 'waveform-inversion'
+                cls._inst.paths.aws_train = cls._inst.paths.aws_root / 'train_samples'
+                cls._inst.paths.aws_test = cls._inst.paths.aws_root / 'test'
+                cls._inst.paths.aws_output = cls._inst.env.ebs_mount / 'output'
+                cls._inst.paths.s3_bucket = cls._inst.env.s3_bucket
+                
+                # Update paths for AWS environment
+                cls._inst.paths.root = cls._inst.paths.aws_root
+                cls._inst.paths.train = cls._inst.paths.aws_train
+                cls._inst.paths.test = cls._inst.paths.aws_test
+                
+                # Update family paths for AWS
                 train = cls._inst.paths.train
                 cls._inst.paths.families = {
                     'FlatVel_A'   : train/'FlatVel_A',
@@ -128,11 +165,25 @@ class Config:
                     'CurveFault_A': train/'CurveFault_A',
                     'CurveFault_B': train/'CurveFault_B',
                 }
-                cls._inst.dataset_style = 'yalegwi'
+            
+            # Always use base dataset for now
+            train = cls._inst.paths.train
+            cls._inst.paths.families = {
+                'FlatVel_A'   : train/'FlatVel_A',
+                'FlatVel_B'   : train/'FlatVel_B',
+                'CurveVel_A'  : train/'CurveVel_A',
+                'CurveVel_B'  : train/'CurveVel_B',
+                'Style_A'     : train/'Style_A',
+                'Style_B'     : train/'Style_B',
+                'FlatFault_A' : train/'FlatFault_A',
+                'FlatFault_B' : train/'FlatFault_B',
+                'CurveFault_A': train/'CurveFault_A',
+                'CurveFault_B': train/'CurveFault_B',
+            }
+            cls._inst.dataset_style = 'yalegwi'
 
-            # Optionally, exclude families with too few samples (e.g., Fault families with < 10 samples)
+            # Optionally, exclude families with too few samples
             cls._inst.families_to_exclude = []
-            # This can be populated after EDA or by a config file/parameter
 
         return cls._inst
 
@@ -181,6 +232,11 @@ import os
 import subprocess
 from pathlib import Path
 import shutil
+import boto3
+from botocore.exceptions import ClientError
+import logging
+import time
+from typing import Optional
 try:
     import kagglehub
 except ImportError:
@@ -214,6 +270,67 @@ def warm_kaggle_cache():
         print(f"Warning: Unexpected error during cache warmup: {e}")
         print("This is not critical - continuing with setup...")
 
+def setup_aws_environment():
+    """Setup AWS-specific environment configurations."""
+    from src.core.config import CFG
+    
+    # Setup S3 client
+    s3 = boto3.client('s3', region_name=CFG.env.aws_region)
+    
+    # Setup paths
+    CFG.paths.root = CFG.env.ebs_mount / 'waveform-inversion'
+    CFG.paths.train = CFG.paths.root / 'train_samples'
+    CFG.paths.test = CFG.paths.root / 'test'
+    CFG.paths.out = CFG.env.ebs_mount / 'output'
+    
+    # Create directories
+    for path in [CFG.paths.root, CFG.paths.train, CFG.paths.test, CFG.paths.out]:
+        path.mkdir(parents=True, exist_ok=True)
+    
+    # Sync data from S3
+    try:
+        s3.sync(f's3://{CFG.env.s3_bucket}/raw/', str(CFG.paths.root))
+    except ClientError as e:
+        logging.error(f"Failed to sync data from S3: {e}")
+        raise
+
+def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainlyprincipaled/yalegwi"):
+    """Push training artefacts to Kaggle dataset with rate limiting awareness."""
+    try:
+        # Check if kaggle.json exists
+        kaggle_json = Path.home() / '.kaggle/kaggle.json'
+        if not kaggle_json.exists():
+            # Try to load from environment file
+            env_kaggle_json = Path(__file__).parent.parent.parent / '.env/kaggle/credentials'
+            if env_kaggle_json.exists():
+                kaggle_json.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(env_kaggle_json, kaggle_json)
+                kaggle_json.chmod(0o600)
+            else:
+                raise FileNotFoundError("Kaggle credentials not found")
+        
+        # Push to Kaggle with rate limiting awareness
+        max_retries = 3
+        retry_delay = 60  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                subprocess.run([
+                    "kaggle", "datasets", "version", "-p", str(artefact_dir),
+                    "-m", message, "-d", dataset, "--dir-mode", "zip"
+                ], check=True)
+                break
+            except subprocess.CalledProcessError as e:
+                if "429" in str(e) and attempt < max_retries - 1:  # Rate limit error
+                    logging.warning(f"Rate limit hit, waiting {retry_delay} seconds before retry...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise
+    except Exception as e:
+        logging.error(f"Failed to push to Kaggle: {e}")
+        raise
+
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
     from src.core.config import CFG  # Import here to avoid circular dependency
@@ -243,11 +360,20 @@ def setup_environment():
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
     
-    if CFG.env.kind == 'colab':
+    if CFG.env.kind == 'aws':
+        setup_aws_environment()
+        print("Environment setup complete for AWS")
+    
+    elif CFG.env.kind == 'colab':
         # Create data directory
         data_dir = Path('/content/data')
         data_dir.mkdir(exist_ok=True)
         setup_paths(data_dir)
+
+        # Download datasets using kagglehub
+        print("Downloading dataset from Kaggle...")
+        kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
+        
         print("Environment setup complete for Colab")
     
     elif CFG.env.kind == 'sagemaker':
@@ -308,8 +434,16 @@ from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-from config import CFG
+import boto3
+from botocore.exceptions import ClientError
+import logging
+import os
 from torch.utils.data import DistributedSampler
+import socket
+import logging
+import mmap
+import tempfile
+import shutil
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -327,6 +461,31 @@ class MemoryTracker:
             'max_memory_gb': self.max_memory / 1e9
         }
 
+class S3DataLoader:
+    """Handles efficient data loading from S3 with local caching."""
+    def __init__(self, bucket: str, region: str):
+        self.s3 = boto3.client('s3', region_name=region)
+        self.bucket = bucket
+        self.cache_dir = Path(tempfile.gettempdir()) / 'gwi_cache'
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+    def download_file(self, s3_key: str, local_path: Path) -> Path:
+        """Download a file from S3 with caching."""
+        cache_path = self.cache_dir / s3_key.replace('/', '_')
+        
+        if not cache_path.exists():
+            try:
+                self.s3.download_file(self.bucket, s3_key, str(cache_path))
+            except ClientError as e:
+                logging.error(f"Failed to download {s3_key} from S3: {e}")
+                raise
+                
+        # Create a hard link to avoid copying
+        if not local_path.exists():
+            os.link(cache_path, local_path)
+            
+        return local_path
+
 class DataManager:
     """
     DataManager is the single source of truth for all data IO in this project.
@@ -336,14 +495,62 @@ class DataManager:
     def __init__(self, use_mmap: bool = True):
         self.use_mmap = use_mmap
         self.memory_tracker = MemoryTracker()
+        from src.core.config import CFG
+        
+        # Initialize S3 loader if in AWS environment
+        if CFG.env.kind == 'aws':
+            self.s3_loader = S3DataLoader(CFG.env.s3_bucket, CFG.env.aws_region)
+        else:
+            self.s3_loader = None
 
-    def list_family_files(self, family: str) -> Tuple[List[Path], List[Path], str]:
-        """Return (seis_files, vel_files, family_type) for a given family."""
+    def list_family_files(self, family: str):
+        """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
+        from src.core.config import CFG
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
             
-        # First try YaleGWI-style structure (data/model subdirectories)
+        # Handle S3 data if in AWS environment
+        if CFG.env.kind == 'aws':
+            try:
+                # List objects in S3
+                s3_objects = self.s3_loader.s3.list_objects_v2(
+                    Bucket=CFG.env.s3_bucket,
+                    Prefix=f"raw/{family}/"
+                )
+                
+                # Filter and sort files
+                seis_files = []
+                vel_files = []
+                for obj in s3_objects.get('Contents', []):
+                    key = obj['Key']
+                    if key.endswith('.npy'):
+                        if 'seis' in key:
+                            seis_files.append(key)
+                        elif 'vel' in key:
+                            vel_files.append(key)
+                            
+                # Download files to local cache
+                local_seis_files = []
+                local_vel_files = []
+                
+                for s3_key in sorted(seis_files):
+                    local_path = root / Path(s3_key).name
+                    local_seis_files.append(self.s3_loader.download_file(s3_key, local_path))
+                    
+                for s3_key in sorted(vel_files):
+                    local_path = root / Path(s3_key).name
+                    local_vel_files.append(self.s3_loader.download_file(s3_key, local_path))
+                    
+                if local_seis_files and local_vel_files:
+                    return local_seis_files, local_vel_files, 'Fault'
+                    
+            except ClientError as e:
+                logging.error(f"Failed to list S3 objects: {e}")
+                raise
+                
+        # Fallback to local filesystem
+        # Vel/Style: data/model subfolders (batched)
         if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
             vel_files = sorted((root/'model').glob('*.npy'))
@@ -351,36 +558,20 @@ class DataManager:
                 family_type = 'VelStyle'
                 return seis_files, vel_files, family_type
                 
-        # Then try OpenFWI-style structure (flat directory with seis/vel files)
+        # Fault: seis*.npy and vel*.npy directly in folder (not batched)
         seis_files = sorted(root.glob('seis*.npy'))
         vel_files = sorted(root.glob('vel*.npy'))
         if seis_files and vel_files:
-            # Pair by filename (replace 'seis' with 'vel')
-            paired_seis = []
-            paired_vel = []
-            for sfile in seis_files:
-                vfile = root / sfile.name.replace('seis', 'vel')
-                if vfile.exists():
-                    paired_seis.append(sfile)
-                    paired_vel.append(vfile)
-                else:
-                    print(f"[Warning] No matching velocity file for {sfile}")
-            if paired_seis and paired_vel:
-                family_type = 'PerSample'
-                return paired_seis, paired_vel, family_type
-                
-        # If we get here, we couldn't find a valid data structure
-        raise ValueError(f"Could not find valid data structure for family {family} at {root}. "
-                       f"Directory exists: {root.exists()}, "
-                       f"Contains data/model: {(root/'data').exists() and (root/'model').exists()}, "
-                       f"Contains seis/vel files: {bool(seis_files) and bool(vel_files)}")
+            family_type = 'Fault'
+            return seis_files, vel_files, family_type
+            
+        raise ValueError(f"Could not find valid data structure for family {family} at {root}")
 
-    def create_dataset(self, seis_files: List[Path], vel_files: List[Path], 
-                      family_type: str, augment: bool = False) -> Dataset:
+    def create_dataset(self, seis_files, vel_files, family_type, augment=False):
         return SeismicDataset(
-            seis_files, 
-            vel_files, 
-            family_type, 
+            seis_files,
+            vel_files,
+            family_type,
             augment,
             use_mmap=self.use_mmap,
             memory_tracker=self.memory_tracker
@@ -408,106 +599,53 @@ class DataManager:
         )
 
     def get_test_files(self) -> List[Path]:
+        from src.core.config import CFG
         return sorted(CFG.paths.test.glob('*.npy'))
 
-    def get_balanced_family_files(self, target_count=1000):
-        """
-        For each family, return (seis_files, vel_files, family_type) with up to target_count samples.
-        Supplement Fault families with OpenFWI if needed, and downsample large families if needed.
-        """
-        from config import CFG
-        import numpy as np
-        from pathlib import Path
-        openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-        families = list(CFG.paths.families.keys())
-        balanced = {}
-        for family in families:
-            # Get base files
-            base_seis, base_vel, family_type = self.list_family_files(family)
-            base_count = len(base_seis)
-            # Get OpenFWI files if available
-            openfwi_seis, openfwi_vel = [], []
-            if openfwi_path.exists() and (openfwi_path / family).exists():
-                openfwi_family = openfwi_path / family
-                openfwi_seis = sorted(openfwi_family.glob('seis*.npy'))
-                openfwi_vel = [openfwi_family / f.name.replace('seis', 'vel') for f in openfwi_seis if (openfwi_family / f.name.replace('seis', 'vel')).exists()]
-            # Combine
-            all_seis = base_seis + openfwi_seis
-            all_vel = base_vel + openfwi_vel
-            # Pair up to min length
-            min_len = min(len(all_seis), len(all_vel))
-            all_seis = all_seis[:min_len]
-            all_vel = all_vel[:min_len]
-            # Shuffle
-            idx = np.arange(len(all_seis))
-            np.random.shuffle(idx)
-            all_seis = [all_seis[i] for i in idx]
-            all_vel = [all_vel[i] for i in idx]
-            # Subsample or pad
-            if len(all_seis) >= target_count:
-                final_seis = all_seis[:target_count]
-                final_vel = all_vel[:target_count]
-            else:
-                final_seis = all_seis
-                final_vel = all_vel
-            balanced[family] = (final_seis, final_vel, family_type)
-        return balanced
-
 class SeismicDataset(Dataset):
-    """
-    Memory-efficient dataset for all families.
-    For Vel/Style: sample-wise mmap access from large files.
-    For Fault: one sample per file.
-    Uses float16 for memory efficiency.
-    """
+    """Memory-efficient dataset for seismic data using memory mapping."""
     def __init__(self, seis_files: List[Path], vel_files: List[Path], family_type: str, 
                  augment: bool = False, use_mmap: bool = True, memory_tracker: MemoryTracker = None):
+        self.seis_files = seis_files
+        self.vel_files = vel_files
         self.family_type = family_type
         self.augment = augment
-        self.index = []
         self.use_mmap = use_mmap
-        self.memory_tracker = memory_tracker
-        if family_type == 'VelStyle':
-            for sfile, vfile in zip(seis_files, vel_files):
-                # Each file contains 500 samples
-                for i in range(500):
-                    self.index.append((sfile, vfile, i))
-        elif family_type == 'Fault':
-            for sfile, vfile in zip(seis_files, vel_files):
-                self.index.append((sfile, vfile, None))
-        else:
-            raise ValueError(f"Unknown family_type: {family_type}")
-
-    def __len__(self):
-        return len(self.index)
-
-    def __getitem__(self, idx):
-        sfile, vfile, i = self.index[idx]
-        if self.family_type == 'VelStyle':
-            x = np.load(sfile, mmap_mode='r' if self.use_mmap else None)[i]
-            y = np.load(vfile, mmap_mode='r' if self.use_mmap else None)[i]
-        else:  # Fault
-            x = np.load(sfile)
-            y = np.load(vfile)
-            
-        # Convert to float16 for memory efficiency
-        x = x.astype(np.float16)
-        y = y.astype(np.float16)
-            
-        # Normalize per-receiver
-        mu = x.mean(axis=(1,2), keepdims=True)
-        std = x.std(axis=(1,2), keepdims=True) + 1e-6
-        x = (x - mu) / std
+        self.memory_tracker = memory_tracker or MemoryTracker()
         
-        # Add source dimension if not present
-        if len(x.shape) == 3:  # (T,R) -> (1,T,R)
-            x = x[None]
+        # Pre-load file sizes for memory tracking
+        self.file_sizes = {}
+        for f in seis_files + vel_files:
+            self.file_sizes[f] = f.stat().st_size
+            
+    def __len__(self):
+        return len(self.seis_files)
+        
+    def __getitem__(self, idx):
+        seis_file = self.seis_files[idx]
+        vel_file = self.vel_files[idx]
         
         # Track memory usage
         if self.memory_tracker:
-            self.memory_tracker.update(x.nbytes + y.nbytes)
+            self.memory_tracker.update(self.file_sizes[seis_file] + self.file_sizes[vel_file])
             
-        return torch.from_numpy(x), torch.from_numpy(y) 
+        # Load data with memory mapping
+        if self.use_mmap:
+            seis = np.load(seis_file, mmap_mode='r')
+            vel = np.load(vel_file, mmap_mode='r')
+            
+            # Convert to torch tensors with memory efficiency
+            seis_tensor = torch.from_numpy(seis).float()
+            vel_tensor = torch.from_numpy(vel).float()
+            
+            # Clear memory mapping
+            del seis, vel
+            
+        else:
+            seis_tensor = torch.from_numpy(np.load(seis_file)).float()
+            vel_tensor = torch.from_numpy(np.load(vel_file)).float()
+            
+        return seis_tensor, vel_tensor 
 
 
 # %%
@@ -515,11 +653,11 @@ class SeismicDataset(Dataset):
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from data_manager import DataManager
-from config import CFG
+# from data_manager import DataManager
+# from config import CFG
 from pathlib import Path
 from typing import Dict, List, Tuple
-from src.core.setup import setup_environment  # Ensure correct paths
+# from src.core.setup import setup_environment  # Ensure correct paths
 setup_environment()  # Set up paths before any EDA code
 
 def summarize_array(arr):
@@ -732,10 +870,12 @@ def summarize_array_shapes(family_stats: Dict[str, Tuple[List, List]]):
 
 def summarize_family_sizes(family_stats: Dict[str, Tuple[List, List]]):
     """
-    Print a summary of family sizes and highlight imbalances.
+    Print a summary of family sizes and highlight imbalances, using the true number of samples per family.
     """
     print("\nFamily Size Summary:")
-    sizes = {family: len(seis_stats) for family, (seis_stats, _) in family_stats.items()}
+    from config import CFG
+    base_path = CFG.paths.train
+    sizes = {family: count_samples_base(base_path, family) for family in family_stats.keys()}
     for family, size in sizes.items():
         print(f"{family}: {size} samples")
     min_size = min(sizes.values())
@@ -752,7 +892,7 @@ def check_balancing_requirements(target_count=1000):
     For each family, print base and OpenFWI sample counts, and how many to supplement or downsample.
     """
     print("\n=== Data Balancing Requirements ===")
-    from config import CFG
+    # from config import CFG
     import os
     # Detect OpenFWI path
     openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
@@ -766,13 +906,9 @@ def check_balancing_requirements(target_count=1000):
     print("-"*50)
     for family in base_families:
         # Count base samples
-        dm = DataManager()
-        base_seis, base_vel, _ = dm.list_family_files(family)
-        base_count = len(base_seis)
+        base_count = count_samples_base(CFG.paths.train, family)
         # Count OpenFWI samples
-        openfwi_family = openfwi_path / family
-        openfwi_seis = sorted(openfwi_family.glob('seis*.npy')) if openfwi_family.exists() else []
-        openfwi_count = len(openfwi_seis)
+        openfwi_count = count_samples_openfwi(openfwi_path, family)
         # Compute how many to add or downsample
         to_add = max(0, target_count - base_count)
         to_down = max(0, (base_count + openfwi_count) - target_count) if (base_count + openfwi_count) > target_count else 0
@@ -781,24 +917,50 @@ def check_balancing_requirements(target_count=1000):
 
 def count_samples_base(base_path, family):
     fam_dir = base_path / family
-    # Check for data/ subfolder
-    data_dir = fam_dir / 'data' if (fam_dir / 'data').exists() else fam_dir
-    seis_files = sorted(data_dir.glob('seis*.npy'))
+    # Vel/Style: data/ subfolder with data*.npy files (batched)
+    if (fam_dir / 'data').exists():
+        data_dir = fam_dir / 'data'
+        files = sorted(data_dir.glob('*.npy'))
+        total_samples = 0
+        for f in files:
+            arr = np.load(f, mmap_mode='r')
+            total_samples += arr.shape[0]  # Each file: (500, ...)
+        return total_samples
+    else:
+        # Fault: seis*.npy files in family folder (not batched)
+        seis_files = sorted(fam_dir.glob('seis*.npy'))
+        return len(seis_files)
+
+def count_samples_openfwi(openfwi_path, family):
+    fam_dir = openfwi_path / family
+    # Look for both seis*.npy and data*.npy files
+    files = list(fam_dir.glob('seis*.npy')) + list(fam_dir.glob('data*.npy'))
     total_samples = 0
-    for f in seis_files:
+    for f in files:
         arr = np.load(f, mmap_mode='r')
         # If batched, count first dimension; else count as 1
         n = arr.shape[0] if arr.ndim > 2 else 1
         total_samples += n
     return total_samples
 
-def count_samples_openfwi(openfwi_path, family):
-    fam_dir = openfwi_path / family
-    seis_files = sorted(fam_dir.glob('seis*.npy'))
-    return len(seis_files)
+def print_samples_per_file(base_path, family):
+    """
+    For each .npy file in the family directory, print the filename, shape, and number of samples (first dimension if batched, else 1).
+    """
+    fam_dir = base_path / family
+    files = list(fam_dir.glob('seis*.npy')) + list(fam_dir.glob('vel*.npy'))
+    print(f"\nSamples per file for family: {family}")
+    for f in files:
+        arr = np.load(f, mmap_mode='r')
+        shape = arr.shape
+        if len(shape) > 1:
+            n_samples = shape[0]
+        else:
+            n_samples = 1
+        print(f"  {f.name}: shape = {shape}, samples in file = {n_samples}")
 
 def main():
-    from config import CFG
+    # from config import CFG
     families = list(CFG.paths.families.keys())
     family_stats = {}
     
@@ -828,7 +990,7 @@ def main():
 
     # --- Print explicit sample counts for each family ---
     print("\nSample counts per family (Base and OpenFWI):")
-    base_path = CFG.paths.train.parent  # This should point to 'train_samples'
+    base_path = CFG.paths.train  # This should point to 'train_samples'
     openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
     print(f"{'Family':<15} {'Base':>6} {'OpenFWI':>8}")
     print("-"*32)
@@ -838,8 +1000,26 @@ def main():
         print(f"{fam:<15} {base_count:>6} {openfwi_count:>8}")
     print("-"*32)
 
+    # Check samples per file for large Fault/Curve families
+    for fam in ['FlatFault_A', 'FlatFault_B', 'CurveFault_A', 'CurveFault_B']:
+        print_samples_per_file(base_path, fam)
+
     # Check balancing requirements
     check_balancing_requirements()
+
+    # Check OpenFWI file shapes
+    families = ['FlatVel_A', 'FlatFault_A', 'CurveVel_A']
+    openfwi_root = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
+
+    for fam in families:
+        fam_dir = openfwi_root / fam
+        # This needs to be updated to check for both seis*.npy and data*.npy files 
+
+        files = sorted(fam_dir.glob('seis*.npy'))[:3] + sorted(fam_dir.glob('data*.npy'))[:3]
+        print(f"\nFamily: {fam}")
+        for f in files:
+            arr = np.load(f, mmap_mode='r')
+            print(f"  {f.name}: shape = {arr.shape}")
 
 if __name__ == "__main__":
     main() 
@@ -858,8 +1038,9 @@ def get_model():
     """Create and return a SpecProjNet model instance."""
     model = SpecProjNet(
         backbone=CFG.backbone,
-        pretrained=CFG.pretrained,
-        ema_decay=CFG.ema_decay
+        pretrained=False,  # Always False to prevent downloading
+        ema_decay=CFG.ema_decay,
+        weights_path=CFG.weight_path  # Pass the weights path from CFG
     ).to(CFG.env.device)
     return model
 
@@ -1169,8 +1350,9 @@ class SpecProjNet(nn.Module):
     def __init__(
         self,
         backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
-        pretrained: bool = True,
+        pretrained: bool = False,  # Changed to False to prevent downloading
         ema_decay: float = 0.99,
+        weights_path: str = None,  # Added parameter for local weights path
     ):
         super().__init__()
         # Load backbone with gradient checkpointing enabled
@@ -1181,6 +1363,20 @@ class SpecProjNet(nn.Module):
             in_chans=5,
             checkpoint_path=''  # Enable gradient checkpointing
         )
+        
+        # Load local weights if provided
+        if weights_path:
+            try:
+                state_dict = torch.load(weights_path, map_location='cpu')
+                # Try loading with strict=False to handle missing keys
+                missing_keys, unexpected_keys = self.backbone.load_state_dict(state_dict, strict=False)
+                if missing_keys:
+                    print(f"Warning: Missing keys in state dict: {missing_keys}")
+                if unexpected_keys:
+                    print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
+            except Exception as e:
+                print(f"Warning: Could not load weights from {weights_path}: {str(e)}")
+                print("Continuing with randomly initialized weights")
         
         # Update stem stride
         self._update_stem()
@@ -1647,15 +1843,25 @@ HybridLoss = JointLoss
 Training script that uses DataManager for all data IO.
 """
 import torch, random, numpy as np
-from config import CFG
-from data_manager import DataManager
-from model import get_model
-from losses import get_loss_fn
+# from config import CFG
+# from data_manager import DataManager
+# from model import get_model
+# from losses import get_loss_fn
 from pathlib import Path
 from tqdm import tqdm
 import torch.cuda.amp as amp
 import logging
 import sys
+from torch.optim.lr_scheduler import OneCycleLR
+from torch.cuda.amp import autocast, GradScaler
+from datetime import datetime
+import json
+import boto3
+from botocore.exceptions import ClientError
+import signal
+import time
+from src.core.setup import push_to_kaggle
+from src.core.config import CFG
 
 # Configure logging
 logging.basicConfig(
@@ -1670,6 +1876,98 @@ def set_seed(seed:int):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def convert_to_serializable(obj):
+    if isinstance(obj, torch.Tensor):
+        return obj.item() if obj.numel() == 1 else obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(x) for x in obj]
+    return obj
+
+class SpotInstanceHandler:
+    """Handles spot instance interruptions gracefully."""
+    def __init__(self, checkpoint_dir: Path, checkpoint_interval: int = 5):
+        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_interval = checkpoint_interval
+        self.last_checkpoint = 0
+        self.interrupted = False
+        
+        # Register signal handlers
+        signal.signal(signal.SIGTERM, self.handle_interruption)
+        signal.signal(signal.SIGINT, self.handle_interruption)
+        
+    def handle_interruption(self, signum, frame):
+        """Handle spot instance interruption."""
+        logging.info(f"Received signal {signum}, preparing for interruption...")
+        self.interrupted = True
+        
+    def should_checkpoint(self, epoch: int) -> bool:
+        """Check if we should save a checkpoint based on interval and interruption status."""
+        return (epoch % self.checkpoint_interval == 0 or 
+                self.interrupted or 
+                time.time() - self.last_checkpoint > 300)  # 5 minutes
+        
+    def save_checkpoint(self, model, optimizer, scheduler, scaler, epoch, metrics):
+        """Save checkpoint to local disk and S3."""
+        try:
+            # Prepare checkpoint data
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'epoch': epoch,
+                'metrics': metrics
+            }
+            
+            # Save locally
+            ckpt_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
+            torch.save(checkpoint, ckpt_path)
+            
+            # Save metadata
+            metadata = {
+                'epoch': epoch,
+                'optimizer_state_dict': convert_to_serializable(optimizer.state_dict()),
+                'scheduler_state_dict': convert_to_serializable(scheduler.state_dict()),
+                'scaler_state_dict': convert_to_serializable(scaler.state_dict()),
+                'metrics': metrics,
+                'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            }
+            
+            meta_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}_metadata.json'
+            with open(meta_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            # Upload to S3 if in AWS environment
+            if CFG.env.kind == 'aws':
+                s3 = boto3.client('s3', region_name=CFG.env.aws_region)
+                s3_key = f"checkpoints/checkpoint_epoch_{epoch}.pt"
+                s3.upload_file(str(ckpt_path), CFG.env.s3_bucket, s3_key)
+                
+                # Upload metadata
+                meta_key = f"checkpoints/checkpoint_epoch_{epoch}_metadata.json"
+                s3.upload_file(str(meta_path), CFG.env.s3_bucket, meta_key)
+            
+            # Push to Kaggle if configured
+            if CFG.env.kind == 'aws' and epoch % 5 == 0:
+                push_to_kaggle(
+                    self.checkpoint_dir,
+                    f"epoch {epoch} {datetime.utcnow().isoformat()}",
+                    "uncertainlyprincipaled/yalegwi"
+                )
+            
+            self.last_checkpoint = time.time()
+            logging.info(f"Checkpoint saved for epoch {epoch}")
+            
+        except Exception as e:
+            logging.error(f"Failed to save checkpoint: {e}")
+            raise
 
 def train(dryrun: bool = False, fp16: bool = True):
     try:
@@ -1678,23 +1976,27 @@ def train(dryrun: bool = False, fp16: bool = True):
         save_dir = Path('outputs')
         save_dir.mkdir(exist_ok=True)
         
+        # Initialize spot instance handler
+        spot_handler = SpotInstanceHandler(save_dir)
+        
         # Initialize DataManager with memory tracking
         logging.info("Initializing DataManager...")
         data_manager = DataManager(use_mmap=True)
         
-        # Get balanced training files for each family
-        logging.info("Setting up balanced data loaders...")
+        # Prepare train loaders for each family
         train_loaders = []
-        balanced_families = data_manager.get_balanced_family_files(target_count=1000)
-        for family, (seis_files, vel_files, family_type) in balanced_families.items():
-            logging.info(f"Processing family: {family}")
+        families = list(CFG.paths.families.keys())
+
+        for family in families:
+            seis_files, vel_files, family_type = data_manager.list_family_files(family)
+            print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
             loader = data_manager.create_loader(
                 seis_files=seis_files,
                 vel_files=vel_files,
                 family_type=family_type,
-                batch_size=2,  # Reduced batch size
+                batch_size=2,         # Set your desired batch size
                 shuffle=True,
-                num_workers=0,  # Set to 0 to avoid multiprocessing issues
+                num_workers=0,        # Set your desired number of workers
                 distributed=CFG.distributed
             )
             train_loaders.append(loader)
@@ -1707,19 +2009,53 @@ def train(dryrun: bool = False, fp16: bool = True):
         # Initialize optimizer and scaler for mixed precision
         logging.info("Setting up optimizer and mixed precision training...")
         optimizer = torch.optim.AdamW(model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
-        scaler = torch.amp.GradScaler('cuda', enabled=fp16)
+        
+        # Calculate total steps for OneCycleLR
+        total_steps = sum(len(loader) for loader in train_loaders) * CFG.epochs
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=CFG.lr,
+            total_steps=total_steps,
+            pct_start=0.3,  # Warm up for 30% of training
+            div_factor=25,  # Initial lr = max_lr/25
+            final_div_factor=1e4  # Final lr = initial_lr/1e4
+        )
+        
+        scaler = GradScaler(enabled=fp16)
         
         # Enable memory optimization
         torch.cuda.empty_cache()
         if torch.cuda.is_available():
             torch.cuda.set_per_process_memory_fraction(0.8)  # Use 80% of available memory
+            # Enable memory efficient attention if available
+            if hasattr(torch.cuda, 'memory_summary'):
+                torch.cuda.memory_summary(device=0)
+            # Set memory allocator settings
+            torch.cuda.memory.set_per_process_memory_fraction(0.8)
+            # Enable memory efficient attention
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
         
         # Training loop
         logging.info("Starting training loop...")
         best_mae = float('inf')
+        patience = 5  # Number of epochs to wait for improvement
+        patience_counter = 0  # Counter for early stopping
+        min_delta = 1e-4  # Minimum change in validation MAE to be considered as improvement
+        
         for epoch in range(CFG.epochs):
+            if spot_handler.interrupted:
+                logging.info("Spot instance interruption detected, saving checkpoint and exiting...")
+                spot_handler.save_checkpoint(
+                    model, optimizer, scheduler, scaler, epoch,
+                    {'best_mae': best_mae, 'patience_counter': patience_counter}
+                )
+                break
+                
             logging.info(f"Epoch {epoch+1}/{CFG.epochs}")
             model.train()
+            epoch_loss = 0.0
+            num_batches = 0
+            
             for loader_idx, loader in enumerate(train_loaders):
                 logging.info(f"Processing loader {loader_idx+1}/{len(train_loaders)}")
                 for batch_idx, (x, y) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}")):
@@ -1729,7 +2065,7 @@ def train(dryrun: bool = False, fp16: bool = True):
                         y = y.cuda()
                         
                         # Forward pass with mixed precision
-                        with torch.amp.autocast('cuda', enabled=fp16):
+                        with autocast(enabled=fp16):
                             pred = model(x)
                             # Check for NaNs/Infs in model output
                             if torch.isnan(pred).any() or torch.isinf(pred).any():
@@ -1743,20 +2079,30 @@ def train(dryrun: bool = False, fp16: bool = True):
                         
                         # Backward pass with gradient scaling
                         scaler.scale(loss).backward()
+                        
+                        # Gradient clipping before unscaling
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        
+                        # Optimizer step with gradient scaling
                         scaler.step(optimizer)
                         scaler.update()
-                        optimizer.zero_grad()
+                        optimizer.zero_grad(set_to_none=True)
+                        
+                        # Update learning rate
+                        scheduler.step()
+                        
+                        # Track epoch loss
+                        epoch_loss += loss.item()
+                        num_batches += 1
                         
                         # Clear cache periodically
-                        if batch_idx % 10 == 0:  # More frequent cache clearing
+                        if batch_idx % 10 == 0:
                             torch.cuda.empty_cache()
-                        
-                        # Log memory stats periodically
-                        if batch_idx % 100 == 0:
-                            memory_stats = data_manager.memory_tracker.get_stats()
-                            logging.info(f"Batch {batch_idx} - Memory stats: {memory_stats}")
                             if torch.cuda.is_available():
-                                logging.info(f"GPU Memory: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                                allocated = torch.cuda.memory_allocated() / 1e9
+                                reserved = torch.cuda.memory_reserved() / 1e9
+                                logging.info(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
                     
                     except RuntimeError as e:
                         if "out of memory" in str(e):
@@ -1764,7 +2110,6 @@ def train(dryrun: bool = False, fp16: bool = True):
                             logging.error(f"Last successful operation: Forward pass")
                             if torch.cuda.is_available():
                                 logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
-                            # Clear cache and continue
                             torch.cuda.empty_cache()
                             continue
                         else:
@@ -1773,46 +2118,73 @@ def train(dryrun: bool = False, fp16: bool = True):
                         logging.error(f"{type(e).__name__} encountered at batch {batch_idx}: {e}")
                         raise e
             
+            # Calculate average epoch loss
+            avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
+            logging.info(f"Epoch {epoch+1} average loss: {avg_epoch_loss:.4f}")
+            
             # Validation
             logging.info("Starting validation...")
             model.eval()
             val_mae = 0.0
+            val_loss = 0.0
+            num_val_batches = 0
+            
             try:
                 with torch.no_grad():
-                    # Use the first train_loader for validation (as a placeholder)
                     val_loader = train_loaders[0]
                     for batch_idx, (seis, vel) in enumerate(val_loader):
                         seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-                        with torch.amp.autocast('cuda', enabled=fp16):
+                        with autocast(enabled=fp16):
                             v_pred = model.get_ema_model()(seis)
-                            # Check for NaNs/Infs in validation output
                             if torch.isnan(v_pred).any() or torch.isinf(v_pred).any():
                                 logging.error(f"NaN or Inf detected in validation output at batch {batch_idx}")
                                 continue
-                        val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
+                            val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
+                            val_loss += loss_fn(v_pred, vel)[0].item()
+                            num_val_batches += 1
                         
-                        # Clear cache periodically during validation
                         if batch_idx % 10 == 0:
                             torch.cuda.empty_cache()
                     
-                val_mae /= len(val_loader)
-                
-                # Save best model
-                if val_mae < best_mae:
-                    best_mae = val_mae
-                    torch.save(model.state_dict(), save_dir/'best.pth')
-                    logging.info(f"New best model saved! MAE: {val_mae:.4f}")
-                torch.save(model.state_dict(), save_dir/'last.pth')
-                
-                logging.info(f"Epoch {epoch+1} complete - val_mae = {val_mae:.4f}")
-                
+                    val_mae /= num_val_batches
+                    val_loss /= num_val_batches
+                    
+                    # Save checkpoint if needed
+                    if spot_handler.should_checkpoint(epoch):
+                        spot_handler.save_checkpoint(
+                            model, optimizer, scheduler, scaler, epoch,
+                            {
+                                'val_mae': val_mae,
+                                'val_loss': val_loss,
+                                'avg_epoch_loss': avg_epoch_loss,
+                                'best_mae': best_mae,
+                                'patience_counter': patience_counter
+                            }
+                        )
+                    
+                    # Update best model
+                    if val_mae < best_mae - min_delta:
+                        best_mae = val_mae
+                        checkpoint = {
+                            'model_state_dict': model.state_dict(),
+                        }
+                        torch.save(checkpoint, save_dir/'best.pth')
+                        logging.info(f"New best model saved! MAE: {val_mae:.4f}")
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= patience:
+                            logging.info(f"Early stopping triggered after {epoch+1} epochs")
+                            break
+                    
+                    logging.info(f"Epoch {epoch+1} complete - val_mae = {val_mae:.4f}, val_loss = {val_loss:.4f}")
+                    
             except RuntimeError as e:
                 if "out of memory" in str(e):
                     logging.error(f"OOM Error during validation at epoch {epoch+1}")
                     logging.error(f"Last successful operation: Validation batch {batch_idx}")
                     if torch.cuda.is_available():
                         logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
-                    # Clear cache and continue
                     torch.cuda.empty_cache()
                     continue
                 else:
@@ -1825,6 +2197,7 @@ def train(dryrun: bool = False, fp16: bool = True):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 logging.info("GPU cache cleared")
+                
     except Exception as e:
         logging.error(f"Uncaught exception in train(): {type(e).__name__}: {e}")
         raise
@@ -1835,133 +2208,88 @@ if __name__ == '__main__':
 
 # %%
 # Source: infer.py
-# All data IO in this file must go through DataManager (src/core/data_manager.py)
-# Do NOT load data directly in this file.
-#
-# ## Inference
-
-
-
-# %%
-# Source: infer.py
-import torch, pandas as pd
-from pathlib import Path
-import os
-import time
+"""
+Inference script that uses DataManager for all data IO.
+All data IO in this file must go through DataManager (src/core/data_manager.py)
+Do NOT load data directly in this file.
+"""
+import torch
 from tqdm import tqdm
-from config import CFG
-from data_manager import DataManager
+from torch.amp import autocast
 from model import SpecProjNet
+from data_manager import DataManager
+from config import CFG
+import pandas as pd
+import os
+from pathlib import Path
+import csv
 
 def format_submission(vel_map, oid):
-    # keep *odd* x-columns only (1,3,…,69)
-    cols = vel_map[:,1::2]
+    # vel_map: (70, 70) numpy array
+    # oid: string (file stem)
     rows = []
-    for y,row in enumerate(cols):
-        rows.append({'oid_ypos': f'{oid}_y_{y}', **{f'x_{2*i+1}':v
-                      for i,v in enumerate(row.tolist())}})
+    for y in range(vel_map.shape[0]):
+        row = {'oid_ypos': f'{oid}_y_{y}'}
+        for i, x in enumerate(range(1, 70, 2)):
+            row[f'x_{x}'] = float(vel_map[y, x])
+        rows.append(row)
     return rows
 
-def estimate_inference_time(test_files=None, batch_size=4, disable_tta=False):
-    if test_files is None:
-        data_manager = DataManager()
-        test_files = data_manager.get_test_files()
-    sample_size = min(10, len(test_files))
-    print(len(test_files))
-    sample_files = test_files[:sample_size]  # Only use a small sample!
-    try:
-        start_time = time.time()
-        # Run inference on the sample, not the full set!
-        infer(weights=CFG.weight_path, batch_size=batch_size, disable_tta=disable_tta, test_files=sample_files)
-        elapsed = time.time() - start_time
-        # Estimate total time
-        total_samples = len(test_files)
-        estimated_time = (elapsed / sample_size) * total_samples
-        return estimated_time
-    except Exception as e:
-        print(f"Error during time estimation: {str(e)}")
-        return None
+def infer():
+    # Use weights path from config
+    weights = CFG.weight_path
 
-def infer(weights=None, batch_size=8, disable_tta=False, test_files=None):
-    """Run inference with batching and checkpointing."""
-    # Use CFG.weight_path as default if weights not provided
-    weights = weights or CFG.weight_path
-    # Check for existence and provide a clear error if missing
-    if not Path(weights).exists():
-        raise FileNotFoundError(f"Model weights not found at {weights}. If running on Kaggle, make sure to add the dataset containing the weights (e.g., 'yalegwi') to your notebook.")
-    
-    # Initialize data manager
-    data_manager = DataManager()
-    
-    # Load model
+    # Model setup
     model = SpecProjNet(
         backbone=CFG.backbone,
         pretrained=False,
-        ema_decay=0.0,  # No EMA for inference
+        ema_decay=0.99,
     ).to(CFG.env.device)
-    
-    # Load state dict and remove 'ema.module.' prefix if present
-    state_dict = torch.load(weights, map_location=CFG.env.device)
-    if any(k.startswith('ema.module.') for k in state_dict.keys()):
-        state_dict = {k.replace('ema.module.', ''): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
+    print("Model created")
+    checkpoint = torch.load(weights, map_location=CFG.env.device, weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.set_ema()
+    print("Weights loaded and EMA set")
     model.eval()
+    print("Model set to eval")
 
-    if test_files is None:
-        test_files = data_manager.get_test_files()
-    # For test, family_type is not needed, but we pass 'Fault' for single-sample-per-file
+    # Data setup
+    data_manager = DataManager()
+    test_files = data_manager.get_test_files()
+    print("Number of test files:", len(test_files))
+    # test_files = test_files[:10]  # Uncomment for debugging only
+    test_dataset = data_manager.create_dataset(test_files, None, 'test')
     test_loader = data_manager.create_loader(
-        test_files, test_files, 'Fault',
-        batch_size=batch_size,
-        shuffle=False
+        test_files, None, 'test',
+        batch_size=2,  # or your preferred batch size
+        shuffle=False,
+        num_workers=0
     )
+    print("Test loader created")
 
-    rows = []
-    with torch.no_grad(), torch.amp.autocast('cuda'):
-        for seis, oid in tqdm(test_loader, desc="Inference"):
-            seis = seis.to(CFG.env.device).to(torch.float16)
-            
-            # Original prediction
-            vel = model(seis)
-            
-            if not disable_tta:
-                # TTA: Flip prediction
-                seis_flip = seis.flip(-1)
-                vel_flip = model(seis_flip)
-                vel_flip = vel_flip.flip(-1)
-                vel = (vel + vel_flip) / 2
-            
-            # Keep in float16 until final conversion
-            vel = vel.cpu().numpy()
-            
-            # Process batch results
-            for b in range(vel.shape[0]):
-                oid_str = Path(oid[b]).stem if isinstance(oid[b], (str, Path)) else str(oid[b])
-                rows += format_submission(vel[b,0], oid_str)
-                
-            # Save intermediate results less frequently
-            if len(rows) % 25000 == 0:
-                print(f"Saving intermediate results: {len(rows)} predictions processed")
-                pd.DataFrame(rows).to_csv('submission_partial.csv', index=False)
-                rows = []  # <-- Add this line to free memory
-    
-    # Save final results
-    print(f"Saving final results: {len(rows)} predictions processed")
-    pd.DataFrame(rows).to_csv('submission.csv', index=False)
-    if Path('submission_partial.csv').exists():
-        Path('submission_partial.csv').unlink()  # Remove partial file
+    # Prepare CSV header
+    x_cols = [f'x_{x}' for x in range(1, 70, 2)]
+    fieldnames = ['oid_ypos'] + x_cols
 
-if __name__ == '__main__':
-    # Estimate time first
-    est_time = estimate_inference_time(None, disable_tta=False)
-    if est_time is not None:
-        print(f"Estimated inference time: {est_time/60:.1f} minutes")
-        # If inference time is > 8 hours, fail loudly
-        if est_time > 8 * 60 * 60:
-            raise ValueError("Estimated inference time is > 8 hours, please run with disable_tta=True")
-    else:
-        print("Could not estimate inference time, proceeding with full inference")
-    
-    # Run full inference
-    infer(disable_tta=True) 
+    print("Starting inference loop")
+    with open('submission.csv', 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        with torch.no_grad():
+            for batch_idx, (seis, _) in enumerate(tqdm(test_loader, desc="Processing test files")):
+                seis = seis.to(CFG.env.device, non_blocking=True).float()
+                with autocast('cuda', enabled=CFG.use_amp):
+                    preds = model(seis)
+                preds = preds.cpu().numpy()
+                for i in range(preds.shape[0]):
+                    vel_map = preds[i]
+                    if vel_map.shape[0] == 1:
+                        vel_map = vel_map[0]
+                    oid = Path(test_files[batch_idx * test_loader.batch_size + i]).stem
+                    rows = format_submission(vel_map, oid)
+                    writer.writerows(rows)  # Write this batch's rows immediately
+    print("Inference complete and submission.csv saved.")
+
+if __name__ == "__main__":
+    infer() 
 

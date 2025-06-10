@@ -7,8 +7,16 @@ from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-from config import CFG
+import boto3
+from botocore.exceptions import ClientError
+import logging
+import os
 from torch.utils.data import DistributedSampler
+import socket
+import logging
+import mmap
+import tempfile
+import shutil
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -26,6 +34,31 @@ class MemoryTracker:
             'max_memory_gb': self.max_memory / 1e9
         }
 
+class S3DataLoader:
+    """Handles efficient data loading from S3 with local caching."""
+    def __init__(self, bucket: str, region: str):
+        self.s3 = boto3.client('s3', region_name=region)
+        self.bucket = bucket
+        self.cache_dir = Path(tempfile.gettempdir()) / 'gwi_cache'
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+    def download_file(self, s3_key: str, local_path: Path) -> Path:
+        """Download a file from S3 with caching."""
+        cache_path = self.cache_dir / s3_key.replace('/', '_')
+        
+        if not cache_path.exists():
+            try:
+                self.s3.download_file(self.bucket, s3_key, str(cache_path))
+            except ClientError as e:
+                logging.error(f"Failed to download {s3_key} from S3: {e}")
+                raise
+                
+        # Create a hard link to avoid copying
+        if not local_path.exists():
+            os.link(cache_path, local_path)
+            
+        return local_path
+
 class DataManager:
     """
     DataManager is the single source of truth for all data IO in this project.
@@ -35,14 +68,62 @@ class DataManager:
     def __init__(self, use_mmap: bool = True):
         self.use_mmap = use_mmap
         self.memory_tracker = MemoryTracker()
+        from src.core.config import CFG
+        
+        # Initialize S3 loader if in AWS environment
+        if CFG.env.kind == 'aws':
+            self.s3_loader = S3DataLoader(CFG.env.s3_bucket, CFG.env.aws_region)
+        else:
+            self.s3_loader = None
 
-    def list_family_files(self, family: str) -> Tuple[List[Path], List[Path], str]:
-        """Return (seis_files, vel_files, family_type) for a given family."""
+    def list_family_files(self, family: str):
+        """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
+        from src.core.config import CFG
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
             
-        # First try YaleGWI-style structure (data/model subdirectories)
+        # Handle S3 data if in AWS environment
+        if CFG.env.kind == 'aws':
+            try:
+                # List objects in S3
+                s3_objects = self.s3_loader.s3.list_objects_v2(
+                    Bucket=CFG.env.s3_bucket,
+                    Prefix=f"raw/{family}/"
+                )
+                
+                # Filter and sort files
+                seis_files = []
+                vel_files = []
+                for obj in s3_objects.get('Contents', []):
+                    key = obj['Key']
+                    if key.endswith('.npy'):
+                        if 'seis' in key:
+                            seis_files.append(key)
+                        elif 'vel' in key:
+                            vel_files.append(key)
+                            
+                # Download files to local cache
+                local_seis_files = []
+                local_vel_files = []
+                
+                for s3_key in sorted(seis_files):
+                    local_path = root / Path(s3_key).name
+                    local_seis_files.append(self.s3_loader.download_file(s3_key, local_path))
+                    
+                for s3_key in sorted(vel_files):
+                    local_path = root / Path(s3_key).name
+                    local_vel_files.append(self.s3_loader.download_file(s3_key, local_path))
+                    
+                if local_seis_files and local_vel_files:
+                    return local_seis_files, local_vel_files, 'Fault'
+                    
+            except ClientError as e:
+                logging.error(f"Failed to list S3 objects: {e}")
+                raise
+                
+        # Fallback to local filesystem
+        # Vel/Style: data/model subfolders (batched)
         if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
             vel_files = sorted((root/'model').glob('*.npy'))
@@ -50,36 +131,20 @@ class DataManager:
                 family_type = 'VelStyle'
                 return seis_files, vel_files, family_type
                 
-        # Then try OpenFWI-style structure (flat directory with seis/vel files)
+        # Fault: seis*.npy and vel*.npy directly in folder (not batched)
         seis_files = sorted(root.glob('seis*.npy'))
         vel_files = sorted(root.glob('vel*.npy'))
         if seis_files and vel_files:
-            # Pair by filename (replace 'seis' with 'vel')
-            paired_seis = []
-            paired_vel = []
-            for sfile in seis_files:
-                vfile = root / sfile.name.replace('seis', 'vel')
-                if vfile.exists():
-                    paired_seis.append(sfile)
-                    paired_vel.append(vfile)
-                else:
-                    print(f"[Warning] No matching velocity file for {sfile}")
-            if paired_seis and paired_vel:
-                family_type = 'PerSample'
-                return paired_seis, paired_vel, family_type
-                
-        # If we get here, we couldn't find a valid data structure
-        raise ValueError(f"Could not find valid data structure for family {family} at {root}. "
-                       f"Directory exists: {root.exists()}, "
-                       f"Contains data/model: {(root/'data').exists() and (root/'model').exists()}, "
-                       f"Contains seis/vel files: {bool(seis_files) and bool(vel_files)}")
+            family_type = 'Fault'
+            return seis_files, vel_files, family_type
+            
+        raise ValueError(f"Could not find valid data structure for family {family} at {root}")
 
-    def create_dataset(self, seis_files: List[Path], vel_files: List[Path], 
-                      family_type: str, augment: bool = False) -> Dataset:
+    def create_dataset(self, seis_files, vel_files, family_type, augment=False):
         return SeismicDataset(
-            seis_files, 
-            vel_files, 
-            family_type, 
+            seis_files,
+            vel_files,
+            family_type,
             augment,
             use_mmap=self.use_mmap,
             memory_tracker=self.memory_tracker
@@ -107,103 +172,50 @@ class DataManager:
         )
 
     def get_test_files(self) -> List[Path]:
+        from src.core.config import CFG
         return sorted(CFG.paths.test.glob('*.npy'))
 
-    def get_balanced_family_files(self, target_count=1000):
-        """
-        For each family, return (seis_files, vel_files, family_type) with up to target_count samples.
-        Supplement Fault families with OpenFWI if needed, and downsample large families if needed.
-        """
-        from config import CFG
-        import numpy as np
-        from pathlib import Path
-        openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-        families = list(CFG.paths.families.keys())
-        balanced = {}
-        for family in families:
-            # Get base files
-            base_seis, base_vel, family_type = self.list_family_files(family)
-            base_count = len(base_seis)
-            # Get OpenFWI files if available
-            openfwi_seis, openfwi_vel = [], []
-            if openfwi_path.exists() and (openfwi_path / family).exists():
-                openfwi_family = openfwi_path / family
-                openfwi_seis = sorted(openfwi_family.glob('seis*.npy'))
-                openfwi_vel = [openfwi_family / f.name.replace('seis', 'vel') for f in openfwi_seis if (openfwi_family / f.name.replace('seis', 'vel')).exists()]
-            # Combine
-            all_seis = base_seis + openfwi_seis
-            all_vel = base_vel + openfwi_vel
-            # Pair up to min length
-            min_len = min(len(all_seis), len(all_vel))
-            all_seis = all_seis[:min_len]
-            all_vel = all_vel[:min_len]
-            # Shuffle
-            idx = np.arange(len(all_seis))
-            np.random.shuffle(idx)
-            all_seis = [all_seis[i] for i in idx]
-            all_vel = [all_vel[i] for i in idx]
-            # Subsample or pad
-            if len(all_seis) >= target_count:
-                final_seis = all_seis[:target_count]
-                final_vel = all_vel[:target_count]
-            else:
-                final_seis = all_seis
-                final_vel = all_vel
-            balanced[family] = (final_seis, final_vel, family_type)
-        return balanced
-
 class SeismicDataset(Dataset):
-    """
-    Memory-efficient dataset for all families.
-    For Vel/Style: sample-wise mmap access from large files.
-    For Fault: one sample per file.
-    Uses float16 for memory efficiency.
-    """
+    """Memory-efficient dataset for seismic data using memory mapping."""
     def __init__(self, seis_files: List[Path], vel_files: List[Path], family_type: str, 
                  augment: bool = False, use_mmap: bool = True, memory_tracker: MemoryTracker = None):
+        self.seis_files = seis_files
+        self.vel_files = vel_files
         self.family_type = family_type
         self.augment = augment
-        self.index = []
         self.use_mmap = use_mmap
-        self.memory_tracker = memory_tracker
-        if family_type == 'VelStyle':
-            for sfile, vfile in zip(seis_files, vel_files):
-                # Each file contains 500 samples
-                for i in range(500):
-                    self.index.append((sfile, vfile, i))
-        elif family_type == 'Fault':
-            for sfile, vfile in zip(seis_files, vel_files):
-                self.index.append((sfile, vfile, None))
-        else:
-            raise ValueError(f"Unknown family_type: {family_type}")
-
-    def __len__(self):
-        return len(self.index)
-
-    def __getitem__(self, idx):
-        sfile, vfile, i = self.index[idx]
-        if self.family_type == 'VelStyle':
-            x = np.load(sfile, mmap_mode='r' if self.use_mmap else None)[i]
-            y = np.load(vfile, mmap_mode='r' if self.use_mmap else None)[i]
-        else:  # Fault
-            x = np.load(sfile)
-            y = np.load(vfile)
-            
-        # Convert to float16 for memory efficiency
-        x = x.astype(np.float16)
-        y = y.astype(np.float16)
-            
-        # Normalize per-receiver
-        mu = x.mean(axis=(1,2), keepdims=True)
-        std = x.std(axis=(1,2), keepdims=True) + 1e-6
-        x = (x - mu) / std
+        self.memory_tracker = memory_tracker or MemoryTracker()
         
-        # Add source dimension if not present
-        if len(x.shape) == 3:  # (T,R) -> (1,T,R)
-            x = x[None]
+        # Pre-load file sizes for memory tracking
+        self.file_sizes = {}
+        for f in seis_files + vel_files:
+            self.file_sizes[f] = f.stat().st_size
+            
+    def __len__(self):
+        return len(self.seis_files)
+        
+    def __getitem__(self, idx):
+        seis_file = self.seis_files[idx]
+        vel_file = self.vel_files[idx]
         
         # Track memory usage
         if self.memory_tracker:
-            self.memory_tracker.update(x.nbytes + y.nbytes)
+            self.memory_tracker.update(self.file_sizes[seis_file] + self.file_sizes[vel_file])
             
-        return torch.from_numpy(x), torch.from_numpy(y) 
+        # Load data with memory mapping
+        if self.use_mmap:
+            seis = np.load(seis_file, mmap_mode='r')
+            vel = np.load(vel_file, mmap_mode='r')
+            
+            # Convert to torch tensors with memory efficiency
+            seis_tensor = torch.from_numpy(seis).float()
+            vel_tensor = torch.from_numpy(vel).float()
+            
+            # Clear memory mapping
+            del seis, vel
+            
+        else:
+            seis_tensor = torch.from_numpy(np.load(seis_file)).float()
+            vel_tensor = torch.from_numpy(np.load(vel_file)).float()
+            
+        return seis_tensor, vel_tensor 
