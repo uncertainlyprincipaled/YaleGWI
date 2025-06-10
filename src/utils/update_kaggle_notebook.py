@@ -35,10 +35,16 @@ def update_kaggle_notebook():
     # Files to process in order
     files = [
         'config.py',  # Process config first to create base CFG
+        'model_registry.py',  # Phase 1: Model registry
+        'checkpoint_manager.py',  # Phase 1: Checkpoint management
         'setup.py',   # Then setup to configure environment
         'data_manager.py',  # New unified data management interface
+        'geometric_features.py',  # Phase 1: Geometric feature extraction
+        'family_loader.py',  # Phase 1: Family-specific data loading
         'eda.py', # EDA for families   
         'model.py',   # Add model definitions and factory functions
+        'geometric_metrics.py',  # Phase 1: Geometric metrics
+        'cross_validator.py',  # Phase 1: Cross validation
         'proj_mask.py',
         'iunet.py',      # Add IU-Net for latent translation
         'specproj_hybrid.py',  # Replace specproj_unet.py with hybrid version
