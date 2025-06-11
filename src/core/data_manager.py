@@ -2,21 +2,25 @@
 DataManager is the single source of truth for all data IO in this project.
 All data loading, streaming, and batching must go through DataManager.
 """
+# Standard library imports
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Dataset
-import boto3
-from botocore.exceptions import ClientError
-import logging
 import os
-from torch.utils.data import DistributedSampler
 import socket
-import logging
-import mmap
 import tempfile
 import shutil
+import mmap
+import logging
+
+# Third-party imports
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+import boto3
+from botocore.exceptions import ClientError
+
+# Local imports
+from src.core.config import CFG
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -68,7 +72,6 @@ class DataManager:
     def __init__(self, use_mmap: bool = True):
         self.use_mmap = use_mmap
         self.memory_tracker = MemoryTracker()
-        from src.core.config import CFG
         
         # Initialize S3 loader if in AWS environment
         if CFG.env.kind == 'aws':
@@ -78,7 +81,6 @@ class DataManager:
 
     def list_family_files(self, family: str):
         """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
-        from src.core.config import CFG
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
@@ -172,7 +174,6 @@ class DataManager:
         )
 
     def get_test_files(self) -> List[Path]:
-        from src.core.config import CFG
         return sorted(CFG.paths.test.glob('*.npy'))
 
 class SeismicDataset(Dataset):

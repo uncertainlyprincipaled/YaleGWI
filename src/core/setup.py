@@ -7,10 +7,8 @@ from botocore.exceptions import ClientError
 import logging
 import time
 from typing import Optional
-try:
-    import kagglehub
-except ImportError:
-    kagglehub = None
+import kagglehub  # Optional import
+from src.core.config import CFG
 
 def warm_kaggle_cache():
     """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""

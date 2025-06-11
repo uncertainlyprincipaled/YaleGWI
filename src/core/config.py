@@ -3,7 +3,8 @@
 
 # %%
 from __future__ import annotations
-import os, json
+import os
+import json
 from pathlib import Path
 from typing import Literal, NamedTuple, Optional
 import torch

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 from copy import deepcopy
-from config import CFG
+from src.core.config import CFG  # Absolute import
 
 def get_model():
     """Create and return a SpecProjNet model instance."""
