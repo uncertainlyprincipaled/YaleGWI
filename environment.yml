@@ -1,0 +1,30 @@
+name: gwi
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - tqdm
+  - boto3
+  - pip
+  - timm
+  - einops
+  - polars
+  - pip:
+    - kaggle
+    - pytorch-lightning==2.0.0
+    - torchmetrics==0.11.4
+    - segmentation-models-pytorch
+    - webdataset
+    - plotly
+    - packaging 
