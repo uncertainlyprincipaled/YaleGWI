@@ -5,6 +5,7 @@
 .env/aws/credentials
 .env/aws/config
 .env/kaggle/credentials
+.env/aws/*.pem
 
 # Python
 __pycache__/

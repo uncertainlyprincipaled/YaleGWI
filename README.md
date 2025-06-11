@@ -169,5 +169,127 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Based on the Kaggle competition "Seismic Waveform Inversion"
 - Inspired by various physics-guided deep learning approaches
 - Uses PyTorch for deep learning implementation
+t
+## Remote Training on AWS
+
+### Prerequisites
+1. AWS Account with appropriate permissions:
+   - EC2 Full Access
+   - S3 Full Access
+   - IAM Role creation permissions
+
+2. Required AWS Resources:
+   - S3 Bucket (create your own)
+   - IAM Role for training
+   - Security Group with SSH access
+   - VPC Subnet
+
+### Instance Requirements
+- Type: `g5.2xlarge` (GPU-enabled)
+   - 8 vCPUs
+   - 32 GB RAM
+   - 1 NVIDIA A10G GPU
+   - 200 GB GP3 EBS volume
+- AMI: Ubuntu 20.04 (use latest compatible AMI)
+- Spot Instance for cost efficiency
+
+### Setup Instructions
+
+1. **Configure AWS Credentials**
+```bash
+# Create .env/aws/credentials file
+mkdir -p .env/aws
+cat > .env/aws/credentials << EOL
+export AWS_ACCESS_KEY_ID=<your_access_key>
+export AWS_SECRET_ACCESS_KEY=<your_secret_key>
+export AWS_REGION=<your_region>
+export S3_BUCKET=<your_bucket_name>
+EOL
+```
+
+2. **Launch Training Instance**
+```bash
+# Make scripts executable
+chmod +x scripts/*.sh
+
+# Launch instance
+./scripts/launch_aws.sh
+```
+
+3. **Monitor Training**
+```bash
+# SSH into instance
+ssh -i <your-key>.pem ubuntu@<instance-ip>
+
+# Monitor training progress
+tail -f /var/log/cloud-init-output.log
+
+# Check GPU status
+nvidia-smi
+
+# Monitor disk usage
+df -h
+```
+
+4. **Cleanup**
+```bash
+# Terminate instance and clean up old checkpoints
+./scripts/cleanup_aws.sh
+```
+
+### S3 Bucket Structure
+
+```
+<your-bucket-name>/
+├── raw/           # Original data (untouched)
+├── checkpoints/   # Model checkpoints
+└── logs/         # Training logs
+```
+
+### Checkpoint Management
+- Local storage: Keeps last 3 checkpoints
+- S3 storage: Keeps last 5 checkpoints
+- Automatic cleanup of old checkpoints
+- Metadata saved alongside checkpoints
+
+### Debugging Remote Training
+
+1. **Common Issues**:
+   - Out of Memory (OOM)
+     - Automatic batch size reduction
+     - GPU memory fraction limiting (80%)
+     - Periodic cache clearing
+   
+   - Spot Instance Interruption
+     - Automatic checkpoint saving
+     - Training resumption from last checkpoint
+   
+   - Data Loading Issues
+     - Use `probe_s3_bucket.py` to verify access
+     - Check S3 permissions
+
+2. **Monitoring Tools**:
+   - CloudWatch metrics
+   - Instance system logs
+   - Training logs in S3
+   - GPU utilization monitoring
+
+3. **Best Practices**:
+   - Use `tmux` or `screen` for persistent sessions
+   - Regular log monitoring
+   - Periodic checkpoint verification
+   - Disk space monitoring
+
+### Cost Optimization
+- Use spot instances for training
+- Automatic instance termination after training
+- Regular cleanup of old checkpoints
+- Efficient data loading through DataManager
+
+### Security Considerations
+- IAM roles for instance permissions
+- Secure credential management
+- Private subnet deployment
+- Regular security group audits
 
 

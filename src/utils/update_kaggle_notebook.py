@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 import re
 from typing import List
+import logging
+from src.core.config import CFG
 
 def extract_code_blocks(content: str, source_path: str = None) -> List[tuple[str, str]]:
     """Extract code blocks from Python file."""
@@ -55,15 +57,36 @@ def update_kaggle_notebook():
                      "# This notebook implements a physics-guided neural network for seismic waveform inversion\n"
                      "# using spectral projectors and UNet architecture.", "header"))
     
-    # Add imports block
-    all_blocks.append(("import os\n"
-                     "import torch\n"
-                     "import numpy as np\n"
-                     "from pathlib import Path\n"
-                     "from tqdm.notebook import tqdm\n"
-                     "import pandas as pd\n"
-                     "import matplotlib.pyplot as plt\n"
-                     "import polars as pl", "imports"))
+    # Add imports block first
+    all_blocks.append(("""
+# Standard library imports
+from __future__ import annotations
+import os
+import sys
+import json
+import time
+import signal
+import logging
+import subprocess
+import shutil
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict, Tuple, Optional, Any, Literal, NamedTuple
+
+# Third-party imports
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import boto3
+from botocore.exceptions import ClientError
+from tqdm import tqdm
+import timm
+import kagglehub  # Optional import
+
+# Local imports
+from src.core.config import CFG
+    """, "imports"))
     
     # Process each file
     for file in files:

@@ -433,21 +433,25 @@ def setup_environment():
 DataManager is the single source of truth for all data IO in this project.
 All data loading, streaming, and batching must go through DataManager.
 """
+# Standard library imports
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Dataset
-import boto3
-from botocore.exceptions import ClientError
-import logging
 import os
-from torch.utils.data import DistributedSampler
 import socket
-import logging
-import mmap
 import tempfile
 import shutil
+import mmap
+import logging
+
+# Third-party imports
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+import boto3
+from botocore.exceptions import ClientError
+
+# Local imports
+from src.core.config import CFG
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -499,7 +503,6 @@ class DataManager:
     def __init__(self, use_mmap: bool = True):
         self.use_mmap = use_mmap
         self.memory_tracker = MemoryTracker()
-        from src.core.config import CFG
         
         # Initialize S3 loader if in AWS environment
         if CFG.env.kind == 'aws':
@@ -509,7 +512,6 @@ class DataManager:
 
     def list_family_files(self, family: str):
         """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
-        from src.core.config import CFG
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
@@ -603,7 +605,6 @@ class DataManager:
         )
 
     def get_test_files(self) -> List[Path]:
-        from src.core.config import CFG
         return sorted(CFG.paths.test.glob('*.npy'))
 
 class SeismicDataset(Dataset):
@@ -1036,7 +1037,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 from copy import deepcopy
-from config import CFG
+from src.core.config import CFG  # Absolute import
 
 def get_model():
     """Create and return a SpecProjNet model instance."""
@@ -1846,11 +1847,9 @@ HybridLoss = JointLoss
 """
 Training script that uses DataManager for all data IO.
 """
-import torch, random, numpy as np
-# from config import CFG
-# from data_manager import DataManager
-# from model import get_model
-# from losses import get_loss_fn
+import torch
+import random
+import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import torch.cuda.amp as amp
@@ -1864,8 +1863,11 @@ import boto3
 from botocore.exceptions import ClientError
 import signal
 import time
-from src.core.setup import push_to_kaggle
 from src.core.config import CFG
+from src.core.data_manager import DataManager
+from src.core.model import get_model
+from src.core.losses import get_loss_fn
+from src.core.setup import push_to_kaggle
 
 # Configure logging
 logging.basicConfig(
@@ -1918,7 +1920,7 @@ class SpotInstanceHandler:
                 time.time() - self.last_checkpoint > 300)  # 5 minutes
         
     def save_checkpoint(self, model, optimizer, scheduler, scaler, epoch, metrics):
-        """Save checkpoint to local disk and S3."""
+        """Save checkpoint to local disk and S3 with cleanup strategy."""
         try:
             # Prepare checkpoint data
             checkpoint = {
@@ -1930,9 +1932,16 @@ class SpotInstanceHandler:
                 'metrics': metrics
             }
             
-            # Save locally
+            # Save locally with cleanup
             ckpt_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
             torch.save(checkpoint, ckpt_path)
+            
+            # Keep only last 3 local checkpoints
+            local_checkpoints = sorted(self.checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+            if len(local_checkpoints) > 3:
+                for old_ckpt in local_checkpoints[:-3]:
+                    old_ckpt.unlink()
+                    logging.info(f"Removed old local checkpoint: {old_ckpt}")
             
             # Save metadata
             metadata = {
@@ -1948,15 +1957,26 @@ class SpotInstanceHandler:
             with open(meta_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
             
-            # Upload to S3 if in AWS environment
+            # Upload to S3
             if CFG.env.kind == 'aws':
                 s3 = boto3.client('s3', region_name=CFG.env.aws_region)
                 s3_key = f"checkpoints/checkpoint_epoch_{epoch}.pt"
                 s3.upload_file(str(ckpt_path), CFG.env.s3_bucket, s3_key)
                 
-                # Upload metadata
-                meta_key = f"checkpoints/checkpoint_epoch_{epoch}_metadata.json"
-                s3.upload_file(str(meta_path), CFG.env.s3_bucket, meta_key)
+                # Keep only last 5 checkpoints in S3
+                response = s3.list_objects_v2(
+                    Bucket=CFG.env.s3_bucket,
+                    Prefix='checkpoints/checkpoint_epoch_'
+                )
+                if 'Contents' in response:
+                    checkpoints = sorted(response['Contents'], key=lambda x: x['LastModified'])
+                    if len(checkpoints) > 5:
+                        for old_ckpt in checkpoints[:-5]:
+                            s3.delete_object(
+                                Bucket=CFG.env.s3_bucket,
+                                Key=old_ckpt['Key']
+                            )
+                            logging.info(f"Removed old S3 checkpoint: {old_ckpt['Key']}")
             
             # Push to Kaggle if configured
             if CFG.env.kind == 'aws' and epoch % 5 == 0:

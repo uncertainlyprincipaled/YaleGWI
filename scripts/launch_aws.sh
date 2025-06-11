@@ -6,10 +6,10 @@ source .env/aws/credentials
 
 # Launch spot instance
 aws ec2 run-instances \
-    --instance-type g5.2xlarge \
+    --instance-type g5.xlarge \
     --image-id ami-0dfae3c90574ae005 \
     --instance-market-options "MarketType=spot,SpotOptions={SpotInstanceType='one-time',InstanceInterruptionBehavior='stop'}" \
-    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3"}}]' \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":150,"VolumeType":"gp3"}}]' \
     --user-data file://scripts/bootstrap_aws.sh \
     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=gwi-training}]' \
     --security-group-ids sg-xxxxxxxx \

@@ -85,14 +85,15 @@ class Config:
             cls._inst.seed  = 42
 
             # Training hyper-parameters
-            cls._inst.batch   = 4 if cls._inst.env.kind == 'kaggle' else 32
+            cls._inst.batch   = 16
             cls._inst.lr      = 1e-4
             cls._inst.weight_decay = 1e-3
-            cls._inst.epochs  = 30
+            cls._inst.epochs  = 120
             cls._inst.lambda_pde = 0.1
             cls._inst.dtype = "float16"  # Default dtype for tensors
-            cls._inst.num_workers = 4  # Number of workers for data loading
+            cls._inst.num_workers = 2
             cls._inst.distributed = False  # Whether to use distributed training
+            cls._inst.s3_upload_interval = 30  # S3 upload/checkpoint interval in epochs
 
             # Memory optimization settings
             cls._inst.memory_efficient = True  # Enable memory efficient operations

@@ -25,4 +25,11 @@ aws s3 ls s3://$S3_BUCKET/logs/ --recursive | sort -r | tail -n +6 | awk '{print
     aws s3 rm "s3://$S3_BUCKET/$file"
 done
 
+# Delete local data directories
+if [ -d /mnt/waveform-inversion ]; then
+    echo "Deleting local data in /mnt/waveform-inversion..."
+    sudo rm -rf /mnt/waveform-inversion/*
+fi
+
+
 echo "Cleanup complete" 
