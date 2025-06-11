@@ -248,9 +248,36 @@ df -h
 
 ### Checkpoint Management
 - Local storage: Keeps last 3 checkpoints
-- S3 storage: Keeps last 5 checkpoints
-- Automatic cleanup of old checkpoints
-- Metadata saved alongside checkpoints
+
+### Daily Workflow
+1. **Start Training Session**
+   ```bash
+   # SSH into instance
+   ssh -i <your-key>.pem ubuntu@<instance-ip>
+   
+   # Activate virtual environment
+   source venv/bin/activate
+   
+   # Download data (if needed)
+   python scripts/download_data.py
+   
+   # Run setup
+   python scripts/setup.py
+   
+   # Start training
+   python src/core/train.py
+   ```
+
+2. **End Training Session**
+   ```bash
+   # Terminate instance
+   aws ec2 terminate-instances --instance-ids <instance-id>
+   
+   # Verify instance is terminated
+   aws ec2 describe-instances --filters "Name=instance-state-name,Values=running"
+   ```
+
+Note: Data on the EBS volume persists between instance launches, so you only need to download data once unless you explicitly delete it. The setup script handles environment configuration and dependencies.
 
 ### Debugging Remote Training
 
@@ -290,6 +317,7 @@ df -h
 - IAM roles for instance permissions
 - Secure credential management
 - Private subnet deployment
-- Regular security group audits
+- Regular security group audits s
+
 
 

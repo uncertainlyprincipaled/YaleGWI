@@ -1,0 +1,95 @@
+I'll help you understand the AWS training workflow and analyze the codebase. Let me break this down into parts.
+Introduction to AWS Concepts and Workflow
+The basic workflow for training on EC2 involves several key components:
+a) S3 (Simple Storage Service):
+Acts as persistent storage for your data and model artifacts
+In your case, the yale-gwi bucket stores:
+Raw data in the raw/ prefix
+Model checkpoints in checkpoints/
+Training logs in logs/
+b) EC2 (Elastic Compute Cloud):
+Provides virtual servers for computation
+Your setup uses:
+Instance type: g5.2xlarge (GPU-enabled instance)
+Spot instances for cost savings
+200GB GP3 EBS volume for storage
+Ubuntu AMI (ami-0dfae3c90574ae005)
+c) Shell Scripting Workflow:
+Your setup uses three main scripts:
+launch_aws.sh: Launches the EC2 instance
+bootstrap_aws.sh: Sets up the instance environment
+cleanup_aws.sh: Manages cleanup and instance termination
+Remote Debugging Workflow
+The key differences between Kaggle and EC2 debugging are:
+a) Access Methods:
+Kaggle: Web-based notebook interface
+EC2: SSH access for direct terminal interaction
+b) Debugging Approaches:
+Logging: Your code already has good logging setup in probe_s3_bucket.py
+Remote Monitoring:
+SSH into the instance: ssh -i your-key.pem ubuntu@$PUBLIC_IP
+Monitor logs: tail -f /var/log/cloud-init-output.log
+Check GPU status: nvidia-smi
+Codebase Analysis
+Let me analyze the codebase for potential adjustments:
+Based on my analysis of the codebase, here are the key findings and recommendations for running AWS training overnight:
+Code Adjustments Needed:
+a) Environment Detection:
+The code already has good environment detection in Config class
+AWS-specific settings are properly handled in SpotInstanceHandler
+b) Memory Management:
+The code has robust memory management with:
+Mixed precision training (AMP)
+Gradient checkpointing
+Memory-efficient attention
+GPU memory fraction limiting (80%)
+c) Checkpointing:
+The SpotInstanceHandler class handles spot instance interruptions
+Checkpoints are saved both locally and to S3
+Metadata is saved alongside checkpoints
+Workflow for Running Training:
+a) Launch Instance:
+Apply to EC2Adjust.tx...
+Run
+# 1. Set up AWS credentials
+source .env/aws/credentials
+
+# 2. Launch instance
+./scripts/launch_aws.sh
+b) Monitor Training:
+SSH into the instance using the provided command
+Monitor logs: tail -f /var/log/cloud-init-output.log
+Check GPU status: nvidia-smi
+c) Cleanup:
+Apply to EC2Adjust.tx...
+Run
+# When training is complete
+./scripts/cleanup_aws.sh
+Debugging Workflow:
+a) Remote Access:
+SSH into the instance
+Use tmux or screen for persistent sessions
+Monitor logs in real-time
+b) Common Issues and Solutions:
+Out of Memory (OOM):
+Code already handles OOM with graceful recovery
+Reduces batch size automatically
+Clears GPU cache periodically
+Spot Instance Interruption:
+SpotInstanceHandler saves checkpoints
+Training can resume from last checkpoint
+Data Loading Issues:
+Use probe_s3_bucket.py to verify data access
+Check S3 permissions and connectivity
+Training Monitoring:
+Monitor validation metrics
+Check for NaN/Inf values
+Track GPU memory usage
+The codebase is well-prepared for AWS training with:
+Robust error handling
+Automatic checkpointing
+Memory optimization
+Spot instance support
+S3 integration
+No major adjustments are needed to make the script work on AWS. The existing code already handles the transition from Kaggle to AWS environment through the Config class and environment detection.
+Would you like me to elaborate on any of these aspects or provide more specific details about any part of the workflow?
