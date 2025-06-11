@@ -22,6 +22,7 @@ dependencies:
   - polars
   - pip:
     - kaggle
+    - kagglehub
     - pytorch-lightning==2.0.0
     - torchmetrics==0.11.4
     - segmentation-models-pytorch
