@@ -4,7 +4,7 @@
 # %%
 import torch
 import torch.nn.functional as F
-from config import CFG
+from src.core.config import CFG
 
 def pde_residual(v_pred: torch.Tensor,
                  seis: torch.Tensor,

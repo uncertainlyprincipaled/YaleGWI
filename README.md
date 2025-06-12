@@ -1,5 +1,73 @@
 # SpecProj-UNet for Seismic Waveform Inversion
 
+## Quick Start: AWS/EC2 Training
+
+### 1. Launch a New EC2 Instance
+- Use a GPU-enabled instance (e.g., `g5.xlarge`)
+- Use Ubuntu 22.04 or 20.04 AMI
+- Attach or create a 200GB+ EBS volume for data
+
+### 2. SSH into the Instance
+```bash
+ssh -i <your-key>.pem ubuntu@<instance-ip>
+```
+
+### 3. Clone the Repository
+```bash
+git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+cd YaleGWI
+```
+
+### 4. Set Up Python Environment
+If `venv` is not available, install it:
+```bash
+sudo apt-get update && sudo apt-get install -y python3-venv
+```
+Then create and activate a virtual environment:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 5. Configure AWS Credentials
+Create a file `.env/aws/credentials` with:
+```bash
+export AWS_ACCESS_KEY_ID=<your_access_key>
+export AWS_SECRET_ACCESS_KEY=<your_secret_key>
+export AWS_REGION=<your_region>
+export S3_BUCKET=<your_bucket_name>
+```
+Then load them:
+```bash
+source .env/aws/credentials
+```
+
+### 6. Download/Sync Data from S3
+```bash
+python -m src.core.setup
+# Or, manually:
+# aws s3 sync s3://<your-bucket>/raw/ /mnt/waveform-inversion
+```
+
+> **Troubleshooting:**
+> If you get a `[Errno 13] Permission denied: '/mnt/waveform-inversion'` error, run:
+> ```bash
+> sudo mkdir -p /mnt/waveform-inversion
+> sudo chown $USER:$USER /mnt/waveform-inversion
+> ```
+> Then re-run the sync command.
+
+### 7. Run Training
+```bash
+python src/core/train.py --epochs 120 --batch 16 --amp --experiment-tag "run-$(date +%F)"
+```
+
+---
+
+# SpecProj-UNet for Seismic Waveform Inversion
+
 ## Data IO Policy (IMPORTANT)
 **All data loading, streaming, and batching must go through `DataManager` in `src/core/data_manager.py`.**
 - Do NOT load data directly in any other file.
@@ -169,7 +237,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Based on the Kaggle competition "Seismic Waveform Inversion"
 - Inspired by various physics-guided deep learning approaches
 - Uses PyTorch for deep learning implementation
-t
+
 ## Remote Training on AWS
 
 ### Prerequisites
@@ -317,7 +385,7 @@ Note: Data on the EBS volume persists between instance launches, so you only nee
 - IAM roles for instance permissions
 - Secure credential management
 - Private subnet deployment
-- Regular security group audits s
+- Regular security group audits
 
 
 
