@@ -59,7 +59,10 @@ python -m src.core.setup
 > ```
 > Then re-run the sync command.
 
-### 7. Run Training
+### 7. Configuration File (Optional)
+If `outputs/config.json` is present, it will be loaded automatically and override default configuration values. This is useful for resuming or reproducing previous runs with the same settings.
+
+### 8. Run Training
 ```bash
 python src/core/train.py --epochs 120 --batch 16 --amp --experiment-tag "run-$(date +%F)"
 ```

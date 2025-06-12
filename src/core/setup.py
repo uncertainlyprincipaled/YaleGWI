@@ -9,6 +9,7 @@ import time
 from typing import Optional
 import kagglehub  # Optional import
 from src.core.config import CFG
+import json
 
 def warm_kaggle_cache():
     """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
@@ -102,19 +103,33 @@ def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainly
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
     from src.core.config import CFG  # Import here to avoid circular dependency
-    
+    import json
+
     # Allow explicit environment override
     env_override = os.environ.get('GWI_ENV', '').lower()
     if env_override:
         CFG.env.kind = env_override
-    
+
+    # --- NEW: Load config.json if present (for AWS) ---
+    config_path = Path('outputs/config.json')
+    if CFG.env.kind == 'aws' and config_path.exists():
+        with open(config_path) as f:
+            config_data = json.load(f)
+        # Override CFG values with those from config.json
+        for k, v in config_data.items():
+            if hasattr(CFG, k):
+                setattr(CFG, k, v)
+            elif hasattr(CFG.env, k):
+                setattr(CFG.env, k, v)
+            elif hasattr(CFG.paths, k):
+                setattr(CFG.paths, k, v)
+        print(f"Loaded configuration from {config_path}")
+
     # Common path setup for all environments
     def setup_paths(base_dir: Path):
         CFG.paths.root = base_dir / 'waveform-inversion'
         CFG.paths.train = CFG.paths.root / 'train_samples'
         CFG.paths.test = CFG.paths.root / 'test'
-        
-        # Update family paths
         CFG.paths.families = {
             'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
             'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
@@ -127,11 +142,10 @@ def setup_environment():
             'CurveFault_A': CFG.paths.train/'CurveFault_A',
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
-    
+
     if CFG.env.kind == 'aws':
         setup_aws_environment()
         print("Environment setup complete for AWS")
-    
     elif CFG.env.kind == 'colab':
         # Create data directory
         data_dir = Path('/content/data')
@@ -149,7 +163,6 @@ def setup_environment():
             raise
         
         print("Environment setup complete for Colab")
-    
     elif CFG.env.kind == 'sagemaker':
         # AWS SageMaker specific setup
         data_dir = Path('/opt/ml/input/data')  
@@ -165,7 +178,6 @@ def setup_environment():
         
         setup_paths(data_dir)
         print("Paths configured for SageMaker environment")
-    
     elif CFG.env.kind == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
         # warm_kaggle_cache()
@@ -188,7 +200,6 @@ def setup_environment():
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
         print("Environment setup complete for Kaggle")
-    
     else:  # local development
         # For local development, use a data directory in the project root
         data_dir = Path(__file__).parent.parent.parent / 'data'
