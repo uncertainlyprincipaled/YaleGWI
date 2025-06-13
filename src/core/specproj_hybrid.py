@@ -5,6 +5,7 @@ from config import CFG
 from .proj_mask import PhysMask, SpectralAssembler
 from .iunet import create_iunet
 from .specproj_unet import SmallUNet
+import logging
 
 class WaveDecoder(nn.Module):
     """Simple decoder for wavefield prediction."""
@@ -50,15 +51,26 @@ class HybridSpecProj(nn.Module):
             If mode == "joint":
                 (v_pred, p_pred)
         """
+        # Log input tensor stats
+        logging.info(f"Input seis shape: {seis.shape}, dtype: {seis.dtype}, min: {seis.min().item()}, max: {seis.max().item()}, mean: {seis.mean().item()}")
+        
         # Split wavefield
         up, down = self.mask(seis)
+        
+        # Log split tensors
+        logging.info(f"Split tensors - up: {up.shape}, down: {down.shape}")
         
         if not CFG.is_joint() or mode == "inverse":
             # Use original SmallUNet path
             B,S,T,R = up.shape
             up = up.reshape(B*S, 1, T, R).repeat(1,5,1,1)
             down = down.reshape(B*S, 1, T, R).repeat(1,5,1,1)
+            
+            # Log reshaped tensors
+            logging.info(f"Reshaped tensors - up: {up.shape}, down: {down.shape}")
+            
             v_pred = self.vel_decoder(up)
+            logging.info(f"v_pred shape: {v_pred.shape}, dtype: {v_pred.dtype}, min: {v_pred.min().item()}, max: {v_pred.max().item()}, mean: {v_pred.mean().item()}")
             return v_pred, None
             
         # Joint mode with IU-Net translation
@@ -66,8 +78,12 @@ class HybridSpecProj(nn.Module):
         v_up = self.iunet(up, "p→v")
         v_down = self.iunet(down, "p→v")
         
+        # Log translated tensors
+        logging.info(f"Translated tensors - v_up: {v_up.shape}, v_down: {v_down.shape}")
+        
         # 2. Decode velocity
         v_pred = self.vel_decoder(torch.cat([v_up, v_down], dim=1))
+        logging.info(f"v_pred shape: {v_pred.shape}, dtype: {v_pred.dtype}, min: {v_pred.min().item()}, max: {v_pred.max().item()}, mean: {v_pred.mean().item()}")
         
         # 3. Translate back to wavefield space
         p_up = self.iunet(v_up, "v→p")
@@ -76,6 +92,9 @@ class HybridSpecProj(nn.Module):
         # 4. Reassemble and decode wavefield
         p_recon = self.assembler(p_up, p_down)
         p_pred = self.wave_decoder(p_recon)
+        
+        # Log final predictions
+        logging.info(f"p_pred shape: {p_pred.shape}, dtype: {p_pred.dtype}, min: {p_pred.min().item()}, max: {p_pred.max().item()}, mean: {p_pred.mean().item()}")
         
         return v_pred, p_pred
 

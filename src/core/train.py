@@ -229,6 +229,7 @@ def train(dryrun: bool = False, fp16: bool = True):
                     val_loader = train_loaders[0]
                     for batch_idx, (seis, vel) in enumerate(val_loader):
                         seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
+                        logging.info(f"vel shape: {vel.shape}, dtype: {vel.dtype}, min: {vel.min().item()}, max: {vel.max().item()}, mean: {vel.mean().item()}")
                         with autocast(enabled=fp16):
                             v_pred = model.get_ema_model()(seis)
                             if torch.isnan(v_pred).any() or torch.isinf(v_pred).any():

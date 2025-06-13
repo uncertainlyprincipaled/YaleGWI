@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import timm
 from copy import deepcopy
 from src.core.config import CFG  # Absolute import
+import logging
 
 def get_model():
     """Create and return a SpecProjNet model instance."""
@@ -402,6 +403,9 @@ class SpecProjNet(nn.Module):
         # Optionally, check for NaN/Inf
         if torch.isnan(x).any() or torch.isinf(x).any():
             raise ValueError("Input contains NaN or Inf values!")
+            
+        # Log input tensor stats
+        logging.info(f"Input tensor shape: {x.shape}, dtype: {x.dtype}, min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
         
         # Handle different input shapes
         if len(x.shape) == 5:  # (B, S, C, T, R)
@@ -413,7 +417,9 @@ class SpecProjNet(nn.Module):
         elif len(x.shape) == 2:  # (T, R)
             x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
             
-        # print(f"Final shape before unpacking: {x.shape}")
+        # Log reshaped tensor
+        logging.info(f"Reshaped tensor: {x.shape}")
+            
         B, S, T, R = x.shape
         
         # Process each source separately to save memory
@@ -423,20 +429,35 @@ class SpecProjNet(nn.Module):
             x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
             x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
             
+            # Log source tensor
+            logging.info(f"Source {s} tensor shape: {x_s.shape}")
+            
             # Get encoder features
             feats = self.backbone(x_s)
+            
+            # Log encoder features
+            logging.info(f"Encoder features shapes: {[f.shape for f in feats]}")
             
             # Decode
             x_s = self.decoder(feats)
             
+            # Log decoder output
+            logging.info(f"Decoder output shape: {x_s.shape}")
+            
             # Final head
             x_s = self.head(x_s)
+            
+            # Log head output
+            logging.info(f"Head output shape: {x_s.shape}")
             
             outputs.append(x_s)
             
         # Combine outputs
         x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
         x = x.mean(dim=1)  # Average over sources
+        
+        # Log final output
+        logging.info(f"Final output shape: {x.shape}, dtype: {x.dtype}, min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
         
         return x
         

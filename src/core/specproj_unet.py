@@ -77,4 +77,6 @@ class SpecProjUNet(nn.Module):
         vu  = self.unet_up (up )
         vd  = self.unet_down(down)
         fused = self.fuse(torch.cat([vu, vd], 1))
-        return fused.view(B, S, 1, *fused.shape[-2:]).mean(1)  # (B,1,H,W) 
+        x = torch.stack([fused], dim=1)  # (B, S, 1, H, W)
+        x = x.mean(dim=1)  # Average over sources
+        return x 
