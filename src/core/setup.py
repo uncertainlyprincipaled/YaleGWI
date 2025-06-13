@@ -11,6 +11,43 @@ import kagglehub  # Optional import
 import json
 import sys
 
+def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainlyprincipaled/yalegwi"):
+    """Push training artefacts to Kaggle dataset with rate limiting awareness."""
+    try:
+        # Check if kaggle.json exists
+        kaggle_json = Path.home() / '.kaggle/kaggle.json'
+        if not kaggle_json.exists():
+            # Try to load from environment file
+            env_kaggle_json = Path(__file__).parent.parent.parent / '.env/kaggle/credentials'
+            if env_kaggle_json.exists():
+                kaggle_json.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(env_kaggle_json, kaggle_json)
+                kaggle_json.chmod(0o600)
+            else:
+                raise FileNotFoundError("Kaggle credentials not found")
+        
+        # Push to Kaggle with rate limiting awareness
+        max_retries = 3
+        retry_delay = 60  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                subprocess.run([
+                    "kaggle", "datasets", "version", "-p", str(artefact_dir),
+                    "-m", message, "-d", dataset, "--dir-mode", "zip"
+                ], check=True)
+                break
+            except subprocess.CalledProcessError as e:
+                if "429" in str(e) and attempt < max_retries - 1:  # Rate limit error
+                    logging.warning(f"Rate limit hit, waiting {retry_delay} seconds before retry...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise
+    except Exception as e:
+        logging.error(f"Failed to push to Kaggle: {e}")
+        raise
+
 def warm_kaggle_cache():
     """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
     data_dir = Path('/kaggle/input/waveform-inversion')
