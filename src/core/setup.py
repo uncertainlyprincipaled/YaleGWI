@@ -39,69 +39,6 @@ def warm_kaggle_cache():
         print(f"Warning: Unexpected error during cache warmup: {e}")
         print("This is not critical - continuing with setup...")
 
-def setup_aws_environment():
-    """Setup AWS-specific environment configurations."""
-    
-    # Setup S3 client
-    s3 = boto3.client('s3', region_name=CFG.env.aws_region)
-    
-    # Setup paths
-    CFG.paths.root = CFG.env.ebs_mount / 'waveform-inversion'
-    CFG.paths.train = CFG.paths.root / 'train_samples'
-    CFG.paths.test = CFG.paths.root / 'test'
-    CFG.paths.out = CFG.env.ebs_mount / 'output'
-    
-    # Create directories
-    for path in [CFG.paths.root, CFG.paths.train, CFG.paths.test, CFG.paths.out]:
-        path.mkdir(parents=True, exist_ok=True)
-    
-    # Sync data from S3
-    try:
-        subprocess.run([
-            "aws", "s3", "sync",
-            f"s3://{CFG.env.s3_bucket}/raw/", str(CFG.paths.root)
-        ], check=True)
-    except ClientError as e:
-        logging.error(f"Failed to sync data from S3: {e}")
-        raise
-
-def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainlyprincipaled/yalegwi"):
-    """Push training artefacts to Kaggle dataset with rate limiting awareness."""
-    try:
-        # Check if kaggle.json exists
-        kaggle_json = Path.home() / '.kaggle/kaggle.json'
-        if not kaggle_json.exists():
-            # Try to load from environment file
-            env_kaggle_json = Path(__file__).parent.parent.parent / '.env/kaggle/credentials'
-            if env_kaggle_json.exists():
-                kaggle_json.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(env_kaggle_json, kaggle_json)
-                kaggle_json.chmod(0o600)
-            else:
-                raise FileNotFoundError("Kaggle credentials not found")
-        
-        # Push to Kaggle with rate limiting awareness
-        max_retries = 3
-        retry_delay = 60  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                subprocess.run([
-                    "kaggle", "datasets", "version", "-p", str(artefact_dir),
-                    "-m", message, "-d", dataset, "--dir-mode", "zip"
-                ], check=True)
-                break
-            except subprocess.CalledProcessError as e:
-                if "429" in str(e) and attempt < max_retries - 1:  # Rate limit error
-                    logging.warning(f"Rate limit hit, waiting {retry_delay} seconds before retry...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    raise
-    except Exception as e:
-        logging.error(f"Failed to push to Kaggle: {e}")
-        raise
-
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
 
@@ -110,6 +47,32 @@ def setup_environment():
     if not env_override:
         raise RuntimeError("You must set GWI_ENV before running setup.")
     from src.core.config import CFG
+
+    def setup_aws_environment():
+        """Setup AWS-specific environment configurations."""
+        
+        # Setup S3 client
+        s3 = boto3.client('s3', region_name=CFG.env.aws_region)
+        
+        # Setup paths
+        CFG.paths.root = CFG.env.ebs_mount / 'waveform-inversion'
+        CFG.paths.train = CFG.paths.root / 'train_samples'
+        CFG.paths.test = CFG.paths.root / 'test'
+        CFG.paths.out = CFG.env.ebs_mount / 'output'
+        
+        # Create directories
+        for path in [CFG.paths.root, CFG.paths.train, CFG.paths.test, CFG.paths.out]:
+            path.mkdir(parents=True, exist_ok=True)
+        
+        # Sync data from S3
+        try:
+            subprocess.run([
+                "aws", "s3", "sync",
+                f"s3://{CFG.env.s3_bucket}/raw/", str(CFG.paths.root)
+            ], check=True)
+        except ClientError as e:
+            logging.error(f"Failed to sync data from S3: {e}")
+            raise
 
     # Allow explicit environment override
     if env_override:
