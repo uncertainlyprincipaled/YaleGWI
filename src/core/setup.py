@@ -58,7 +58,10 @@ def setup_aws_environment():
     
     # Sync data from S3
     try:
-        s3.sync(f's3://{CFG.env.s3_bucket}/raw/', str(CFG.paths.root))
+        subprocess.run([
+            "aws", "s3", "sync",
+            f"s3://{CFG.env.s3_bucket}/raw/", str(CFG.paths.root)
+        ], check=True)
     except ClientError as e:
         logging.error(f"Failed to sync data from S3: {e}")
         raise

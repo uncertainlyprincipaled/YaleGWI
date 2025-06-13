@@ -9,7 +9,7 @@
 
 ### 2. SSH into the Instance
 ```bash
-ssh -i <your-key>.pem ubuntu@<instance-ip>
+ssh -i .env/aws/<your-key>.pem ubuntu@<instance-ip>
 ```
 
 ### 3. Clone the Repository
@@ -18,7 +18,7 @@ git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
 cd YaleGWI
 ```
 
-### 4. Set Up Python Environment
+### 4. Set Up Python Environme
 If `venv` is not available, install it:
 ```bash
 sudo apt-get update && sudo apt-get install -y python3-venv
@@ -46,7 +46,15 @@ source .env/aws/credentials
 
 ### 6. Download/Sync Data from S3
 ```bash
-python -m src.core.setup
+
+# Update data directory permission
+
+sudo mkdir -p /mnt/waveform-inversion
+sudo mkdir -p /mnt/output
+sudo chown $USER:$USER /mnt/waveform-inversion
+sudo chown $USER:$USER /mnt/output
+
+python -m src.core.setup aws
 # Or, manually:
 # aws s3 sync s3://<your-bucket>/raw/ /mnt/waveform-inversion
 ```
