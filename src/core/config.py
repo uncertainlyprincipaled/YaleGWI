@@ -11,6 +11,8 @@ import torch
 import boto3
 from botocore.exceptions import ClientError
 import logging
+import numpy as np
+from torch.utils.data import Dataset
 
 # --------------------------------------------------------------------------- #
 #  Detect runtime (Kaggle / Colab / SageMaker / AWS / local) and expose a singleton #
@@ -80,13 +82,13 @@ class Config:
             cls._inst.seed  = 42
 
             # Training hyper-parameters
-            cls._inst.batch   = 16
+            cls._inst.batch   = 1
             cls._inst.lr      = 1e-4
             cls._inst.weight_decay = 1e-3
             cls._inst.epochs  = 120
             cls._inst.lambda_pde = 0.1
             cls._inst.dtype = "float16"  # Default dtype for tensors
-            cls._inst.num_workers = 2
+            cls._inst.num_workers = 0
             cls._inst.distributed = False  # Whether to use distributed training
             cls._inst.s3_upload_interval = 30  # S3 upload/checkpoint interval in epochs
 
@@ -196,4 +198,40 @@ def save_cfg(out_dir: Path):
             
     (out_dir / 'config.json').write_text(
         json.dumps(cfg_dict, indent=2)
-    ) 
+    )
+
+class SeismicDataset(Dataset):
+    def __init__(self, seis_files, vel_files, family_type, augment=False, use_mmap=True, memory_tracker=None):
+        self.family_type = family_type
+        self.augment = augment
+        self.index = []
+        self.use_mmap = use_mmap
+        self.memory_tracker = memory_tracker
+        self.vel_files = vel_files
+        # Build index of (file, sample_idx, source_idx) triples
+        for sfile, vfile in zip(seis_files, vel_files):
+            f = np.load(sfile, mmap_mode='r')
+            n_samples, n_sources, *_ = f.shape  # e.g., (batch, sources, ...)
+            for i in range(n_samples):
+                for s in range(n_sources):
+                    self.index.append((sfile, vfile, i, s))
+            del f
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, idx):
+        sfile, vfile, i, s = self.index[idx]
+        # Load only the required source
+        seis = np.load(sfile, mmap_mode='r')[i, s]  # shape: (receivers, timesteps)
+        vel = np.load(vfile, mmap_mode='r')[i]      # shape: (1, 70, 70)
+        # Convert to float16 and add batch/source dims
+        seis = seis.astype(np.float16)[None, ...]    # shape: (1, receivers, timesteps)
+        vel = vel.astype(np.float16)
+        # Normalize
+        mu = seis.mean(axis=(1,2), keepdims=True)
+        std = seis.std(axis=(1,2), keepdims=True) + 1e-6
+        seis = (seis - mu) / std
+        if self.memory_tracker:
+            self.memory_tracker.update(seis.nbytes + vel.nbytes)
+        return torch.from_numpy(seis), torch.from_numpy(vel) 

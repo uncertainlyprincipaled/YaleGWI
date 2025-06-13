@@ -389,7 +389,7 @@ class SpecProjNet(nn.Module):
         else:
             raise ValueError("Backbone does not have stem attribute")
         
-    def forward(self, x, max_sources_per_step=5):
+    def forward(self, x, max_sources_per_step=1):
         # Input shape assertions
         assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
         assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
@@ -400,39 +400,32 @@ class SpecProjNet(nn.Module):
             B, T, R = x.shape
         elif x.ndim == 2:
             T, R = x.shape
-        # Optionally, check for NaN/Inf
         if torch.isnan(x).any() or torch.isinf(x).any():
             raise ValueError("Input contains NaN or Inf values!")
-        
-        # Log input tensor stats
         logging.info(f"Input tensor shape: {x.shape}, dtype: {x.dtype}, min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
-        
-        # Handle different input shapes
-        if len(x.shape) == 5:  # (B, S, C, T, R)
+        if len(x.shape) == 5:
             B, S, C, T, R = x.shape
             x = x.reshape(B, S*C, T, R)
-        elif len(x.shape) == 3:  # (B, T, R)
-            x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
-        elif len(x.shape) == 2:  # (T, R)
-            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
-        
+        elif len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        elif len(x.shape) == 2:
+            x = x.unsqueeze(0).unsqueeze(0)
         B, S, T, R = x.shape
         sum_output = 0
         count = 0
         for start in range(0, S, max_sources_per_step):
             end = min(start + max_sources_per_step, S)
-            x_slice = x[:, start:end, :, :]  # (B, chunk, T, R)
+            x_slice = x[:, start:end, :, :]
             for s in range(x_slice.shape[1]):
                 x_s = x_slice[:, s:s+1, :, :]
-                x_s = x_s.repeat(1, 5, 1, 1)
                 feats = self.backbone(x_s)
                 x_s = self.decoder(feats)
                 x_s = self.head(x_s)
                 sum_output += x_s
                 count += 1
-                del feats
+                del feats, x_s
                 torch.cuda.empty_cache()
-        x = sum_output / count  # Average over all sources
+        x = sum_output / count
         torch.cuda.empty_cache()
         return x
         

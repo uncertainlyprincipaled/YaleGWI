@@ -153,8 +153,8 @@ class DataManager:
         )
 
     def create_loader(self, seis_files: List[Path], vel_files: List[Path],
-                     family_type: str, batch_size: int = 32, 
-                     shuffle: bool = True, num_workers: int = 4,
+                     family_type: str, batch_size: int = 1, 
+                     shuffle: bool = True, num_workers: int = 0,
                      distributed: bool = False) -> DataLoader:
         dataset = self.create_dataset(seis_files, vel_files, family_type)
         
