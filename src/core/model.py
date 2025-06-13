@@ -418,6 +418,7 @@ class SpecProjNet(nn.Module):
             x_slice = x[:, start:end, :, :]
             for s in range(x_slice.shape[1]):
                 x_s = x_slice[:, s:s+1, :, :]
+                x_s = x_s.repeat(1, 5, 1, 1)
                 feats = self.backbone(x_s)
                 x_s = self.decoder(feats)
                 x_s = self.head(x_s)
