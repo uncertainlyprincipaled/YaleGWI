@@ -15,6 +15,7 @@ A deep learning solution for seismic waveform inversion using a HGNet/ConvNeXt b
 - All source files must import and use DataManager for any data access.
 
 ### Project Structure
+# TODO: This needs updating; it is incompleete 
 - `kaggle_notebook.py`: Main development file containing all code
 - `src/core/data_manager.py`: **Single source of truth for all data IO**
 - `requirements.txt`: Project dependencies
@@ -91,12 +92,12 @@ pip install -r requirements.txt
 
 ---
 
-## 5. AWS EC2 Instructions
+## 5. AWS EC2 Multi-GPU (g4dn.12xlarge) Instructions
 
-### Quick Start: AWS/EC2 Training
+### Quick Start: Multi-GPU Training on AWS EC2 (g4dn.12xlarge)
 
 #### 1. Launch a New EC2 Instance
-- Use a GPU-enabled instance (e.g., `g5.xlarge`)
+- Use a GPU-enabled instance: **g4dn.12xlarge** (4 × NVIDIA T4, 16GB each)
 - Use Ubuntu 22.04 or 20.04 AMI
 - Attach or create a 200GB+ EBS volume for data
 
@@ -112,12 +113,8 @@ cd YaleGWI
 ```
 
 #### 4. Set Up Python Environment
-If `venv` is not available, install it:
 ```bash
 sudo apt-get update && sudo apt-get install -y python3-venv
-```
-Then create and activate a virtual environment:
-```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
@@ -125,36 +122,39 @@ pip install -r requirements.txt
 ```
 
 #### 5. Configure AWS Credentials
-Create a file `.env/aws/credentials` with:
-```bash
-export AWS_ACCESS_KEY_ID=<your_access_key>
-export AWS_SECRET_ACCESS_KEY=<your_secret_key>
-export AWS_REGION=<your_region>
-export S3_BUCKET=<your_bucket_name>
-```
-Then load them:
 ```bash
 source .env/aws/credentials
 ```
 
 #### 6. Download/Sync Data from S3
 ```bash
-# Update data directory permission
 sudo mkdir -p /mnt/waveform-inversion
 sudo mkdir -p /mnt/output
 sudo chown $USER:$USER /mnt/waveform-inversion
 sudo chown $USER:$USER /mnt/output
-# Run setup
 python -m src.core.setup aws
 ```
 
-#### 7. Configuration File (Optional)
-If `outputs/config.json` is present, it will be loaded automatically and override default configuration values. This is useful for resuming or reproducing previous runs with the same settings.
+#### 7. Multi-GPU Training (Distributed Data Parallel)
+- The codebase now supports multi-GPU training using PyTorch DDP.
+- Use the provided `train_ec2.py` script for EC2 multi-GPU training:
 
-#### 8. Run Training
 ```bash
-python -m src.core.train --epochs 120 --batch 16 --amp --experiment-tag "run-$(date +%F)"
+export GWI_ENV=aws
+python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --epochs 120 --batch 4 --amp --experiment-tag "run-$(date +%F)"
 ```
+- This will launch 4 processes (one per GPU) and train in parallel.
+- Make sure your data is preprocessed for efficient distributed loading (see `preprocess.py`).
+
+#### 8. Environment-Specific Scripts
+- Use `train_ec2.py` for EC2 multi-GPU training.
+- Use `train_kaggle.py` for Kaggle single/multi-GPU training.
+- Each script is tailored for its environment for maximum robustness and portability.
+
+#### 9. Notes
+- For very large datasets, use the provided `preprocess.py` to split large .npy files into smaller per-sample files for efficient parallel loading.
+- See `src/core/config.py` for environment and DDP configuration options.
+- For troubleshooting, see the logs in `outputs/` and the EC2 console.
 
 ---
 

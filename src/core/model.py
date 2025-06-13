@@ -318,7 +318,7 @@ class SegmentationHead2d(nn.Module):
         return x
 
 class SpecProjNet(nn.Module):
-    """SpecProj model with HGNet backbone."""
+    """SpecProj model with HGNet backbone and optional input pooling/downsampling."""
     def __init__(
         self,
         backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
@@ -327,6 +327,12 @@ class SpecProjNet(nn.Module):
         weights_path: str = None,  # Only for your own checkpoints
     ):
         super().__init__()
+        # Optional input pooling/downsampling
+        self.downsample_factor = getattr(CFG, 'downsample_factor', None)
+        if self.downsample_factor is not None and self.downsample_factor > 1:
+            self.input_pool = nn.AvgPool2d(kernel_size=self.downsample_factor, stride=self.downsample_factor)
+        else:
+            self.input_pool = None
         # Load backbone with gradient checkpointing enabled
         self.backbone = timm.create_model(
             backbone, 
@@ -410,6 +416,10 @@ class SpecProjNet(nn.Module):
             x = x.unsqueeze(1)
         elif len(x.shape) == 2:
             x = x.unsqueeze(0).unsqueeze(0)
+        # Apply input pooling/downsampling if enabled
+        if self.input_pool is not None:
+            # Pool last two dims (T, R)
+            x = self.input_pool(x)
         B, S, T, R = x.shape
         sum_output = 0
         count = 0

@@ -82,15 +82,26 @@ class Config:
             cls._inst.seed  = 42
 
             # Training hyper-parameters
-            cls._inst.batch   = 1
+            # Default batch size and DDP settings
+            env_kind = cls._inst.env.kind
+            if env_kind == 'aws':
+                cls._inst.batch = 4  # For g4dn.12xlarge, 4 GPUs
+                cls._inst.distributed = True
+                cls._inst.world_size = 4
+            else:
+                cls._inst.batch = 1
+                cls._inst.distributed = False
+                cls._inst.world_size = 1
             cls._inst.lr      = 1e-4
             cls._inst.weight_decay = 1e-3
             cls._inst.epochs  = 120
             cls._inst.lambda_pde = 0.1
             cls._inst.dtype = "float16"  # Default dtype for tensors
-            cls._inst.num_workers = 0
-            cls._inst.distributed = False  # Whether to use distributed training
+            cls._inst.num_workers = 4 if env_kind == 'aws' else 0
             cls._inst.s3_upload_interval = 30  # S3 upload/checkpoint interval in epochs
+
+            # Downsampling/pooling config for model.py (set to None for no downsampling)
+            cls._inst.downsample_factor = None  # e.g., 2 or 4 to enable pooling in model
 
             # Memory optimization settings
             cls._inst.memory_efficient = True  # Enable memory efficient operations
@@ -103,7 +114,6 @@ class Config:
             cls._inst.pretrained = True
 
             # Set environment-specific paths and weight_path
-            env_kind = cls._inst.env.kind
             if env_kind == 'aws':
                 cls._inst.paths.aws_root = cls._inst.env.ebs_mount / 'waveform-inversion'
                 cls._inst.paths.aws_train = cls._inst.paths.aws_root / 'train_samples'
