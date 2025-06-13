@@ -215,8 +215,14 @@ class SeismicDataset(Dataset):
             # Clear memory mapping
             del seis, vel
             
+            # Reduce vel to match model output
+            vel_tensor = vel_tensor.mean(dim=1, keepdim=True)
+            
         else:
             seis_tensor = torch.from_numpy(np.load(seis_file)).float()
             vel_tensor = torch.from_numpy(np.load(vel_file)).float()
+            
+            # Reduce vel to match model output
+            vel_tensor = vel_tensor.mean(dim=1, keepdim=True)
             
         return seis_tensor, vel_tensor 

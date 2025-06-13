@@ -155,6 +155,38 @@ def setup_environment():
             CFG.env.set_aws_attributes()
         setup_aws_environment()
         print("Environment setup complete for AWS")
+        # Download OpenFWI weights if not present
+        openfwi_weights = Path('/mnt/waveform-inversion/openfwi_backbone.pth')
+        if not openfwi_weights.exists():
+            try:
+                import kagglehub
+                logging.info("Downloading OpenFWI dataset...")
+                path = kagglehub.dataset_download("brendanartley/openfwi-preprocessed-72x72")
+                # Find the weights file in the downloaded path
+                weights_path = Path(path) / 'models' / 'backbone.pth'
+                if weights_path.exists():
+                    logging.info(f"Found OpenFWI weights at {weights_path}")
+                    # Copy to target location
+                    shutil.copy(weights_path, openfwi_weights)
+                    logging.info(f"Copied weights to {openfwi_weights}")
+                else:
+                    logging.error(f"Could not find weights file at {weights_path}")
+                    raise FileNotFoundError(f"OpenFWI weights not found at {weights_path}")
+            except Exception as e:
+                logging.error(f"Failed to download OpenFWI dataset: {e}")
+                raise
+        else:
+            logging.info(f"OpenFWI weights already exist at {openfwi_weights}")
+            
+        # Verify the weights file
+        if openfwi_weights.exists():
+            try:
+                import torch
+                state_dict = torch.load(openfwi_weights, map_location='cpu')
+                logging.info(f"Successfully loaded OpenFWI weights with {len(state_dict)} layers")
+            except Exception as e:
+                logging.error(f"Failed to verify OpenFWI weights: {e}")
+                raise
     elif CFG.env.kind == 'colab':
         # Create data directory
         data_dir = Path('/content/data')
@@ -216,10 +248,44 @@ def setup_environment():
         setup_paths(data_dir)
         print("Environment setup complete for local development")
 
+def verify_openfwi_setup():
+    """Verify that OpenFWI dataset and weights are properly loaded."""
+    from src.core.config import CFG
+    
+    # Check weights file
+    weights_path = Path('/mnt/waveform-inversion/openfwi_backbone.pth')
+    if not weights_path.exists():
+        logging.error("OpenFWI weights not found!")
+        return False
+        
+    # Try loading weights
+    try:
+        import torch
+        state_dict = torch.load(weights_path, map_location='cpu')
+        logging.info(f"Successfully loaded OpenFWI weights with {len(state_dict)} layers")
+        
+        # Verify model can use these weights
+        from src.core.model import get_model
+        model = get_model()
+        try:
+            model.backbone.load_state_dict(state_dict, strict=False)
+            logging.info("Successfully loaded weights into model backbone")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to load weights into model: {e}")
+            return False
+    except Exception as e:
+        logging.error(f"Failed to verify OpenFWI weights: {e}")
+        return False
+
 if __name__ == "__main__":
     
     # Accept an optional argument for environment kind
     if len(sys.argv) > 1:
         env_kind = sys.argv[1].lower()
         os.environ["GWI_ENV"] = env_kind
-    setup_environment() 
+    setup_environment()
+    if verify_openfwi_setup():
+        logging.info("OpenFWI setup verified successfully!")
+    else:
+        logging.error("OpenFWI setup verification failed!") 

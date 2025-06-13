@@ -181,7 +181,17 @@ def train(dryrun: bool = False, fp16: bool = True):
                         x = x.cuda()
                         y = y.cuda()
                         with autocast(enabled=fp16):
-                            pred = model(x)
+                            pred = model(x, max_sources_per_step=5)
+                            # Log shapes
+                            logging.info(f"pred shape: {pred.shape}, y shape: {y.shape}")
+                            # Shape matching logic
+                            if pred.shape != y.shape:
+                                if pred.shape[1] == 1 and y.shape[1] > 1:
+                                    y = y.mean(dim=1, keepdim=True)
+                                elif y.shape[1] == 1 and pred.shape[1] > 1:
+                                    pred = pred.mean(dim=1, keepdim=True)
+                            # Assertion
+                            assert pred.shape == y.shape, f"Shape mismatch: pred {pred.shape}, y {y.shape}"
                             if torch.isnan(pred).any() or torch.isinf(pred).any():
                                 logging.error(f"NaN or Inf detected in model output at batch {batch_idx}")
                                 continue
@@ -198,19 +208,30 @@ def train(dryrun: bool = False, fp16: bool = True):
                         scheduler.step()
                         epoch_loss += loss.item()
                         num_batches += 1
-                        if batch_idx % 10 == 0:
+                        # Clear cache periodically
+                        if batch_idx % 10 == 0:  # More frequent cache clearing
                             torch.cuda.empty_cache()
                             if torch.cuda.is_available():
+                                # Log memory stats
                                 allocated = torch.cuda.memory_allocated() / 1e9
                                 reserved = torch.cuda.memory_reserved() / 1e9
                                 logging.info(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+                                # Force garbage collection
+                                import gc
+                                gc.collect()
+                                # Reset peak memory stats
+                                torch.cuda.reset_peak_memory_stats()
+                                # Empty cache again after GC
+                                torch.cuda.empty_cache()
                     except RuntimeError as e:
                         if "out of memory" in str(e):
                             logging.error(f"OOM Error at epoch {epoch+1}, loader {loader_idx+1}, batch {batch_idx}")
                             logging.error(f"Last successful operation: Forward pass")
                             if torch.cuda.is_available():
                                 logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                            # Clear cache and continue
                             torch.cuda.empty_cache()
+                            gc.collect()  # Add garbage collection
                             continue
                         else:
                             raise e
@@ -229,9 +250,20 @@ def train(dryrun: bool = False, fp16: bool = True):
                     val_loader = train_loaders[0]
                     for batch_idx, (seis, vel) in enumerate(val_loader):
                         seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
+                        vel = vel.mean(dim=1, keepdim=True)
                         logging.info(f"vel shape: {vel.shape}, dtype: {vel.dtype}, min: {vel.min().item()}, max: {vel.max().item()}, mean: {vel.mean().item()}")
                         with autocast(enabled=fp16):
                             v_pred = model.get_ema_model()(seis)
+                            # Log shapes
+                            logging.info(f"v_pred shape: {v_pred.shape}, vel shape: {vel.shape}")
+                            # Shape matching logic
+                            if v_pred.shape != vel.shape:
+                                if v_pred.shape[1] == 1 and vel.shape[1] > 1:
+                                    vel = vel.mean(dim=1, keepdim=True)
+                                elif vel.shape[1] == 1 and v_pred.shape[1] > 1:
+                                    v_pred = v_pred.mean(dim=1, keepdim=True)
+                            # Assertion
+                            assert v_pred.shape == vel.shape, f"Shape mismatch: v_pred {v_pred.shape}, vel {vel.shape}"
                             if torch.isnan(v_pred).any() or torch.isinf(v_pred).any():
                                 logging.error(f"NaN or Inf detected in validation output at batch {batch_idx}")
                                 continue

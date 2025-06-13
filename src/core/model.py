@@ -389,7 +389,7 @@ class SpecProjNet(nn.Module):
         else:
             raise ValueError("Backbone does not have stem attribute")
         
-    def forward(self, x):
+    def forward(self, x, max_sources_per_step=5):
         # Input shape assertions
         assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
         assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
@@ -417,9 +417,6 @@ class SpecProjNet(nn.Module):
         elif len(x.shape) == 2:  # (T, R)
             x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
             
-        # Log reshaped tensor
-        logging.info(f"Reshaped tensor: {x.shape}")
-            
         B, S, T, R = x.shape
         
         # Process each source separately to save memory
@@ -429,35 +426,28 @@ class SpecProjNet(nn.Module):
             x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
             x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
             
-            # Log source tensor
-            logging.info(f"Source {s} tensor shape: {x_s.shape}")
-            
             # Get encoder features
             feats = self.backbone(x_s)
-            
-            # Log encoder features
-            logging.info(f"Encoder features shapes: {[f.shape for f in feats]}")
             
             # Decode
             x_s = self.decoder(feats)
             
-            # Log decoder output
-            logging.info(f"Decoder output shape: {x_s.shape}")
-            
             # Final head
             x_s = self.head(x_s)
             
-            # Log head output
-            logging.info(f"Head output shape: {x_s.shape}")
-            
             outputs.append(x_s)
+            
+            # Clear intermediate tensors
+            del feats
+            torch.cuda.empty_cache()
             
         # Combine outputs
         x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
         x = x.mean(dim=1)  # Average over sources
         
-        # Log final output
-        logging.info(f"Final output shape: {x.shape}, dtype: {x.dtype}, min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
+        # Clear outputs list
+        del outputs
+        torch.cuda.empty_cache()
         
         return x
         
