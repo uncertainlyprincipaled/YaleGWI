@@ -4,6 +4,7 @@ Training script that uses DataManager for all data IO.
 import torch
 import random
 import numpy as np
+import gc  # Add this import for garbage collection
 from pathlib import Path
 from tqdm import tqdm
 import torch.cuda.amp as amp
@@ -217,7 +218,6 @@ def train(dryrun: bool = False, fp16: bool = True):
                                 reserved = torch.cuda.memory_reserved() / 1e9
                                 logging.info(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
                                 # Force garbage collection
-                                import gc
                                 gc.collect()
                                 # Reset peak memory stats
                                 torch.cuda.reset_peak_memory_stats()

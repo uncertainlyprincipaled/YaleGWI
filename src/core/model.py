@@ -403,52 +403,37 @@ class SpecProjNet(nn.Module):
         # Optionally, check for NaN/Inf
         if torch.isnan(x).any() or torch.isinf(x).any():
             raise ValueError("Input contains NaN or Inf values!")
-            
+        
         # Log input tensor stats
         logging.info(f"Input tensor shape: {x.shape}, dtype: {x.dtype}, min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
         
         # Handle different input shapes
         if len(x.shape) == 5:  # (B, S, C, T, R)
             B, S, C, T, R = x.shape
-            # Reshape to combine source and channel dimensions
             x = x.reshape(B, S*C, T, R)
         elif len(x.shape) == 3:  # (B, T, R)
             x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
         elif len(x.shape) == 2:  # (T, R)
             x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
-            
+        
         B, S, T, R = x.shape
-        
-        # Process each source separately to save memory
-        outputs = []
-        for s in range(S):
-            # Get current source
-            x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
-            x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
-            
-            # Get encoder features
-            feats = self.backbone(x_s)
-            
-            # Decode
-            x_s = self.decoder(feats)
-            
-            # Final head
-            x_s = self.head(x_s)
-            
-            outputs.append(x_s)
-            
-            # Clear intermediate tensors
-            del feats
-            torch.cuda.empty_cache()
-            
-        # Combine outputs
-        x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
-        x = x.mean(dim=1)  # Average over sources
-        
-        # Clear outputs list
-        del outputs
+        sum_output = 0
+        count = 0
+        for start in range(0, S, max_sources_per_step):
+            end = min(start + max_sources_per_step, S)
+            x_slice = x[:, start:end, :, :]  # (B, chunk, T, R)
+            for s in range(x_slice.shape[1]):
+                x_s = x_slice[:, s:s+1, :, :]
+                x_s = x_s.repeat(1, 5, 1, 1)
+                feats = self.backbone(x_s)
+                x_s = self.decoder(feats)
+                x_s = self.head(x_s)
+                sum_output += x_s
+                count += 1
+                del feats
+                torch.cuda.empty_cache()
+        x = sum_output / count  # Average over all sources
         torch.cuda.empty_cache()
-        
         return x
         
     def update_ema(self):
