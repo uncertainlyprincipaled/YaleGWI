@@ -322,25 +322,25 @@ class SpecProjNet(nn.Module):
     def __init__(
         self,
         backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
-        pretrained: bool = False,  # Changed to False to prevent downloading
+        pretrained: bool = True,  # Always True to use timm's pretrained weights
         ema_decay: float = 0.99,
-        weights_path: str = None,  # Added parameter for local weights path
+        weights_path: str = None,  # Only for your own checkpoints
     ):
         super().__init__()
         # Load backbone with gradient checkpointing enabled
         self.backbone = timm.create_model(
             backbone, 
-            pretrained=pretrained, 
+            pretrained=pretrained,  # Always True for timm weights
             features_only=True, 
             in_chans=5,
             checkpoint_path=''  # Enable gradient checkpointing
         )
         
-        # Load local weights if provided
+        # Remove OpenFWI .pth loading logic
+        # Only load your own previous weights if provided
         if weights_path:
             try:
                 state_dict = torch.load(weights_path, map_location='cpu')
-                # Try loading with strict=False to handle missing keys
                 missing_keys, unexpected_keys = self.backbone.load_state_dict(state_dict, strict=False)
                 if missing_keys:
                     print(f"Warning: Missing keys in state dict: {missing_keys}")
