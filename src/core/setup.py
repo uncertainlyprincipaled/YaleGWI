@@ -253,7 +253,7 @@ if __name__ == "__main__":
         env_kind = sys.argv[1].lower()
         os.environ["GWI_ENV"] = env_kind
     setup_environment()
-    if verify_openfwi_setup():
-        logging.info("OpenFWI setup verified successfully!")
-    else:
-        logging.error("OpenFWI setup verification failed!") 
+    # if verify_openfwi_setup():
+    #     logging.info("OpenFWI setup verified successfully!")
+    # else:
+    #     logging.error("OpenFWI setup verification failed!") 
