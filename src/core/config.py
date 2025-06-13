@@ -42,22 +42,15 @@ class _KagglePaths:
 
 class _Env:
     def __init__(self):
-        # Environment detection
-        if os.environ.get("AWS_EXECUTION_ENV") or Path("/home/ec2-user").exists():
-            self.kind: Literal['kaggle','colab','sagemaker','aws','local'] = 'aws'
-        elif 'KAGGLE_URL_BASE' in os.environ:
-            self.kind = 'kaggle'
-        elif 'COLAB_GPU' in os.environ:
-            self.kind = 'colab'
-        elif 'SM_NUM_CPUS' in os.environ:
-            self.kind = 'sagemaker'
-        else:
-            self.kind = 'local'
-            
+        env_kind = os.environ.get("GWI_ENV", "").lower()
+        if not env_kind:
+            raise RuntimeError(
+                "You must specify the environment kind via the GWI_ENV environment variable "
+                "(e.g., 'aws', 'kaggle', 'colab', 'sagemaker', 'local')."
+            )
+        self.kind = env_kind
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
-        
-        # AWS-specific settings
         if self.kind == 'aws':
             self.set_aws_attributes()
 
@@ -107,45 +100,39 @@ class Config:
             cls._inst.ema_decay = 0.99
             cls._inst.pretrained = True
 
-            # Inference weight path (default for Kaggle dataset)
-            cls._inst.weight_path = "/kaggle/input/yalegwi/best.pth"
-            
-            # Loss weights
-            cls._inst.lambda_inv = 1.0
-            cls._inst.lambda_fwd = 1.0
-            cls._inst.lambda_pde = 0.1
-
-            # Enable joint training by default in Kaggle
-            cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
-
-            # AWS-specific settings
-            if cls._inst.env.kind == 'aws':
+            # Set environment-specific paths and weight_path
+            env_kind = cls._inst.env.kind
+            if env_kind == 'aws':
                 cls._inst.paths.aws_root = cls._inst.env.ebs_mount / 'waveform-inversion'
                 cls._inst.paths.aws_train = cls._inst.paths.aws_root / 'train_samples'
                 cls._inst.paths.aws_test = cls._inst.paths.aws_root / 'test'
                 cls._inst.paths.aws_output = cls._inst.env.ebs_mount / 'output'
-                
-                # Update paths for AWS environment
                 cls._inst.paths.root = cls._inst.paths.aws_root
                 cls._inst.paths.train = cls._inst.paths.aws_train
                 cls._inst.paths.test = cls._inst.paths.aws_test
-                
-                # Update family paths for AWS
-                train = cls._inst.paths.train
-                cls._inst.paths.families = {
-                    'FlatVel_A'   : train/'FlatVel_A',
-                    'FlatVel_B'   : train/'FlatVel_B',
-                    'CurveVel_A'  : train/'CurveVel_A',
-                    'CurveVel_B'  : train/'CurveVel_B',
-                    'Style_A'     : train/'Style_A',
-                    'Style_B'     : train/'Style_B',
-                    'FlatFault_A' : train/'FlatFault_A',
-                    'FlatFault_B' : train/'FlatFault_B',
-                    'CurveFault_A': train/'CurveFault_A',
-                    'CurveFault_B': train/'CurveFault_B',
-                }
-            
-            # Always use base dataset for now
+                cls._inst.weight_path = "/mnt/waveform-inversion/best.pth"
+            elif env_kind == 'kaggle':
+                cls._inst.paths.root = Path('/kaggle/input/waveform-inversion')
+                cls._inst.paths.train = cls._inst.paths.root / 'train_samples'
+                cls._inst.paths.test = cls._inst.paths.root / 'test'
+                cls._inst.weight_path = "/kaggle/input/yalegwi/best.pth"
+            elif env_kind == 'colab':
+                cls._inst.paths.root = Path('/content/data/waveform-inversion')
+                cls._inst.paths.train = cls._inst.paths.root / 'train_samples'
+                cls._inst.paths.test = cls._inst.paths.root / 'test'
+                cls._inst.weight_path = "/content/data/waveform-inversion/best.pth"
+            elif env_kind == 'sagemaker':
+                cls._inst.paths.root = Path('/opt/ml/input/data/waveform-inversion')
+                cls._inst.paths.train = cls._inst.paths.root / 'train_samples'
+                cls._inst.paths.test = cls._inst.paths.root / 'test'
+                cls._inst.weight_path = "/opt/ml/input/data/waveform-inversion/best.pth"
+            else:  # local
+                cls._inst.paths.root = Path(__file__).parent.parent.parent / 'data/waveform-inversion'
+                cls._inst.paths.train = cls._inst.paths.root / 'train_samples'
+                cls._inst.paths.test = cls._inst.paths.root / 'test'
+                cls._inst.weight_path = str(cls._inst.paths.root / 'best.pth')
+
+            # Set family paths for all environments
             train = cls._inst.paths.train
             cls._inst.paths.families = {
                 'FlatVel_A'   : train/'FlatVel_A',
@@ -159,9 +146,16 @@ class Config:
                 'CurveFault_A': train/'CurveFault_A',
                 'CurveFault_B': train/'CurveFault_B',
             }
-            cls._inst.dataset_style = 'yalegwi'
 
-            # Optionally, exclude families with too few samples
+            # Loss weights
+            cls._inst.lambda_inv = 1.0
+            cls._inst.lambda_fwd = 1.0
+            cls._inst.lambda_pde = 0.1
+
+            # Enable joint training by default in Kaggle
+            cls._inst.enable_joint = env_kind == 'kaggle'
+
+            cls._inst.dataset_style = 'yalegwi'
             cls._inst.families_to_exclude = []
 
         return cls._inst

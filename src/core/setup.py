@@ -10,6 +10,7 @@ from typing import Optional
 import kagglehub  # Optional import
 from src.core.config import CFG
 import json
+import sys
 
 def warm_kaggle_cache():
     """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
@@ -41,7 +42,6 @@ def warm_kaggle_cache():
 
 def setup_aws_environment():
     """Setup AWS-specific environment configurations."""
-    from src.core.config import CFG
     
     # Setup S3 client
     s3 = boto3.client('s3', region_name=CFG.env.aws_region)
@@ -105,8 +105,6 @@ def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainly
 
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
-    from src.core.config import CFG  # Import here to avoid circular dependency
-    import json
 
     # Allow explicit environment override
     env_override = os.environ.get('GWI_ENV', '').lower()
@@ -215,7 +213,7 @@ def setup_environment():
         print("Environment setup complete for local development")
 
 if __name__ == "__main__":
-    import sys
+    
     # Accept an optional argument for environment kind
     if len(sys.argv) > 1:
         env_kind = sys.argv[1].lower()
