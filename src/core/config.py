@@ -59,20 +59,22 @@ class _Env:
         
         # AWS-specific settings
         if self.kind == 'aws':
-            self.aws_region = os.environ.get('AWS_REGION', 'us-east-1')
-            self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi-data')
-            self.ebs_mount = Path('/mnt')
-            self.use_spot = os.environ.get('USE_SPOT', 'true').lower() == 'true'
-            self.spot_interruption_probability = float(os.environ.get('SPOT_INTERRUPTION_PROB', '0.1'))
-            
-            # Load AWS credentials from environment file
-            aws_creds_path = Path(__file__).parent.parent.parent / '.env/aws/credentials'
-            if aws_creds_path.exists():
-                with open(aws_creds_path) as f:
-                    for line in f:
-                        if '=' in line:
-                            key, value = line.strip().split('=', 1)
-                            os.environ[key] = value
+            self.set_aws_attributes()
+
+    def set_aws_attributes(self):
+        self.aws_region = os.environ.get('AWS_REGION', 'us-east-1')
+        self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi-data')
+        self.ebs_mount = Path('/mnt')
+        self.use_spot = os.environ.get('USE_SPOT', 'true').lower() == 'true'
+        self.spot_interruption_probability = float(os.environ.get('SPOT_INTERRUPTION_PROB', '0.1'))
+        # Load AWS credentials from environment file
+        aws_creds_path = Path(__file__).parent.parent.parent / '.env/aws/credentials'
+        if aws_creds_path.exists():
+            with open(aws_creds_path) as f:
+                for line in f:
+                    if '=' in line:
+                        key, value = line.strip().split('=', 1)
+                        os.environ[key] = value
 
 class Config:
     """Read-only singleton accessed via `CFG`."""

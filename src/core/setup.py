@@ -109,8 +109,10 @@ def setup_environment():
     env_override = os.environ.get('GWI_ENV', '').lower()
     if env_override:
         CFG.env.kind = env_override
+        if CFG.env.kind == 'aws' and hasattr(CFG.env, 'set_aws_attributes'):
+            CFG.env.set_aws_attributes()
 
-    # --- NEW: Load config.json if present (for AWS) ---
+    # --- Load config.json if present (for AWS) ---
     config_path = Path('outputs/config.json')
     if CFG.env.kind == 'aws' and config_path.exists():
         with open(config_path) as f:
@@ -144,6 +146,8 @@ def setup_environment():
         }
 
     if CFG.env.kind == 'aws':
+        if hasattr(CFG.env, 'set_aws_attributes'):
+            CFG.env.set_aws_attributes()
         setup_aws_environment()
         print("Environment setup complete for AWS")
     elif CFG.env.kind == 'colab':
