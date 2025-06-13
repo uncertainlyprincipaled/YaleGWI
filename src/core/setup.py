@@ -8,7 +8,6 @@ import logging
 import time
 from typing import Optional
 import kagglehub  # Optional import
-from src.core.config import CFG
 import json
 import sys
 
@@ -106,8 +105,13 @@ def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainly
 def setup_environment():
     """Setup environment-specific configurations and download datasets if needed."""
 
-    # Allow explicit environment override
+    import os
     env_override = os.environ.get('GWI_ENV', '').lower()
+    if not env_override:
+        raise RuntimeError("You must set GWI_ENV before running setup.")
+    from src.core.config import CFG
+
+    # Allow explicit environment override
     if env_override:
         CFG.env.kind = env_override
         if CFG.env.kind == 'aws' and hasattr(CFG.env, 'set_aws_attributes'):
