@@ -205,4 +205,12 @@ def setup_environment():
         data_dir = Path(__file__).parent.parent.parent / 'data'
         data_dir.mkdir(exist_ok=True)
         setup_paths(data_dir)
-        print("Environment setup complete for local development") 
+        print("Environment setup complete for local development")
+
+if __name__ == "__main__":
+    import sys
+    # Accept an optional argument for environment kind
+    if len(sys.argv) > 1:
+        env_kind = sys.argv[1].lower()
+        os.environ["GWI_ENV"] = env_kind
+    setup_environment() 
