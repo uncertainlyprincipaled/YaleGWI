@@ -84,47 +84,6 @@ class DataManager:
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
-            
-        # Handle S3 data if in AWS environment
-        if CFG.env.kind == 'aws':
-            try:
-                # List objects in S3
-                s3_objects = self.s3_loader.s3.list_objects_v2(
-                    Bucket=CFG.env.s3_bucket,
-                    Prefix=f"raw/{family}/"
-                )
-                
-                # Filter and sort files
-                seis_files = []
-                vel_files = []
-                for obj in s3_objects.get('Contents', []):
-                    key = obj['Key']
-                    if key.endswith('.npy'):
-                        if 'seis' in key:
-                            seis_files.append(key)
-                        elif 'vel' in key:
-                            vel_files.append(key)
-                            
-                # Download files to local cache
-                local_seis_files = []
-                local_vel_files = []
-                
-                for s3_key in sorted(seis_files):
-                    local_path = root / Path(s3_key).name
-                    local_seis_files.append(self.s3_loader.download_file(s3_key, local_path))
-                    
-                for s3_key in sorted(vel_files):
-                    local_path = root / Path(s3_key).name
-                    local_vel_files.append(self.s3_loader.download_file(s3_key, local_path))
-                    
-                if local_seis_files and local_vel_files:
-                    return local_seis_files, local_vel_files, 'Fault'
-                    
-            except ClientError as e:
-                logging.error(f"Failed to list S3 objects: {e}")
-                raise
-                
-        # Fallback to local filesystem
         # Vel/Style: data/model subfolders (batched)
         if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
@@ -132,14 +91,12 @@ class DataManager:
             if seis_files and vel_files:
                 family_type = 'VelStyle'
                 return seis_files, vel_files, family_type
-                
         # Fault: seis*.npy and vel*.npy directly in folder (not batched)
         seis_files = sorted(root.glob('seis*.npy'))
         vel_files = sorted(root.glob('vel*.npy'))
         if seis_files and vel_files:
             family_type = 'Fault'
             return seis_files, vel_files, family_type
-            
         raise ValueError(f"Could not find valid data structure for family {family} at {root}")
 
     def create_dataset(self, seis_files, vel_files, family_type, augment=False):
@@ -153,8 +110,8 @@ class DataManager:
         )
 
     def create_loader(self, seis_files: List[Path], vel_files: List[Path],
-                     family_type: str, batch_size: int = 1, 
-                     shuffle: bool = True, num_workers: int = 0,
+                     family_type: str, batch_size: int = 32, 
+                     shuffle: bool = True, num_workers: int = 4,
                      distributed: bool = False) -> DataLoader:
         dataset = self.create_dataset(seis_files, vel_files, family_type)
         
@@ -177,52 +134,83 @@ class DataManager:
         return sorted(CFG.paths.test.glob('*.npy'))
 
 class SeismicDataset(Dataset):
-    """Memory-efficient dataset for seismic data using memory mapping."""
-    def __init__(self, seis_files: List[Path], vel_files: List[Path], family_type: str, 
+    """
+    Memory-efficient dataset for all families.
+    Handles both batched (500 samples) and single-sample files.
+    Data shapes:
+    - Seismic: (batch, sources=5, receivers=1000, timesteps=70)
+    - Velocity: (batch, channels=1, height=70, width=70)
+    Uses float16 for memory efficiency.
+    """
+    def __init__(self, seis_files: List[Path], vel_files: Optional[List[Path]], family_type: str, 
                  augment: bool = False, use_mmap: bool = True, memory_tracker: MemoryTracker = None):
-        self.seis_files = seis_files
-        self.vel_files = vel_files
         self.family_type = family_type
         self.augment = augment
+        self.index = []
         self.use_mmap = use_mmap
-        self.memory_tracker = memory_tracker or MemoryTracker()
-        
-        # Pre-load file sizes for memory tracking
-        self.file_sizes = {}
-        for f in seis_files + vel_files:
-            self.file_sizes[f] = f.stat().st_size
-            
+        self.memory_tracker = memory_tracker
+        self.vel_files = vel_files
+        # Build index of (file, sample_idx) pairs
+        if vel_files is None:
+            for sfile in seis_files:
+                if self.use_mmap:
+                    f = np.load(sfile, mmap_mode='r')
+                    shape = f.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                    del f
+                else:
+                    data = np.load(sfile)
+                    shape = data.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                for i in range(n_samples):
+                    self.index.append((sfile, None, i))
+        else:
+            for sfile, vfile in zip(seis_files, vel_files):
+                if self.use_mmap:
+                    f = np.load(sfile, mmap_mode='r')
+                    shape = f.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                    del f
+                else:
+                    data = np.load(sfile)
+                    shape = data.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                for i in range(n_samples):
+                    self.index.append((sfile, vfile, i))
+
     def __len__(self):
-        return len(self.seis_files)
-        
+        return len(self.index)
+
     def __getitem__(self, idx):
-        seis_file = self.seis_files[idx]
-        vel_file = self.vel_files[idx]
-        
+        sfile, vfile, i = self.index[idx]
+        # Load x
+        if self.use_mmap:
+            x = np.load(sfile, mmap_mode='r')
+        else:
+            x = np.load(sfile)
+        if len(x.shape) == 4:
+            x = x[i]
+        # For test mode, create dummy y
+        if self.vel_files is None:
+            y = np.zeros((1, 70, 70), np.float16)
+        else:
+            if self.use_mmap:
+                y = np.load(vfile, mmap_mode='r')
+            else:
+                y = np.load(vfile)
+            if len(y.shape) == 4:
+                y = y[i]
+        # Convert to float16
+        x = x.astype(np.float16)
+        y = y.astype(np.float16)
+        # Normalize per-receiver
+        mu = x.mean(axis=(1,2), keepdims=True)
+        std = x.std(axis=(1,2), keepdims=True) + 1e-6
+        x = (x - mu) / std
+        # Ensure correct shape: (sources, receivers, timesteps)
+        if len(x.shape) == 3:
+            x = x[None]
         # Track memory usage
         if self.memory_tracker:
-            self.memory_tracker.update(self.file_sizes[seis_file] + self.file_sizes[vel_file])
-            
-        # Load data with memory mapping
-        if self.use_mmap:
-            seis = np.load(seis_file, mmap_mode='r')
-            vel = np.load(vel_file, mmap_mode='r')
-            
-            # Convert to torch tensors with memory efficiency
-            seis_tensor = torch.from_numpy(seis).float()
-            vel_tensor = torch.from_numpy(vel).float()
-            
-            # Clear memory mapping
-            del seis, vel
-            
-            # Reduce vel to match model output
-            vel_tensor = vel_tensor.mean(dim=1, keepdim=True)
-            
-        else:
-            seis_tensor = torch.from_numpy(np.load(seis_file)).float()
-            vel_tensor = torch.from_numpy(np.load(vel_file)).float()
-            
-            # Reduce vel to match model output
-            vel_tensor = vel_tensor.mean(dim=1, keepdim=True)
-            
-        return seis_tensor, vel_tensor 
+            self.memory_tracker.update(x.nbytes + y.nbytes)
+        return torch.from_numpy(x), torch.from_numpy(y) 

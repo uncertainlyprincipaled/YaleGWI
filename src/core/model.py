@@ -318,35 +318,29 @@ class SegmentationHead2d(nn.Module):
         return x
 
 class SpecProjNet(nn.Module):
-    """SpecProj model with HGNet backbone and optional input pooling/downsampling."""
+    """SpecProj model with HGNet backbone."""
     def __init__(
         self,
         backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
-        pretrained: bool = True,  # Always True to use timm's pretrained weights
+        pretrained: bool = False,
         ema_decay: float = 0.99,
-        weights_path: str = None,  # Only for your own checkpoints
+        weights_path: str = None,
     ):
         super().__init__()
-        # Optional input pooling/downsampling
-        self.downsample_factor = getattr(CFG, 'downsample_factor', None)
-        if self.downsample_factor is not None and self.downsample_factor > 1:
-            self.input_pool = nn.AvgPool2d(kernel_size=self.downsample_factor, stride=self.downsample_factor)
-        else:
-            self.input_pool = None
         # Load backbone with gradient checkpointing enabled
         self.backbone = timm.create_model(
             backbone, 
-            pretrained=pretrained,  # Always True for timm weights
+            pretrained=pretrained, 
             features_only=True, 
             in_chans=5,
             checkpoint_path=''  # Enable gradient checkpointing
         )
         
-        # Remove OpenFWI .pth loading logic
-        # Only load your own previous weights if provided
+        # Load local weights if provided
         if weights_path:
             try:
                 state_dict = torch.load(weights_path, map_location='cpu')
+                # Try loading with strict=False to handle missing keys
                 missing_keys, unexpected_keys = self.backbone.load_state_dict(state_dict, strict=False)
                 if missing_keys:
                     print(f"Warning: Missing keys in state dict: {missing_keys}")
@@ -395,7 +389,7 @@ class SpecProjNet(nn.Module):
         else:
             raise ValueError("Backbone does not have stem attribute")
         
-    def forward(self, x, max_sources_per_step=1):
+    def forward(self, x):
         # Input shape assertions
         assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
         assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
@@ -406,38 +400,42 @@ class SpecProjNet(nn.Module):
             B, T, R = x.shape
         elif x.ndim == 2:
             T, R = x.shape
+        # Optionally, check for NaN/Inf
         if torch.isnan(x).any() or torch.isinf(x).any():
             raise ValueError("Input contains NaN or Inf values!")
-        logging.info(f"Input tensor shape: {x.shape}, dtype: {x.dtype}, min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
-        if len(x.shape) == 5:
+        
+        # Handle different input shapes
+        if len(x.shape) == 5:  # (B, S, C, T, R)
             B, S, C, T, R = x.shape
+            # Reshape to combine source and channel dimensions
             x = x.reshape(B, S*C, T, R)
-        elif len(x.shape) == 3:
-            x = x.unsqueeze(1)
-        elif len(x.shape) == 2:
-            x = x.unsqueeze(0).unsqueeze(0)
-        # Apply input pooling/downsampling if enabled
-        if self.input_pool is not None:
-            # Pool last two dims (T, R)
-            x = self.input_pool(x)
-        B, S, T, R = x.shape
-        sum_output = 0
-        count = 0
-        for start in range(0, S, max_sources_per_step):
-            end = min(start + max_sources_per_step, S)
-            x_slice = x[:, start:end, :, :]
-            for s in range(x_slice.shape[1]):
-                x_s = x_slice[:, s:s+1, :, :]
-                x_s = x_s.repeat(1, 5, 1, 1)
-                feats = self.backbone(x_s)
-                x_s = self.decoder(feats)
-                x_s = self.head(x_s)
-                sum_output += x_s
-                count += 1
-                del feats, x_s
-                torch.cuda.empty_cache()
-        x = sum_output / count
-        torch.cuda.empty_cache()
+        elif len(x.shape) == 3:  # (B, T, R)
+            x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
+        elif len(x.shape) == 2:  # (T, R)
+            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
+            
+        # Process each source separately to save memory
+        outputs = []
+        for s in range(S):
+            # Get current source
+            x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
+            x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
+            
+            # Get encoder features
+            feats = self.backbone(x_s)
+            
+            # Decode
+            x_s = self.decoder(feats)
+            
+            # Final head
+            x_s = self.head(x_s)
+            
+            outputs.append(x_s)
+            
+        # Combine outputs
+        x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
+        x = x.mean(dim=1)  # Average over sources
+        
         return x
         
     def update_ema(self):
