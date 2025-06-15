@@ -35,12 +35,16 @@ class SourceFileHandler(FileSystemEventHandler):
         print(f"\nDetected change in {rel_path}")
         print("Updating Kaggle notebook...")
         
-        # Run the update script
+        # Run the update script with correct PYTHONPATH
         try:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f"{self.src_dir.parent}:{env.get('PYTHONPATH', '')}"
+            
             result = subprocess.run([sys.executable, str(self.update_script)], 
                                  check=True, 
                                  capture_output=True, 
-                                 text=True)
+                                 text=True,
+                                 env=env)
             print(result.stdout)
             if result.stderr:
                 print("Warnings/Errors:", result.stderr)

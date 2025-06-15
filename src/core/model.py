@@ -3,17 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 from copy import deepcopy
-from src.core.config import CFG  # Absolute import
+# from src.core.config import CFG  # Absolute import
 import logging
+from pathlib import Path
 
-def get_model():
-    """Create and return a SpecProjNet model instance."""
-    model = SpecProjNet(
-        backbone=CFG.backbone,
-        pretrained=False,  # Always False to prevent downloading
-        ema_decay=CFG.ema_decay,
-        weights_path=CFG.weight_path  # Pass the weights path from CFG
-    ).to(CFG.env.device)
+def get_model(backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k", pretrained: bool = False, ema_decay: float = 0.99):
+    """Create and initialize the model."""
+    model = SpecProjNet(backbone=backbone, pretrained=pretrained, ema_decay=ema_decay)
+    
+    # Move model to device
+    model = model.to(CFG.env.device)
+    
+    # Convert all parameters to float32
+    model = model.float()
+    
+    # Load weights if available
+    if CFG.weight_path and Path(CFG.weight_path).exists():
+        try:
+            state_dict = torch.load(CFG.weight_path, map_location=CFG.env.device)
+            if 'model_state_dict' in state_dict:
+                state_dict = state_dict['model_state_dict']
+            model.load_state_dict(state_dict, strict=False)
+            logging.info(f"Successfully loaded weights from {CFG.weight_path}")
+        except Exception as e:
+            logging.error(f"Failed to load weights: {e}")
+            logging.info("Continuing with randomly initialized weights")
+    
     return model
 
 class ModelEMA(nn.Module):
@@ -319,135 +334,84 @@ class SegmentationHead2d(nn.Module):
 
 class SpecProjNet(nn.Module):
     """SpecProj model with HGNet backbone."""
-    def __init__(
-        self,
-        backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
-        pretrained: bool = False,
-        ema_decay: float = 0.99,
-        weights_path: str = None,
-    ):
+    def __init__(self, backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k", pretrained: bool = False, ema_decay: float = 0.99):
         super().__init__()
-        # Load backbone with gradient checkpointing enabled
+        
+        # Input projection layer to convert to 3 channels
+        self.input_proj = nn.Conv2d(5, 3, kernel_size=1)
+        
+        # Create backbone
         self.backbone = timm.create_model(
-            backbone, 
-            pretrained=pretrained, 
-            features_only=True, 
-            in_chans=5,
-            checkpoint_path=''  # Enable gradient checkpointing
+            backbone,
+            pretrained=pretrained,
+            features_only=True,
+            out_indices=[0, 1, 2, 3]
         )
+            
+        # Get channel dimensions from backbone
+        self.encoder_channels = self.backbone.feature_info.channels()
+        print("Backbone output channels:", self.encoder_channels)
         
-        # Load local weights if provided
-        if weights_path:
-            try:
-                state_dict = torch.load(weights_path, map_location='cpu')
-                # Try loading with strict=False to handle missing keys
-                missing_keys, unexpected_keys = self.backbone.load_state_dict(state_dict, strict=False)
-                if missing_keys:
-                    print(f"Warning: Missing keys in state dict: {missing_keys}")
-                if unexpected_keys:
-                    print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
-            except Exception as e:
-                print(f"Warning: Could not load weights from {weights_path}: {str(e)}")
-                print("Continuing with randomly initialized weights")
+        # Initialize decoder blocks with correct channel dimensions
+        self.decoder_blocks = nn.ModuleList()
+        in_channels = self.encoder_channels[-1]  # Start with last feature map channels
         
-        # Update stem stride
-        self._update_stem()
+        for i in range(len(self.encoder_channels)-1):
+            skip_channels = self.encoder_channels[-(i+2)]
+            out_channels = self.encoder_channels[-(i+2)]
+            print(f"DecoderBlock - in_channels: {in_channels}, skip_channels: {skip_channels}, out_channels: {out_channels}")
+            self.decoder_blocks.append(
+                DecoderBlock2d(in_channels, skip_channels, out_channels)
+            )
+            in_channels = out_channels
+            
+        # Final projection layer
+        self.final_proj = nn.Conv2d(self.encoder_channels[0], 1, kernel_size=1)
         
-        # Get encoder channels
-        encoder_channels = self.backbone.feature_info.channels()
-        print(f"Encoder channels: {encoder_channels}")  # Debug print
-        
-        # Create decoder
-        self.decoder = UnetDecoder2d(
-            encoder_channels=encoder_channels,
-            decoder_channels=(256, 128, 64, 32),
-            scale_factors=(1,2,2,2),
-            attention_type="scse",
-            intermediate_conv=True,
-        )
-        
-        # Create head with target size
-        self.head = SegmentationHead2d(
-            in_channels=32,
-            out_channels=1,
-            target_size=(70, 70),  # Set target output size
-            mode="nontrainable",
-        )
+        # Final resize layer to match target dimensions
+        self.final_resize = nn.Upsample(size=(70, 70), mode='bilinear', align_corners=False)
         
         # Initialize EMA
-        self.ema = ModelEMA(self, decay=ema_decay) if ema_decay > 0 else None
-        
-    def _update_stem(self):
-        """Update stem convolution stride."""
-        if hasattr(self.backbone, 'stem'):
-            if hasattr(self.backbone.stem, 'stem1'):
-                self.backbone.stem.stem1.conv.stride = (1,1)
-            elif hasattr(self.backbone.stem, 'conv'):
-                self.backbone.stem.conv.stride = (1,1)
-            else:
-                raise ValueError("Unknown stem structure in backbone")
-        else:
-            raise ValueError("Backbone does not have stem attribute")
+        self.ema_decay = ema_decay
+        self.ema_model = None
         
     def forward(self, x):
-        # Input shape assertions
-        assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
-        assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
-        if x.ndim == 5:
-            B, S, C, T, R = x.shape
-            assert C == 1 or C == 5, f"Expected channel dim 1 or 5, got {C}"
-        elif x.ndim == 3:
-            B, T, R = x.shape
-        elif x.ndim == 2:
-            T, R = x.shape
-        # Optionally, check for NaN/Inf
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            raise ValueError("Input contains NaN or Inf values!")
+        # Handle 5D input [batch, channels, sources, receivers, timesteps]
+        if x.dim() == 5:
+            B, C, S, R, T = x.shape
+            # Reshape to combine sources and channels: [batch, sources*channels, receivers, timesteps]
+            x = x.reshape(B, S*C, R, T)
+            
+        # Project input to 3 channels
+        x = self.input_proj(x)
+            
+        # Get features from backbone
+        features = self.backbone(x)
         
-        # Handle different input shapes
-        if len(x.shape) == 5:  # (B, S, C, T, R)
-            B, S, C, T, R = x.shape
-            # Reshape to combine source and channel dimensions
-            x = x.reshape(B, S*C, T, R)
-        elif len(x.shape) == 3:  # (B, T, R)
-            x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
-        elif len(x.shape) == 2:  # (T, R)
-            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
+        # Decode features
+        x = features[-1]  # Start with last feature map
+        for i, decoder in enumerate(self.decoder_blocks):
+            skip = features[-(i+2)] if i < len(features)-1 else None
+            x = decoder(x, skip)
             
-        # Process each source separately to save memory
-        outputs = []
-        for s in range(S):
-            # Get current source
-            x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
-            x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
-            
-            # Get encoder features
-            feats = self.backbone(x_s)
-            
-            # Decode
-            x_s = self.decoder(feats)
-            
-            # Final head
-            x_s = self.head(x_s)
-            
-            outputs.append(x_s)
-            
-        # Combine outputs
-        x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
-        x = x.mean(dim=1)  # Average over sources
+        # Final projection
+        x = self.final_proj(x)
+        
+        # Resize to target dimensions
+        x = self.final_resize(x)
         
         return x
         
     def update_ema(self):
         """Update EMA weights."""
-        if self.ema is not None:
-            self.ema.update(self)
+        if self.ema_model is not None:
+            self.ema_model.update(self)
             
     def set_ema(self):
         """Set EMA weights."""
-        if self.ema is not None:
-            self.ema.set(self)
+        if self.ema_model is not None:
+            self.ema_model.set(self)
             
     def get_ema_model(self):
         """Get EMA model."""
-        return self.ema.module if self.ema is not None else self 
+        return self.ema_model if self.ema_model is not None else self 

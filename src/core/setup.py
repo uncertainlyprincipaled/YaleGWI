@@ -10,43 +10,53 @@ from typing import Optional
 import kagglehub  # Optional import
 import json
 import sys
+import torch
+# from dotenv import load_dotenv
 
-def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainlyprincipaled/yalegwi"):
-    """Push training artefacts to Kaggle dataset with rate limiting awareness."""
+def get_project_root() -> Path:
+    """Get the project root directory, handling both script and notebook environments."""
     try:
-        # Check if kaggle.json exists
-        kaggle_json = Path.home() / '.kaggle/kaggle.json'
-        if not kaggle_json.exists():
-            # Try to load from environment file
-            env_kaggle_json = Path(__file__).parent.parent.parent / '.env/kaggle/credentials'
-            if env_kaggle_json.exists():
-                kaggle_json.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(env_kaggle_json, kaggle_json)
-                kaggle_json.chmod(0o600)
-            else:
-                raise FileNotFoundError("Kaggle credentials not found")
-        
-        # Push to Kaggle with rate limiting awareness
-        max_retries = 3
-        retry_delay = 60  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                subprocess.run([
-                    "kaggle", "datasets", "version", "-p", str(artefact_dir),
-                    "-m", message, "-d", dataset, "--dir-mode", "zip"
-                ], check=True)
-                break
-            except subprocess.CalledProcessError as e:
-                if "429" in str(e) and attempt < max_retries - 1:  # Rate limit error
-                    logging.warning(f"Rate limit hit, waiting {retry_delay} seconds before retry...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    raise
+        # Try to get the path from __file__ (works in scripts)
+        return Path(__file__).parent.parent.parent
+    except NameError:
+        # In notebook environment, use current working directory
+        return Path.cwd()
+
+def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "jdmorgan/yalegwi"):
+    """Upload artefact_dir (or its contents) to S3, using credentials from .env/aws."""
+    logging.info("Starting push_to_kaggle...")
+    # load_dotenv(dotenv_path=Path('.env/aws'))
+    bucket = os.environ.get('AWS_S3_BUCKET')
+    region = os.environ.get('AWS_REGION', 'us-east-1')
+    aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID')
+    aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+    logging.info(f"Read env: bucket={bucket}, region={region}, access_key={'set' if aws_access_key_id else 'missing'}, secret_key={'set' if aws_secret_access_key else 'missing'}")
+    if not bucket or not aws_access_key_id or not aws_secret_access_key:
+        logging.error("Missing AWS S3 configuration in environment variables")
+        return
+    try:
+        logging.info("Creating boto3 S3 client...")
+        s3 = boto3.client(
+            's3',
+            region_name=region,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key
+        )
+        logging.info("S3 client created successfully.")
     except Exception as e:
-        logging.error(f"Failed to push to Kaggle: {e}")
-        raise
+        logging.error(f"Failed to create S3 client: {e}")
+        return
+    artefact_dir = Path(artefact_dir)
+    for file_path in artefact_dir.glob('*'):
+        if file_path.is_file():
+            s3_key = f"yalegwi/{file_path.name}"
+            logging.info(f"Preparing to upload {file_path} to s3://{bucket}/{s3_key}")
+            try:
+                s3.upload_file(str(file_path), bucket, s3_key)
+                logging.info(f"Uploaded {file_path} to s3://{bucket}/{s3_key}")
+            except Exception as e:
+                logging.error(f"Failed to upload {file_path} to S3: {e}")
+    logging.info("push_to_kaggle completed.")
 
 def warm_kaggle_cache():
     """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
@@ -76,14 +86,18 @@ def warm_kaggle_cache():
         print(f"Warning: Unexpected error during cache warmup: {e}")
         print("This is not critical - continuing with setup...")
 
-def setup_environment():
-    """Setup environment-specific configurations and download datasets if needed."""
-
-    import os
-    env_override = os.environ.get('GWI_ENV', '').lower()
-    if not env_override:
-        raise RuntimeError("You must set GWI_ENV before running setup.")
-    from src.core.config import CFG
+def setup_environment(env: str = 'kaggle'):
+    """Setup environment-specific configurations and download datasets if needed.
+    
+    Args:
+        env: Environment to setup. One of: 'kaggle', 'colab', 'sagemaker', 'aws', 'local'
+    """
+    env = env.lower()
+    valid_envs = ['kaggle', 'colab', 'sagemaker', 'aws', 'local']
+    if env not in valid_envs:
+        raise ValueError(f"Invalid environment: {env}. Valid values: {', '.join(valid_envs)}")
+    
+    # from src.core.config import CFG
 
     def setup_aws_environment():
         """Setup AWS-specific environment configurations."""
@@ -112,8 +126,8 @@ def setup_environment():
             raise
 
     # Allow explicit environment override
-    if env_override:
-        CFG.env.kind = env_override
+    if env:
+        CFG.env.kind = env
         if CFG.env.kind == 'aws' and hasattr(CFG.env, 'set_aws_attributes'):
             CFG.env.set_aws_attributes()
 
@@ -150,12 +164,12 @@ def setup_environment():
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
 
-    if CFG.env.kind == 'aws':
+    if env == 'aws':
         if hasattr(CFG.env, 'set_aws_attributes'):
             CFG.env.set_aws_attributes()
         setup_aws_environment()
         print("Environment setup complete for AWS")
-    elif CFG.env.kind == 'colab':
+    elif env == 'colab':
         # Create data directory
         data_dir = Path('/content/data')
         data_dir.mkdir(exist_ok=True)
@@ -172,7 +186,7 @@ def setup_environment():
             raise
         
         print("Environment setup complete for Colab")
-    elif CFG.env.kind == 'sagemaker':
+    elif env == 'sagemaker':
         # AWS SageMaker specific setup
         data_dir = Path('/opt/ml/input/data')  
         data_dir.mkdir(exist_ok=True)
@@ -187,7 +201,7 @@ def setup_environment():
         
         setup_paths(data_dir)
         print("Paths configured for SageMaker environment")
-    elif CFG.env.kind == 'kaggle':
+    elif env == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
         # warm_kaggle_cache()
         # Use the competition data path directly
@@ -209,16 +223,15 @@ def setup_environment():
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
         print("Environment setup complete for Kaggle")
-    else:  # local development
+    elif env == 'local':
         # For local development, use a data directory in the project root
-        data_dir = Path(__file__).parent.parent.parent / 'data'
+        data_dir = get_project_root() / 'data'
         data_dir.mkdir(exist_ok=True)
         setup_paths(data_dir)
         print("Environment setup complete for local development")
 
 def verify_openfwi_setup():
     """Verify that OpenFWI dataset and weights are properly loaded."""
-    from src.core.config import CFG
     
     # Check weights file
     weights_path = Path('/mnt/waveform-inversion/openfwi_backbone.pth')
@@ -228,7 +241,7 @@ def verify_openfwi_setup():
         
     # Try loading weights
     try:
-        import torch
+        
         state_dict = torch.load(weights_path, map_location='cpu')
         logging.info(f"Successfully loaded OpenFWI weights with {len(state_dict)} layers")
         
@@ -247,13 +260,4 @@ def verify_openfwi_setup():
         return False
 
 if __name__ == "__main__":
-    
-    # Accept an optional argument for environment kind
-    if len(sys.argv) > 1:
-        env_kind = sys.argv[1].lower()
-        os.environ["GWI_ENV"] = env_kind
-    setup_environment()
-    # if verify_openfwi_setup():
-    #     logging.info("OpenFWI setup verified successfully!")
-    # else:
-    #     logging.error("OpenFWI setup verification failed!") 
+    setup_environment('kaggle') 

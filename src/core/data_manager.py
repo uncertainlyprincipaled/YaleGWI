@@ -20,7 +20,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Local imports
-from src.core.config import CFG
+# from src.core.config import CFG
+# from src.core.setup import push_to_kaggle
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -78,28 +79,54 @@ class DataManager:
             self.s3_loader = S3DataLoader(CFG.env.s3_bucket, CFG.env.aws_region)
         else:
             self.s3_loader = None
+            
+        if CFG.debug_mode:
+            logging.info("DataManager initialized in debug mode")
+            logging.info(f"Using only family: {list(CFG.paths.families.keys())[0]}")
+            logging.info(f"Batch size: {CFG.batch}")
+            logging.info(f"Number of workers: {CFG.num_workers}")
 
     def list_family_files(self, family: str):
         """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
+        if CFG.debug_mode and family in CFG.families_to_exclude:
+            logging.info(f"Skipping excluded family in debug mode: {family}")
+            return None, None, None
+            
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
+            
         # Vel/Style: data/model subfolders (batched)
         if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
             vel_files = sorted((root/'model').glob('*.npy'))
             if seis_files and vel_files:
+                if CFG.debug_mode:
+                    # In debug mode, limit to first file only
+                    seis_files = seis_files[:1]
+                    vel_files = vel_files[:1]
+                    logging.info(f"Debug mode: Using only first file from {family}")
                 family_type = 'VelStyle'
                 return seis_files, vel_files, family_type
+                
         # Fault: seis*.npy and vel*.npy directly in folder (not batched)
         seis_files = sorted(root.glob('seis*.npy'))
         vel_files = sorted(root.glob('vel*.npy'))
         if seis_files and vel_files:
+            if CFG.debug_mode:
+                # In debug mode, limit to first file only
+                seis_files = seis_files[:1]
+                vel_files = vel_files[:1]
+                logging.info(f"Debug mode: Using only first file from {family}")
             family_type = 'Fault'
             return seis_files, vel_files, family_type
+            
         raise ValueError(f"Could not find valid data structure for family {family} at {root}")
 
     def create_dataset(self, seis_files, vel_files, family_type, augment=False):
+        """Create a dataset for the given files."""
+        if family_type == 'test':
+            return TestDataset(seis_files)
         return SeismicDataset(
             seis_files,
             vel_files,
@@ -112,7 +139,17 @@ class DataManager:
     def create_loader(self, seis_files: List[Path], vel_files: List[Path],
                      family_type: str, batch_size: int = 32, 
                      shuffle: bool = True, num_workers: int = 4,
-                     distributed: bool = False) -> DataLoader:
+                     distributed: bool = False) -> Optional[DataLoader]:
+        """Create a DataLoader for the given files. Returns None if files are empty."""
+        if not seis_files:
+            logging.info("No files to load, skipping loader creation")
+            return None
+            
+        # For test data, vel_files can be None
+        if family_type != 'test' and not vel_files:
+            logging.info("No velocity files to load, skipping loader creation")
+            return None
+            
         dataset = self.create_dataset(seis_files, vel_files, family_type)
         
         if distributed:
@@ -132,6 +169,33 @@ class DataManager:
 
     def get_test_files(self) -> List[Path]:
         return sorted(CFG.paths.test.glob('*.npy'))
+
+    def upload_best_model_and_metadata(self, artefact_dir: Path, message: str = "Update best model"):
+        logging.info(f"Starting upload_best_model_and_metadata with artefact_dir={artefact_dir}, message={message}")
+        if CFG.debug_mode:
+            logging.info("Debug mode: Simulating model upload")
+            logging.info(f"Would upload from: {artefact_dir}")
+            logging.info(f"With message: {message}")
+            return
+        if CFG.env.kind == "kaggle":
+            if not artefact_dir.exists():
+                logging.error(f"Artefact directory not found: {artefact_dir}")
+                return
+            logging.info("Calling push_to_kaggle for model upload...")
+            push_to_kaggle(artefact_dir, message)
+            logging.info(f"Successfully uploaded to Kaggle dataset with message: {message}")
+            return
+        if CFG.env.kind == "aws":
+            logging.info("AWS environment stub - not implemented.")
+            return
+        if CFG.env.kind == "colab":
+            logging.info("Colab environment stub - not implemented.")
+            return
+        if CFG.env.kind == "sagemaker":
+            logging.info("SageMaker environment stub - not implemented.")
+            return
+        logging.info("Unknown environment stub - not implemented.")
+        return
 
 class SeismicDataset(Dataset):
     """
@@ -188,8 +252,18 @@ class SeismicDataset(Dataset):
             x = np.load(sfile, mmap_mode='r')
         else:
             x = np.load(sfile)
+        # x shape: (batch_size, num_sources, time_steps, num_receivers)
         if len(x.shape) == 4:
-            x = x[i]
+            x = x[i]  # shape: (num_sources, time_steps, num_receivers)
+        # Rearrange to (num_sources, num_receivers, time_steps)
+        if x.shape[1] == 70 and x.shape[2] == 1000:
+            # Already (num_sources, time_steps, num_receivers), need (num_sources, num_receivers, time_steps)
+            x = x.transpose(0, 2, 1)  # (num_sources, num_receivers, time_steps)
+        elif x.shape[1] == 1000 and x.shape[2] == 70:
+            # Already correct
+            pass
+        else:
+            raise ValueError(f"Unexpected seismic data shape: {x.shape}")
         # For test mode, create dummy y
         if self.vel_files is None:
             y = np.zeros((1, 70, 70), np.float16)
@@ -200,6 +274,10 @@ class SeismicDataset(Dataset):
                 y = np.load(vfile)
             if len(y.shape) == 4:
                 y = y[i]
+            elif len(y.shape) == 3:
+                y = y[i]
+            else:
+                raise ValueError(f"Unexpected velocity data shape: {y.shape}")
         # Convert to float16
         x = x.astype(np.float16)
         y = y.astype(np.float16)
@@ -207,10 +285,26 @@ class SeismicDataset(Dataset):
         mu = x.mean(axis=(1,2), keepdims=True)
         std = x.std(axis=(1,2), keepdims=True) + 1e-6
         x = (x - mu) / std
-        # Ensure correct shape: (sources, receivers, timesteps)
-        if len(x.shape) == 3:
-            x = x[None]
+        # No need to add extra dimension; DataLoader will batch
         # Track memory usage
         if self.memory_tracker:
             self.memory_tracker.update(x.nbytes + y.nbytes)
-        return torch.from_numpy(x), torch.from_numpy(y) 
+        return torch.from_numpy(x), torch.from_numpy(y)
+
+class TestDataset(Dataset):
+    """Dataset for test files that returns the test data and its identifier."""
+    def __init__(self, files: List[Path]):
+        self.files = files
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx: int):
+        file_path = self.files[idx]
+        data = np.load(file_path)
+        # Convert to float16 and normalize per-receiver
+        data = data.astype(np.float16)
+        mu = data.mean(axis=(1,2), keepdims=True)
+        std = data.std(axis=(1,2), keepdims=True) + 1e-6
+        data = (data - mu) / std
+        return torch.from_numpy(data), file_path.stem 

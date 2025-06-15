@@ -18,6 +18,10 @@ import boto3
 from botocore.exceptions import ClientError
 import signal
 import time
+import torch.nn as nn
+import shutil
+
+# Local imports - ensure these are at the top level
 from src.core.config import CFG
 from src.core.data_manager import DataManager
 from src.core.model import get_model
@@ -112,214 +116,176 @@ class SpotInstanceHandler:
             logging.error(f"Failed to save checkpoint: {e}")
             raise
 
-def train(dryrun: bool = False, fp16: bool = True):
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, data_manager):
+    logging.info(f"Starting save_checkpoint for epoch {epoch} with loss {loss}")
+    out_dir = Path('outputs')
+    out_dir.mkdir(exist_ok=True)
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss,
+    }
     try:
-        logging.info("Starting training...")
-        set_seed(CFG.seed)
-        save_dir = Path('outputs')
-        save_dir.mkdir(exist_ok=True)
-        spot_handler = SpotInstanceHandler(save_dir, CFG.s3_upload_interval)
-        logging.info("Initializing DataManager...")
-        data_manager = DataManager(use_mmap=True)
-        train_loaders = []
-        families = list(CFG.paths.families.keys())
-        for family in families:
-            seis_files, vel_files, family_type = data_manager.list_family_files(family)
-            print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
-            loader = data_manager.create_loader(
-                seis_files=seis_files,
-                vel_files=vel_files,
-                family_type=family_type,
-                batch_size=CFG.batch,
-                shuffle=True,
-                num_workers=CFG.num_workers,
-                distributed=CFG.distributed
-            )
-            train_loaders.append(loader)
-        model = get_model()
-        loss_fn = get_loss_fn()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
-        total_steps = sum(len(loader) for loader in train_loaders) * CFG.epochs
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=CFG.lr,
-            total_steps=total_steps,
-            pct_start=0.3,
-            div_factor=25,
-            final_div_factor=1e4
-        )
-        scaler = GradScaler(enabled=fp16)
-        torch.cuda.empty_cache()
-        if torch.cuda.is_available():
-            torch.cuda.set_per_process_memory_fraction(0.8)
-            if hasattr(torch.cuda, 'memory_summary'):
-                torch.cuda.memory_summary(device=0)
-            torch.cuda.memory.set_per_process_memory_fraction(0.8)
-            torch.backends.cuda.enable_mem_efficient_sdp(True)
-        logging.info("Starting training loop...")
-        best_mae = float('inf')
-        patience = 5
-        patience_counter = 0
-        min_delta = 1e-4
-        for epoch in range(CFG.epochs):
-            is_last_epoch = (epoch == CFG.epochs - 1)
-            if spot_handler.interrupted:
-                logging.info("Spot instance interruption detected, saving checkpoint and exiting...")
-                spot_handler.save_checkpoint(
-                    model, optimizer, scheduler, scaler, epoch,
-                    {'best_mae': best_mae, 'patience_counter': patience_counter},
-                    upload_s3=True
-                )
-                break
-            logging.info(f"Epoch {epoch+1}/{CFG.epochs}")
-            model.train()
-            epoch_loss = 0.0
-            num_batches = 0
-            for loader_idx, loader in enumerate(train_loaders):
-                logging.info(f"Processing loader {loader_idx+1}/{len(train_loaders)}")
-                for batch_idx, (x, y) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}")):
-                    try:
-                        x = x.cuda()
-                        y = y.cuda()
-                        with autocast(enabled=fp16):
-                            pred = model(x, max_sources_per_step=5)
-                            # Log shapes
-                            logging.info(f"pred shape: {pred.shape}, y shape: {y.shape}")
-                            # Shape matching logic
-                            if pred.shape != y.shape:
-                                if pred.shape[1] == 1 and y.shape[1] > 1:
-                                    y = y.mean(dim=1, keepdim=True)
-                                elif y.shape[1] == 1 and pred.shape[1] > 1:
-                                    pred = pred.mean(dim=1, keepdim=True)
-                            # Assertion
-                            assert pred.shape == y.shape, f"Shape mismatch: pred {pred.shape}, y {y.shape}"
-                            if torch.isnan(pred).any() or torch.isinf(pred).any():
-                                logging.error(f"NaN or Inf detected in model output at batch {batch_idx}")
-                                continue
-                            loss, loss_components = loss_fn(pred, y)
-                            if torch.isnan(loss) or torch.isinf(loss):
-                                logging.error(f"NaN or Inf detected in loss at batch {batch_idx}")
-                                continue
-                        scaler.scale(loss).backward()
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                        scaler.step(optimizer)
-                        scaler.update()
-                        optimizer.zero_grad(set_to_none=True)
-                        scheduler.step()
-                        epoch_loss += loss.item()
-                        num_batches += 1
-                        # Clear cache periodically
-                        if batch_idx % 10 == 0:  # More frequent cache clearing
-                            torch.cuda.empty_cache()
-                            if torch.cuda.is_available():
-                                # Log memory stats
-                                allocated = torch.cuda.memory_allocated() / 1e9
-                                reserved = torch.cuda.memory_reserved() / 1e9
-                                logging.info(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
-                                # Force garbage collection
-                                gc.collect()
-                                # Reset peak memory stats
-                                torch.cuda.reset_peak_memory_stats()
-                                # Empty cache again after GC
-                                torch.cuda.empty_cache()
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            logging.error(f"OOM Error at epoch {epoch+1}, loader {loader_idx+1}, batch {batch_idx}")
-                            logging.error(f"Last successful operation: Forward pass")
-                            if torch.cuda.is_available():
-                                logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
-                            # Clear cache and continue
-                            torch.cuda.empty_cache()
-                            gc.collect()  # Add garbage collection
-                            continue
-                        else:
-                            raise e
-                    except (AttributeError, NameError) as e:
-                        logging.error(f"{type(e).__name__} encountered at batch {batch_idx}: {e}")
-                        raise e
-            avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
-            logging.info(f"Epoch {epoch+1} average loss: {avg_epoch_loss:.4f}")
-            logging.info("Starting validation...")
-            model.eval()
-            val_mae = 0.0
-            val_loss = 0.0
-            num_val_batches = 0
+        torch.save(checkpoint, out_dir / 'checkpoint.pth')
+        logging.info(f"Checkpoint saved at outputs/checkpoint.pth for epoch {epoch}")
+        best_path = out_dir / 'best.pth'
+        is_best = False
+        if not best_path.exists():
+            is_best = True
+        else:
             try:
-                with torch.no_grad():
-                    val_loader = train_loaders[0]
-                    for batch_idx, (seis, vel) in enumerate(val_loader):
-                        seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-                        vel = vel.mean(dim=1, keepdim=True)
-                        logging.info(f"vel shape: {vel.shape}, dtype: {vel.dtype}, min: {vel.min().item()}, max: {vel.max().item()}, mean: {vel.mean().item()}")
-                        with autocast(enabled=fp16):
-                            v_pred = model.get_ema_model()(seis)
-                            # Log shapes
-                            logging.info(f"v_pred shape: {v_pred.shape}, vel shape: {vel.shape}")
-                            # Shape matching logic
-                            if v_pred.shape != vel.shape:
-                                if v_pred.shape[1] == 1 and vel.shape[1] > 1:
-                                    vel = vel.mean(dim=1, keepdim=True)
-                                elif vel.shape[1] == 1 and v_pred.shape[1] > 1:
-                                    v_pred = v_pred.mean(dim=1, keepdim=True)
-                            # Assertion
-                            assert v_pred.shape == vel.shape, f"Shape mismatch: v_pred {v_pred.shape}, vel {vel.shape}"
-                            if torch.isnan(v_pred).any() or torch.isinf(v_pred).any():
-                                logging.error(f"NaN or Inf detected in validation output at batch {batch_idx}")
-                                continue
-                            val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
-                            val_loss += loss_fn(v_pred, vel)[0].item()
-                            num_val_batches += 1
-                        if batch_idx % 10 == 0:
-                            torch.cuda.empty_cache()
-                    val_mae /= num_val_batches
-                    val_loss /= num_val_batches
-                    # Save checkpoint if needed
-                    if spot_handler.should_upload_s3(epoch, is_last_epoch):
-                        spot_handler.save_checkpoint(
-                            model, optimizer, scheduler, scaler, epoch,
-                            {
-                                'val_mae': val_mae,
-                                'val_loss': val_loss,
-                                'avg_epoch_loss': avg_epoch_loss,
-                                'best_mae': best_mae,
-                                'patience_counter': patience_counter
-                            },
-                            upload_s3=True
-                        )
-                    if val_mae < best_mae - min_delta:
-                        best_mae = val_mae
-                        checkpoint = {
-                            'model_state_dict': model.state_dict(),
-                        }
-                        torch.save(checkpoint, save_dir/'best.pth')
-                        logging.info(f"New best model saved! MAE: {val_mae:.4f}")
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                        if patience_counter >= patience:
-                            logging.info(f"Early stopping triggered after {epoch+1} epochs")
-                            break
-                    logging.info(f"Epoch {epoch+1} complete - val_mae = {val_mae:.4f}, val_loss = {val_loss:.4f}")
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    logging.error(f"OOM Error during validation at epoch {epoch+1}")
-                    logging.error(f"Last successful operation: Validation batch {batch_idx}")
-                    if torch.cuda.is_available():
-                        logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
-                    torch.cuda.empty_cache()
-                    continue
-                else:
-                    raise e
-            except (AttributeError, NameError) as e:
-                logging.error(f"{type(e).__name__} encountered during validation at batch {batch_idx}: {e}")
-                raise e
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logging.info("GPU cache cleared")
+                prev_checkpoint = torch.load(best_path)
+                prev_loss = prev_checkpoint.get('loss', float('inf'))
+                is_best = loss < prev_loss
+            except Exception as e:
+                logging.warning(f"Could not load previous checkpoint: {e}")
+                is_best = True
+        if is_best:
+            torch.save(checkpoint, best_path)
+            logging.info(f"New best model saved at outputs/best.pth with loss: {loss:.4f}")
+            metadata = {
+                'epoch': epoch,
+                'loss': float(loss),
+                'timestamp': datetime.now().isoformat(),
+                'config': {
+                    'batch_size': CFG.batch,
+                    'learning_rate': CFG.lr,
+                    'weight_decay': CFG.weight_decay,
+                    'backbone': CFG.backbone,
+                }
+            }
+            with open(out_dir / 'best_metadata.json', 'w') as f:
+                json.dump(metadata, f, indent=2)
+            logging.info(f"Best model metadata saved at outputs/best_metadata.json")
+            print("Uploading best model and metadata to S3")
+            data_manager.upload_best_model_and_metadata(
+                out_dir,
+                f"Update best model - loss: {loss:.4f} at epoch {epoch}"
+            )
+        logging.info(f"save_checkpoint completed for epoch {epoch}")
     except Exception as e:
-        logging.error(f"Uncaught exception in train(): {type(e).__name__}: {e}")
-        raise
+        logging.error(f"Exception in save_checkpoint: {e}")
+    print(f"Checkpoint saved at epoch {epoch} with loss {loss:.4f}")
+
+def train(dryrun: bool = False, fp16: bool = False):
+    """Main training loop."""
+    # Initialize data manager
+    data_manager = DataManager()
+    
+    # Create loaders for each family
+    train_loaders = []
+    for family in CFG.paths.families:
+        if CFG.debug_mode and family in CFG.families_to_exclude:
+            continue
+            
+        seis_files, vel_files, family_type = data_manager.list_family_files(family)
+        if seis_files is None:  # Skip excluded families
+            continue
+            
+        print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
+        
+        loader = data_manager.create_loader(
+            seis_files, vel_files, family_type,
+            batch_size=CFG.batch,
+            shuffle=True,
+            num_workers=CFG.num_workers
+        )
+        if loader is not None:
+            train_loaders.append(loader)
+            
+    if not train_loaders:
+        raise ValueError("No valid data loaders created!")
+        
+    # Initialize model and move to device
+    model = get_model()
+    model.train()
+    
+    # Initialize optimizer and scheduler
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=CFG.lr,
+        weight_decay=CFG.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=CFG.epochs,
+        eta_min=CFG.lr/100
+    )
+    
+    # Initialize loss function
+    loss_fn = nn.MSELoss()
+    
+    # Training loop
+    for epoch in range(CFG.epochs):
+        total_loss = 0
+        total_batches = 0
+        
+        for loader in train_loaders:
+            for batch_idx, (x, y) in enumerate(loader):
+                try:
+                    # Move data to device and convert to float32
+                    x = x.to(CFG.env.device).float()
+                    y = y.to(CFG.env.device).float()
+                    
+                    # Forward pass
+                    pred = model(x)
+                    loss = loss_fn(pred, y)
+                    
+                    # Backward pass
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    
+                    # Update statistics
+                    total_loss += loss.item()
+                    total_batches += 1
+                    
+                    # Print progress
+                    if batch_idx % 10 == 0:
+                        print(f"Epoch {epoch+1}/{CFG.epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+                        
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        if hasattr(torch.cuda, 'empty_cache'):
+                            torch.cuda.empty_cache()
+                        print(f"WARNING: out of memory in batch {batch_idx}. Skipping batch.")
+                        continue
+                    else:
+                        raise e
+                        
+        # Update learning rate
+        scheduler.step()
+        
+        # Print epoch statistics
+        avg_loss = total_loss / total_batches
+        print(f"Epoch {epoch+1}/{CFG.epochs} completed. Average loss: {avg_loss:.4f}")
+        
+        # Save checkpoint
+        if (epoch + 1) % CFG.debug_upload_interval == 0:
+            save_checkpoint(model, optimizer, scheduler, epoch, avg_loss, data_manager)
+            
+    # After all epochs:
+    # Save best.pth and best_metadata.json to /kaggle/working for persistence
+    kaggle_working = Path('/kaggle/working')
+    kaggle_working.mkdir(parents=True, exist_ok=True)
+    out_dir = Path('outputs')
+    for fname in ['best.pth', 'best_metadata.json']:
+        src = out_dir / fname
+        dst = kaggle_working / fname
+        if src.exists():
+            shutil.copy(src, dst)
+            print(f"Copied {src} to {dst}")
+        else:
+            print(f"File {src} does not exist, skipping copy.")
+    print("Uploading model to Kaggle dataset (final upload)...")
+    push_to_kaggle(out_dir, "Final upload after training")
+    print("Upload complete.")
+
+    return model
 
 if __name__ == '__main__':
+    # Set debug mode to True and update settings
+    CFG.set_debug_mode(True)
     train() 

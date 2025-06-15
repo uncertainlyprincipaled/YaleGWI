@@ -45,11 +45,13 @@ class _KagglePaths:
 class _Env:
     def __init__(self):
         if 'KAGGLE_URL_BASE' in os.environ:
-            self.kind: Literal['kaggle','colab','sagemaker','local'] = 'kaggle'
+            self.kind: Literal['kaggle','colab','sagemaker','aws','local'] = 'kaggle'
         elif 'COLAB_GPU' in os.environ:
             self.kind = 'colab'
         elif 'SM_NUM_CPUS' in os.environ:
             self.kind = 'sagemaker'
+        elif 'AWS_EXECUTION_ENV' in os.environ or 'AWS_LAMBDA_FUNCTION_NAME' in os.environ:
+            self.kind = 'aws'
         else:
             self.kind = 'local'
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -65,20 +67,17 @@ class Config:
             cls._inst.paths = _KagglePaths()
             cls._inst.seed  = 42
 
-            # Training hyper-parameters
-            cls._inst.batch   = 4 if cls._inst.env.kind == 'kaggle' else 32
-            cls._inst.lr      = 1e-4
+            # Debug settings
+            cls._inst.debug_mode = os.environ.get('DEBUG_MODE', '0') == '1'
+            cls._inst._update_debug_settings()
+            
+            # Common parameters
+            cls._inst.lr = 1e-4
             cls._inst.weight_decay = 1e-3
-            cls._inst.epochs  = 30
             cls._inst.lambda_pde = 0.1
-            cls._inst.dtype = "float16"  # Default dtype for tensors
-            cls._inst.num_workers = 4  # Number of workers for data loading
-            cls._inst.distributed = False  # Whether to use distributed training
-
-            # Memory optimization settings
-            cls._inst.memory_efficient = True  # Enable memory efficient operations
-            cls._inst.use_amp = True  # Enable automatic mixed precision
-            cls._inst.gradient_checkpointing = True  # Enable gradient checkpointing
+            cls._inst.dtype = "float16"
+            cls._inst.distributed = False
+            cls._inst.memory_efficient = True
 
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
@@ -112,10 +111,37 @@ class Config:
             }
             cls._inst.dataset_style = 'yalegwi'
 
-            # Optionally, exclude families with too few samples
-            cls._inst.families_to_exclude = []
-
         return cls._inst
+
+    def _update_debug_settings(self):
+        """Update training parameters based on debug mode."""
+        if self.debug_mode:
+            logging.info("Updating settings for debug mode")
+            # Reduced training parameters for debug
+            self.batch = 4  # Smaller batch size
+            self.epochs = 2  # Just 2 epochs
+            self.num_workers = 0  # Single worker for easier debugging
+            self.use_amp = False  # Disable mixed precision
+            self.gradient_checkpointing = False  # Disable gradient checkpointing
+            # Use only one family for testing
+            self.families_to_exclude = list(self.paths.families.keys())[1:]
+            self.debug_upload_interval = 1  # Upload every epoch in debug mode
+        else:
+            # Normal training parameters
+            self.batch = 32 if self.env.kind == 'kaggle' else 32
+            self.epochs = 30
+            self.num_workers = 4
+            self.use_amp = True
+            self.gradient_checkpointing = True
+            self.families_to_exclude = []
+            self.debug_upload_interval = 5  # Upload every 5 epochs in normal mode
+
+    def set_debug_mode(self, enabled: bool):
+        """Enable or disable debug mode and update settings accordingly."""
+        self.debug_mode = enabled
+        self._update_debug_settings()
+        logging.info(f"Debug mode {'enabled' if enabled else 'disabled'}")
+        logging.info(f"Updated settings: batch={self.batch}, epochs={self.epochs}, workers={self.num_workers}")
 
     def is_joint(self) -> bool:
         """Helper to check if joint forward-inverse mode is enabled."""
@@ -176,14 +202,13 @@ class SeismicDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx):
-        sfile, vfile, i, s = self.index[idx]
-        # Load only the required source
-        seis = np.load(sfile, mmap_mode='r')[i, s]  # shape: (receivers, timesteps)
-        vel = np.load(vfile, mmap_mode='r')[i]      # shape: (1, 70, 70)
-        # Convert to float16 and add batch/source dims
-        seis = seis.astype(np.float16)[None, ...]    # shape: (1, receivers, timesteps)
+        sfile, vfile, i, _ = self.index[idx]
+        # Load all sources for this sample
+        seis = np.load(sfile, mmap_mode='r')[i]  # shape: (sources, receivers, timesteps)
+        vel = np.load(vfile, mmap_mode='r')[i]   # shape: (1, 70, 70)
+        seis = seis.astype(np.float16)           # shape: (5, receivers, timesteps)
         vel = vel.astype(np.float16)
-        # Normalize
+        # Normalize per source
         mu = seis.mean(axis=(1,2), keepdims=True)
         std = seis.std(axis=(1,2), keepdims=True) + 1e-6
         seis = (seis - mu) / std

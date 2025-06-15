@@ -7,14 +7,35 @@
 
 # %%
 # Source: imports
+
+# Standard library imports
+from __future__ import annotations
 import os
-import torch
-import numpy as np
+import sys
+import json
+import time
+import signal
+import logging
+import subprocess
+import shutil
 from pathlib import Path
-from tqdm.notebook import tqdm
-import pandas as pd
-import matplotlib.pyplot as plt
-import polars as pl
+from datetime import datetime
+from typing import List, Dict, Tuple, Optional, Any, Literal, NamedTuple
+
+# Third-party imports
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import boto3
+from botocore.exceptions import ClientError
+from tqdm import tqdm
+import timm
+import kagglehub  # Optional import
+
+# Local imports
+from src.core.config import CFG
+    
 
 
 # %%
@@ -26,13 +47,16 @@ import polars as pl
 # %%
 # Source: config.py
 from __future__ import annotations
-import os, json
+import os
+import json
 from pathlib import Path
 from typing import Literal, NamedTuple, Optional
 import torch
 import boto3
 from botocore.exceptions import ClientError
 import logging
+import numpy as np
+from torch.utils.data import Dataset
 
 # --------------------------------------------------------------------------- #
 #  Detect runtime (Kaggle / Colab / SageMaker / AWS / local) and expose a singleton #
@@ -64,37 +88,18 @@ class _KagglePaths:
 
 class _Env:
     def __init__(self):
-        # Environment detection
-        if os.environ.get("AWS_EXECUTION_ENV") or Path("/home/ec2-user").exists():
-            self.kind: Literal['kaggle','colab','sagemaker','aws','local'] = 'aws'
-        elif 'KAGGLE_URL_BASE' in os.environ:
-            self.kind = 'kaggle'
+        if 'KAGGLE_URL_BASE' in os.environ:
+            self.kind: Literal['kaggle','colab','sagemaker','aws','local'] = 'kaggle'
         elif 'COLAB_GPU' in os.environ:
             self.kind = 'colab'
         elif 'SM_NUM_CPUS' in os.environ:
             self.kind = 'sagemaker'
+        elif 'AWS_EXECUTION_ENV' in os.environ or 'AWS_LAMBDA_FUNCTION_NAME' in os.environ:
+            self.kind = 'aws'
         else:
             self.kind = 'local'
-            
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
-        
-        # AWS-specific settings
-        if self.kind == 'aws':
-            self.aws_region = os.environ.get('AWS_REGION', 'us-east-1')
-            self.s3_bucket = os.environ.get('S3_BUCKET', 'yale-gwi-data')
-            self.ebs_mount = Path('/mnt')
-            self.use_spot = os.environ.get('USE_SPOT', 'true').lower() == 'true'
-            self.spot_interruption_probability = float(os.environ.get('SPOT_INTERRUPTION_PROB', '0.1'))
-            
-            # Load AWS credentials from environment file
-            aws_creds_path = Path(__file__).parent.parent.parent / '.env/aws/credentials'
-            if aws_creds_path.exists():
-                with open(aws_creds_path) as f:
-                    for line in f:
-                        if '=' in line:
-                            key, value = line.strip().split('=', 1)
-                            os.environ[key] = value
 
 class Config:
     """Read-only singleton accessed via `CFG`."""
@@ -106,20 +111,17 @@ class Config:
             cls._inst.paths = _KagglePaths()
             cls._inst.seed  = 42
 
-            # Training hyper-parameters
-            cls._inst.batch   = 4 if cls._inst.env.kind == 'kaggle' else 32
-            cls._inst.lr      = 1e-4
+            # Debug settings
+            cls._inst.debug_mode = os.environ.get('DEBUG_MODE', '0') == '1'
+            cls._inst._update_debug_settings()
+            
+            # Common parameters
+            cls._inst.lr = 1e-4
             cls._inst.weight_decay = 1e-3
-            cls._inst.epochs  = 30
             cls._inst.lambda_pde = 0.1
-            cls._inst.dtype = "float16"  # Default dtype for tensors
-            cls._inst.num_workers = 4  # Number of workers for data loading
-            cls._inst.distributed = False  # Whether to use distributed training
-
-            # Memory optimization settings
-            cls._inst.memory_efficient = True  # Enable memory efficient operations
-            cls._inst.use_amp = True  # Enable automatic mixed precision
-            cls._inst.gradient_checkpointing = True  # Enable gradient checkpointing
+            cls._inst.dtype = "float16"
+            cls._inst.distributed = False
+            cls._inst.memory_efficient = True
 
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
@@ -137,33 +139,6 @@ class Config:
             # Enable joint training by default in Kaggle
             cls._inst.enable_joint = cls._inst.env.kind == 'kaggle'
 
-            # AWS-specific settings
-            if cls._inst.env.kind == 'aws':
-                cls._inst.paths.aws_root = cls._inst.env.ebs_mount / 'waveform-inversion'
-                cls._inst.paths.aws_train = cls._inst.paths.aws_root / 'train_samples'
-                cls._inst.paths.aws_test = cls._inst.paths.aws_root / 'test'
-                cls._inst.paths.aws_output = cls._inst.env.ebs_mount / 'output'
-                
-                # Update paths for AWS environment
-                cls._inst.paths.root = cls._inst.paths.aws_root
-                cls._inst.paths.train = cls._inst.paths.aws_train
-                cls._inst.paths.test = cls._inst.paths.aws_test
-                
-                # Update family paths for AWS
-                train = cls._inst.paths.train
-                cls._inst.paths.families = {
-                    'FlatVel_A'   : train/'FlatVel_A',
-                    'FlatVel_B'   : train/'FlatVel_B',
-                    'CurveVel_A'  : train/'CurveVel_A',
-                    'CurveVel_B'  : train/'CurveVel_B',
-                    'Style_A'     : train/'Style_A',
-                    'Style_B'     : train/'Style_B',
-                    'FlatFault_A' : train/'FlatFault_A',
-                    'FlatFault_B' : train/'FlatFault_B',
-                    'CurveFault_A': train/'CurveFault_A',
-                    'CurveFault_B': train/'CurveFault_B',
-                }
-            
             # Always use base dataset for now
             train = cls._inst.paths.train
             cls._inst.paths.families = {
@@ -180,10 +155,37 @@ class Config:
             }
             cls._inst.dataset_style = 'yalegwi'
 
-            # Optionally, exclude families with too few samples
-            cls._inst.families_to_exclude = []
-
         return cls._inst
+
+    def _update_debug_settings(self):
+        """Update training parameters based on debug mode."""
+        if self.debug_mode:
+            logging.info("Updating settings for debug mode")
+            # Reduced training parameters for debug
+            self.batch = 4  # Smaller batch size
+            self.epochs = 2  # Just 2 epochs
+            self.num_workers = 0  # Single worker for easier debugging
+            self.use_amp = False  # Disable mixed precision
+            self.gradient_checkpointing = False  # Disable gradient checkpointing
+            # Use only one family for testing
+            self.families_to_exclude = list(self.paths.families.keys())[1:]
+            self.debug_upload_interval = 1  # Upload every epoch in debug mode
+        else:
+            # Normal training parameters
+            self.batch = 32 if self.env.kind == 'kaggle' else 32
+            self.epochs = 30
+            self.num_workers = 4
+            self.use_amp = True
+            self.gradient_checkpointing = True
+            self.families_to_exclude = []
+            self.debug_upload_interval = 5  # Upload every 5 epochs in normal mode
+
+    def set_debug_mode(self, enabled: bool):
+        """Enable or disable debug mode and update settings accordingly."""
+        self.debug_mode = enabled
+        self._update_debug_settings()
+        logging.info(f"Debug mode {'enabled' if enabled else 'disabled'}")
+        logging.info(f"Updated settings: batch={self.batch}, epochs={self.epochs}, workers={self.num_workers}")
 
     def is_joint(self) -> bool:
         """Helper to check if joint forward-inverse mode is enabled."""
@@ -221,7 +223,42 @@ def save_cfg(out_dir: Path):
             
     (out_dir / 'config.json').write_text(
         json.dumps(cfg_dict, indent=2)
-    ) 
+    )
+
+class SeismicDataset(Dataset):
+    def __init__(self, seis_files, vel_files, family_type, augment=False, use_mmap=True, memory_tracker=None):
+        self.family_type = family_type
+        self.augment = augment
+        self.index = []
+        self.use_mmap = use_mmap
+        self.memory_tracker = memory_tracker
+        self.vel_files = vel_files
+        # Build index of (file, sample_idx, source_idx) triples
+        for sfile, vfile in zip(seis_files, vel_files):
+            f = np.load(sfile, mmap_mode='r')
+            n_samples, n_sources, *_ = f.shape  # e.g., (batch, sources, ...)
+            for i in range(n_samples):
+                for s in range(n_sources):
+                    self.index.append((sfile, vfile, i, s))
+            del f
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, idx):
+        sfile, vfile, i, _ = self.index[idx]
+        # Load all sources for this sample
+        seis = np.load(sfile, mmap_mode='r')[i]  # shape: (sources, receivers, timesteps)
+        vel = np.load(vfile, mmap_mode='r')[i]   # shape: (1, 70, 70)
+        seis = seis.astype(np.float16)           # shape: (5, receivers, timesteps)
+        vel = vel.astype(np.float16)
+        # Normalize per source
+        mu = seis.mean(axis=(1,2), keepdims=True)
+        std = seis.std(axis=(1,2), keepdims=True) + 1e-6
+        seis = (seis - mu) / std
+        if self.memory_tracker:
+            self.memory_tracker.update(seis.nbytes + vel.nbytes)
+        return torch.from_numpy(seis), torch.from_numpy(vel) 
 
 
 # %%
@@ -235,10 +272,56 @@ from botocore.exceptions import ClientError
 import logging
 import time
 from typing import Optional
-try:
-    import kagglehub
-except ImportError:
-    kagglehub = None
+import kagglehub  # Optional import
+import json
+import sys
+import torch
+# from dotenv import load_dotenv
+
+def get_project_root() -> Path:
+    """Get the project root directory, handling both script and notebook environments."""
+    try:
+        # Try to get the path from __file__ (works in scripts)
+        return Path(__file__).parent.parent.parent
+    except NameError:
+        # In notebook environment, use current working directory
+        return Path.cwd()
+
+def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "jdmorgan/yalegwi"):
+    """Upload artefact_dir (or its contents) to S3, using credentials from .env/aws."""
+    logging.info("Starting push_to_kaggle...")
+    # load_dotenv(dotenv_path=Path('.env/aws'))
+    bucket = os.environ.get('AWS_S3_BUCKET')
+    region = os.environ.get('AWS_REGION', 'us-east-1')
+    aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID')
+    aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+    logging.info(f"Read env: bucket={bucket}, region={region}, access_key={'set' if aws_access_key_id else 'missing'}, secret_key={'set' if aws_secret_access_key else 'missing'}")
+    if not bucket or not aws_access_key_id or not aws_secret_access_key:
+        logging.error("Missing AWS S3 configuration in environment variables")
+        return
+    try:
+        logging.info("Creating boto3 S3 client...")
+        s3 = boto3.client(
+            's3',
+            region_name=region,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key
+        )
+        logging.info("S3 client created successfully.")
+    except Exception as e:
+        logging.error(f"Failed to create S3 client: {e}")
+        return
+    artefact_dir = Path(artefact_dir)
+    for file_path in artefact_dir.glob('*'):
+        if file_path.is_file():
+            s3_key = f"yalegwi/{file_path.name}"
+            logging.info(f"Preparing to upload {file_path} to s3://{bucket}/{s3_key}")
+            try:
+                s3.upload_file(str(file_path), bucket, s3_key)
+                logging.info(f"Uploaded {file_path} to s3://{bucket}/{s3_key}")
+            except Exception as e:
+                logging.error(f"Failed to upload {file_path} to S3: {e}")
+    logging.info("push_to_kaggle completed.")
 
 def warm_kaggle_cache():
     """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
@@ -268,83 +351,71 @@ def warm_kaggle_cache():
         print(f"Warning: Unexpected error during cache warmup: {e}")
         print("This is not critical - continuing with setup...")
 
-def setup_aws_environment():
-    """Setup AWS-specific environment configurations."""
-    from src.core.config import CFG
+def setup_environment(env: str = 'kaggle'):
+    """Setup environment-specific configurations and download datasets if needed.
     
-    # Setup S3 client
-    s3 = boto3.client('s3', region_name=CFG.env.aws_region)
+    Args:
+        env: Environment to setup. One of: 'kaggle', 'colab', 'sagemaker', 'aws', 'local'
+    """
+    env = env.lower()
+    valid_envs = ['kaggle', 'colab', 'sagemaker', 'aws', 'local']
+    if env not in valid_envs:
+        raise ValueError(f"Invalid environment: {env}. Valid values: {', '.join(valid_envs)}")
     
-    # Setup paths
-    CFG.paths.root = CFG.env.ebs_mount / 'waveform-inversion'
-    CFG.paths.train = CFG.paths.root / 'train_samples'
-    CFG.paths.test = CFG.paths.root / 'test'
-    CFG.paths.out = CFG.env.ebs_mount / 'output'
-    
-    # Create directories
-    for path in [CFG.paths.root, CFG.paths.train, CFG.paths.test, CFG.paths.out]:
-        path.mkdir(parents=True, exist_ok=True)
-    
-    # Sync data from S3
-    try:
-        s3.sync(f's3://{CFG.env.s3_bucket}/raw/', str(CFG.paths.root))
-    except ClientError as e:
-        logging.error(f"Failed to sync data from S3: {e}")
-        raise
+    # from src.core.config import CFG
 
-def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "uncertainlyprincipaled/yalegwi"):
-    """Push training artefacts to Kaggle dataset with rate limiting awareness."""
-    try:
-        # Check if kaggle.json exists
-        kaggle_json = Path.home() / '.kaggle/kaggle.json'
-        if not kaggle_json.exists():
-            # Try to load from environment file
-            env_kaggle_json = Path(__file__).parent.parent.parent / '.env/kaggle/credentials'
-            if env_kaggle_json.exists():
-                kaggle_json.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(env_kaggle_json, kaggle_json)
-                kaggle_json.chmod(0o600)
-            else:
-                raise FileNotFoundError("Kaggle credentials not found")
+    def setup_aws_environment():
+        """Setup AWS-specific environment configurations."""
         
-        # Push to Kaggle with rate limiting awareness
-        max_retries = 3
-        retry_delay = 60  # seconds
+        # Setup S3 client
+        s3 = boto3.client('s3', region_name=CFG.env.aws_region)
         
-        for attempt in range(max_retries):
-            try:
-                subprocess.run([
-                    "kaggle", "datasets", "version", "-p", str(artefact_dir),
-                    "-m", message, "-d", dataset, "--dir-mode", "zip"
-                ], check=True)
-                break
-            except subprocess.CalledProcessError as e:
-                if "429" in str(e) and attempt < max_retries - 1:  # Rate limit error
-                    logging.warning(f"Rate limit hit, waiting {retry_delay} seconds before retry...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    raise
-    except Exception as e:
-        logging.error(f"Failed to push to Kaggle: {e}")
-        raise
+        # Setup paths
+        CFG.paths.root = CFG.env.ebs_mount / 'waveform-inversion'
+        CFG.paths.train = CFG.paths.root / 'train_samples'
+        CFG.paths.test = CFG.paths.root / 'test'
+        CFG.paths.out = CFG.env.ebs_mount / 'output'
+        
+        # Create directories
+        for path in [CFG.paths.root, CFG.paths.train, CFG.paths.test, CFG.paths.out]:
+            path.mkdir(parents=True, exist_ok=True)
+        
+        # Sync data from S3
+        try:
+            subprocess.run([
+                "aws", "s3", "sync",
+                f"s3://{CFG.env.s3_bucket}/raw/", str(CFG.paths.root)
+            ], check=True)
+        except ClientError as e:
+            logging.error(f"Failed to sync data from S3: {e}")
+            raise
 
-def setup_environment():
-    """Setup environment-specific configurations and download datasets if needed."""
-    from src.core.config import CFG  # Import here to avoid circular dependency
-    
     # Allow explicit environment override
-    env_override = os.environ.get('GWI_ENV', '').lower()
-    if env_override:
-        CFG.env.kind = env_override
-    
+    if env:
+        CFG.env.kind = env
+        if CFG.env.kind == 'aws' and hasattr(CFG.env, 'set_aws_attributes'):
+            CFG.env.set_aws_attributes()
+
+    # --- Load config.json if present (for AWS) ---
+    config_path = Path('outputs/config.json')
+    if CFG.env.kind == 'aws' and config_path.exists():
+        with open(config_path) as f:
+            config_data = json.load(f)
+        # Override CFG values with those from config.json
+        for k, v in config_data.items():
+            if hasattr(CFG, k):
+                setattr(CFG, k, v)
+            elif hasattr(CFG.env, k):
+                setattr(CFG.env, k, v)
+            elif hasattr(CFG.paths, k):
+                setattr(CFG.paths, k, v)
+        print(f"Loaded configuration from {config_path}")
+
     # Common path setup for all environments
     def setup_paths(base_dir: Path):
         CFG.paths.root = base_dir / 'waveform-inversion'
         CFG.paths.train = CFG.paths.root / 'train_samples'
         CFG.paths.test = CFG.paths.root / 'test'
-        
-        # Update family paths
         CFG.paths.families = {
             'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
             'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
@@ -357,12 +428,13 @@ def setup_environment():
             'CurveFault_A': CFG.paths.train/'CurveFault_A',
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
-    
-    if CFG.env.kind == 'aws':
+
+    if env == 'aws':
+        if hasattr(CFG.env, 'set_aws_attributes'):
+            CFG.env.set_aws_attributes()
         setup_aws_environment()
         print("Environment setup complete for AWS")
-    
-    elif CFG.env.kind == 'colab':
+    elif env == 'colab':
         # Create data directory
         data_dir = Path('/content/data')
         data_dir.mkdir(exist_ok=True)
@@ -379,8 +451,7 @@ def setup_environment():
             raise
         
         print("Environment setup complete for Colab")
-    
-    elif CFG.env.kind == 'sagemaker':
+    elif env == 'sagemaker':
         # AWS SageMaker specific setup
         data_dir = Path('/opt/ml/input/data')  
         data_dir.mkdir(exist_ok=True)
@@ -395,8 +466,7 @@ def setup_environment():
         
         setup_paths(data_dir)
         print("Paths configured for SageMaker environment")
-    
-    elif CFG.env.kind == 'kaggle':
+    elif env == 'kaggle':
         # In Kaggle, warm up the FUSE cache first
         # warm_kaggle_cache()
         # Use the competition data path directly
@@ -418,13 +488,44 @@ def setup_environment():
             'CurveFault_B': CFG.paths.train/'CurveFault_B',
         }
         print("Environment setup complete for Kaggle")
-    
-    else:  # local development
+    elif env == 'local':
         # For local development, use a data directory in the project root
-        data_dir = Path(__file__).parent.parent.parent / 'data'
+        data_dir = get_project_root() / 'data'
         data_dir.mkdir(exist_ok=True)
         setup_paths(data_dir)
-        print("Environment setup complete for local development") 
+        print("Environment setup complete for local development")
+
+def verify_openfwi_setup():
+    """Verify that OpenFWI dataset and weights are properly loaded."""
+    
+    # Check weights file
+    weights_path = Path('/mnt/waveform-inversion/openfwi_backbone.pth')
+    if not weights_path.exists():
+        logging.error("OpenFWI weights not found!")
+        return False
+        
+    # Try loading weights
+    try:
+        
+        state_dict = torch.load(weights_path, map_location='cpu')
+        logging.info(f"Successfully loaded OpenFWI weights with {len(state_dict)} layers")
+        
+        # Verify model can use these weights
+        from src.core.model import get_model
+        model = get_model()
+        try:
+            model.backbone.load_state_dict(state_dict, strict=False)
+            logging.info("Successfully loaded weights into model backbone")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to load weights into model: {e}")
+            return False
+    except Exception as e:
+        logging.error(f"Failed to verify OpenFWI weights: {e}")
+        return False
+
+if __name__ == "__main__":
+    setup_environment('kaggle') 
 
 
 # %%
@@ -451,7 +552,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Local imports
-from src.core.config import CFG
+# from src.core.config import CFG
+# from src.core.setup import push_to_kaggle
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -509,58 +611,33 @@ class DataManager:
             self.s3_loader = S3DataLoader(CFG.env.s3_bucket, CFG.env.aws_region)
         else:
             self.s3_loader = None
+            
+        if CFG.debug_mode:
+            logging.info("DataManager initialized in debug mode")
+            logging.info(f"Using only family: {list(CFG.paths.families.keys())[0]}")
+            logging.info(f"Batch size: {CFG.batch}")
+            logging.info(f"Number of workers: {CFG.num_workers}")
 
     def list_family_files(self, family: str):
         """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
+        if CFG.debug_mode and family in CFG.families_to_exclude:
+            logging.info(f"Skipping excluded family in debug mode: {family}")
+            return None, None, None
+            
         root = CFG.paths.families[family]
         if not root.exists():
             raise ValueError(f"Family directory not found: {root}")
             
-        # Handle S3 data if in AWS environment
-        if CFG.env.kind == 'aws':
-            try:
-                # List objects in S3
-                s3_objects = self.s3_loader.s3.list_objects_v2(
-                    Bucket=CFG.env.s3_bucket,
-                    Prefix=f"raw/{family}/"
-                )
-                
-                # Filter and sort files
-                seis_files = []
-                vel_files = []
-                for obj in s3_objects.get('Contents', []):
-                    key = obj['Key']
-                    if key.endswith('.npy'):
-                        if 'seis' in key:
-                            seis_files.append(key)
-                        elif 'vel' in key:
-                            vel_files.append(key)
-                            
-                # Download files to local cache
-                local_seis_files = []
-                local_vel_files = []
-                
-                for s3_key in sorted(seis_files):
-                    local_path = root / Path(s3_key).name
-                    local_seis_files.append(self.s3_loader.download_file(s3_key, local_path))
-                    
-                for s3_key in sorted(vel_files):
-                    local_path = root / Path(s3_key).name
-                    local_vel_files.append(self.s3_loader.download_file(s3_key, local_path))
-                    
-                if local_seis_files and local_vel_files:
-                    return local_seis_files, local_vel_files, 'Fault'
-                    
-            except ClientError as e:
-                logging.error(f"Failed to list S3 objects: {e}")
-                raise
-                
-        # Fallback to local filesystem
         # Vel/Style: data/model subfolders (batched)
         if (root / 'data').exists() and (root / 'model').exists():
             seis_files = sorted((root/'data').glob('*.npy'))
             vel_files = sorted((root/'model').glob('*.npy'))
             if seis_files and vel_files:
+                if CFG.debug_mode:
+                    # In debug mode, limit to first file only
+                    seis_files = seis_files[:1]
+                    vel_files = vel_files[:1]
+                    logging.info(f"Debug mode: Using only first file from {family}")
                 family_type = 'VelStyle'
                 return seis_files, vel_files, family_type
                 
@@ -568,12 +645,20 @@ class DataManager:
         seis_files = sorted(root.glob('seis*.npy'))
         vel_files = sorted(root.glob('vel*.npy'))
         if seis_files and vel_files:
+            if CFG.debug_mode:
+                # In debug mode, limit to first file only
+                seis_files = seis_files[:1]
+                vel_files = vel_files[:1]
+                logging.info(f"Debug mode: Using only first file from {family}")
             family_type = 'Fault'
             return seis_files, vel_files, family_type
             
         raise ValueError(f"Could not find valid data structure for family {family} at {root}")
 
     def create_dataset(self, seis_files, vel_files, family_type, augment=False):
+        """Create a dataset for the given files."""
+        if family_type == 'test':
+            return TestDataset(seis_files)
         return SeismicDataset(
             seis_files,
             vel_files,
@@ -586,7 +671,17 @@ class DataManager:
     def create_loader(self, seis_files: List[Path], vel_files: List[Path],
                      family_type: str, batch_size: int = 32, 
                      shuffle: bool = True, num_workers: int = 4,
-                     distributed: bool = False) -> DataLoader:
+                     distributed: bool = False) -> Optional[DataLoader]:
+        """Create a DataLoader for the given files. Returns None if files are empty."""
+        if not seis_files:
+            logging.info("No files to load, skipping loader creation")
+            return None
+            
+        # For test data, vel_files can be None
+        if family_type != 'test' and not vel_files:
+            logging.info("No velocity files to load, skipping loader creation")
+            return None
+            
         dataset = self.create_dataset(seis_files, vel_files, family_type)
         
         if distributed:
@@ -607,50 +702,144 @@ class DataManager:
     def get_test_files(self) -> List[Path]:
         return sorted(CFG.paths.test.glob('*.npy'))
 
+    def upload_best_model_and_metadata(self, artefact_dir: Path, message: str = "Update best model"):
+        logging.info(f"Starting upload_best_model_and_metadata with artefact_dir={artefact_dir}, message={message}")
+        if CFG.debug_mode:
+            logging.info("Debug mode: Simulating model upload")
+            logging.info(f"Would upload from: {artefact_dir}")
+            logging.info(f"With message: {message}")
+            return
+        if CFG.env.kind == "kaggle":
+            if not artefact_dir.exists():
+                logging.error(f"Artefact directory not found: {artefact_dir}")
+                return
+            logging.info("Calling push_to_kaggle for model upload...")
+            push_to_kaggle(artefact_dir, message)
+            logging.info(f"Successfully uploaded to Kaggle dataset with message: {message}")
+            return
+        if CFG.env.kind == "aws":
+            logging.info("AWS environment stub - not implemented.")
+            return
+        if CFG.env.kind == "colab":
+            logging.info("Colab environment stub - not implemented.")
+            return
+        if CFG.env.kind == "sagemaker":
+            logging.info("SageMaker environment stub - not implemented.")
+            return
+        logging.info("Unknown environment stub - not implemented.")
+        return
+
 class SeismicDataset(Dataset):
-    """Memory-efficient dataset for seismic data using memory mapping."""
-    def __init__(self, seis_files: List[Path], vel_files: List[Path], family_type: str, 
+    """
+    Memory-efficient dataset for all families.
+    Handles both batched (500 samples) and single-sample files.
+    Data shapes:
+    - Seismic: (batch, sources=5, receivers=1000, timesteps=70)
+    - Velocity: (batch, channels=1, height=70, width=70)
+    Uses float16 for memory efficiency.
+    """
+    def __init__(self, seis_files: List[Path], vel_files: Optional[List[Path]], family_type: str, 
                  augment: bool = False, use_mmap: bool = True, memory_tracker: MemoryTracker = None):
-        self.seis_files = seis_files
-        self.vel_files = vel_files
         self.family_type = family_type
         self.augment = augment
+        self.index = []
         self.use_mmap = use_mmap
-        self.memory_tracker = memory_tracker or MemoryTracker()
-        
-        # Pre-load file sizes for memory tracking
-        self.file_sizes = {}
-        for f in seis_files + vel_files:
-            self.file_sizes[f] = f.stat().st_size
-            
+        self.memory_tracker = memory_tracker
+        self.vel_files = vel_files
+        # Build index of (file, sample_idx) pairs
+        if vel_files is None:
+            for sfile in seis_files:
+                if self.use_mmap:
+                    f = np.load(sfile, mmap_mode='r')
+                    shape = f.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                    del f
+                else:
+                    data = np.load(sfile)
+                    shape = data.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                for i in range(n_samples):
+                    self.index.append((sfile, None, i))
+        else:
+            for sfile, vfile in zip(seis_files, vel_files):
+                if self.use_mmap:
+                    f = np.load(sfile, mmap_mode='r')
+                    shape = f.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                    del f
+                else:
+                    data = np.load(sfile)
+                    shape = data.shape
+                    n_samples = shape[0] if len(shape) == 4 else 1
+                for i in range(n_samples):
+                    self.index.append((sfile, vfile, i))
+
     def __len__(self):
-        return len(self.seis_files)
-        
+        return len(self.index)
+
     def __getitem__(self, idx):
-        seis_file = self.seis_files[idx]
-        vel_file = self.vel_files[idx]
-        
+        sfile, vfile, i = self.index[idx]
+        # Load x
+        if self.use_mmap:
+            x = np.load(sfile, mmap_mode='r')
+        else:
+            x = np.load(sfile)
+        # x shape: (batch_size, num_sources, time_steps, num_receivers)
+        if len(x.shape) == 4:
+            x = x[i]  # shape: (num_sources, time_steps, num_receivers)
+        # Rearrange to (num_sources, num_receivers, time_steps)
+        if x.shape[1] == 70 and x.shape[2] == 1000:
+            # Already (num_sources, time_steps, num_receivers), need (num_sources, num_receivers, time_steps)
+            x = x.transpose(0, 2, 1)  # (num_sources, num_receivers, time_steps)
+        elif x.shape[1] == 1000 and x.shape[2] == 70:
+            # Already correct
+            pass
+        else:
+            raise ValueError(f"Unexpected seismic data shape: {x.shape}")
+        # For test mode, create dummy y
+        if self.vel_files is None:
+            y = np.zeros((1, 70, 70), np.float16)
+        else:
+            if self.use_mmap:
+                y = np.load(vfile, mmap_mode='r')
+            else:
+                y = np.load(vfile)
+            if len(y.shape) == 4:
+                y = y[i]
+            elif len(y.shape) == 3:
+                y = y[i]
+            else:
+                raise ValueError(f"Unexpected velocity data shape: {y.shape}")
+        # Convert to float16
+        x = x.astype(np.float16)
+        y = y.astype(np.float16)
+        # Normalize per-receiver
+        mu = x.mean(axis=(1,2), keepdims=True)
+        std = x.std(axis=(1,2), keepdims=True) + 1e-6
+        x = (x - mu) / std
+        # No need to add extra dimension; DataLoader will batch
         # Track memory usage
         if self.memory_tracker:
-            self.memory_tracker.update(self.file_sizes[seis_file] + self.file_sizes[vel_file])
-            
-        # Load data with memory mapping
-        if self.use_mmap:
-            seis = np.load(seis_file, mmap_mode='r')
-            vel = np.load(vel_file, mmap_mode='r')
-            
-            # Convert to torch tensors with memory efficiency
-            seis_tensor = torch.from_numpy(seis).float()
-            vel_tensor = torch.from_numpy(vel).float()
-            
-            # Clear memory mapping
-            del seis, vel
-            
-        else:
-            seis_tensor = torch.from_numpy(np.load(seis_file)).float()
-            vel_tensor = torch.from_numpy(np.load(vel_file)).float()
-            
-        return seis_tensor, vel_tensor 
+            self.memory_tracker.update(x.nbytes + y.nbytes)
+        return torch.from_numpy(x), torch.from_numpy(y)
+
+class TestDataset(Dataset):
+    """Dataset for test files that returns the test data and its identifier."""
+    def __init__(self, files: List[Path]):
+        self.files = files
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx: int):
+        file_path = self.files[idx]
+        data = np.load(file_path)
+        # Convert to float16 and normalize per-receiver
+        data = data.astype(np.float16)
+        mu = data.mean(axis=(1,2), keepdims=True)
+        std = data.std(axis=(1,2), keepdims=True) + 1e-6
+        data = (data - mu) / std
+        return torch.from_numpy(data), file_path.stem 
 
 
 # %%
@@ -1037,16 +1226,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 from copy import deepcopy
-from src.core.config import CFG  # Absolute import
+# from src.core.config import CFG  # Absolute import
+import logging
+from pathlib import Path
 
-def get_model():
-    """Create and return a SpecProjNet model instance."""
-    model = SpecProjNet(
-        backbone=CFG.backbone,
-        pretrained=False,  # Always False to prevent downloading
-        ema_decay=CFG.ema_decay,
-        weights_path=CFG.weight_path  # Pass the weights path from CFG
-    ).to(CFG.env.device)
+def get_model(backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k", pretrained: bool = False, ema_decay: float = 0.99):
+    """Create and initialize the model."""
+    model = SpecProjNet(backbone=backbone, pretrained=pretrained, ema_decay=ema_decay)
+    
+    # Move model to device
+    model = model.to(CFG.env.device)
+    
+    # Convert all parameters to float32
+    model = model.float()
+    
+    # Load weights if available
+    if CFG.weight_path and Path(CFG.weight_path).exists():
+        try:
+            state_dict = torch.load(CFG.weight_path, map_location=CFG.env.device)
+            if 'model_state_dict' in state_dict:
+                state_dict = state_dict['model_state_dict']
+            model.load_state_dict(state_dict, strict=False)
+            logging.info(f"Successfully loaded weights from {CFG.weight_path}")
+        except Exception as e:
+            logging.error(f"Failed to load weights: {e}")
+            logging.info("Continuing with randomly initialized weights")
+    
     return model
 
 class ModelEMA(nn.Module):
@@ -1352,141 +1557,87 @@ class SegmentationHead2d(nn.Module):
 
 class SpecProjNet(nn.Module):
     """SpecProj model with HGNet backbone."""
-    def __init__(
-        self,
-        backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k",
-        pretrained: bool = False,  # Changed to False to prevent downloading
-        ema_decay: float = 0.99,
-        weights_path: str = None,  # Added parameter for local weights path
-    ):
+    def __init__(self, backbone: str = "hgnetv2_b2.ssld_stage2_ft_in1k", pretrained: bool = False, ema_decay: float = 0.99):
         super().__init__()
-        # Load backbone with gradient checkpointing enabled
+        
+        # Input projection layer to convert to 3 channels
+        self.input_proj = nn.Conv2d(5, 3, kernel_size=1)
+        
+        # Create backbone
         self.backbone = timm.create_model(
-            backbone, 
-            pretrained=pretrained, 
-            features_only=True, 
-            in_chans=5,
-            checkpoint_path=''  # Enable gradient checkpointing
+            backbone,
+            pretrained=pretrained,
+            features_only=True,
+            out_indices=[0, 1, 2, 3]
         )
+            
+        # Get channel dimensions from backbone
+        self.encoder_channels = self.backbone.feature_info.channels()
+        print("Backbone output channels:", self.encoder_channels)
         
-        # Load local weights if provided
-        if weights_path:
-            try:
-                state_dict = torch.load(weights_path, map_location='cpu')
-                # Try loading with strict=False to handle missing keys
-                missing_keys, unexpected_keys = self.backbone.load_state_dict(state_dict, strict=False)
-                if missing_keys:
-                    print(f"Warning: Missing keys in state dict: {missing_keys}")
-                if unexpected_keys:
-                    print(f"Warning: Unexpected keys in state dict: {unexpected_keys}")
-            except Exception as e:
-                print(f"Warning: Could not load weights from {weights_path}: {str(e)}")
-                print("Continuing with randomly initialized weights")
+        # Initialize decoder blocks with correct channel dimensions
+        self.decoder_blocks = nn.ModuleList()
+        in_channels = self.encoder_channels[-1]  # Start with last feature map channels
         
-        # Update stem stride
-        self._update_stem()
+        for i in range(len(self.encoder_channels)-1):
+            skip_channels = self.encoder_channels[-(i+2)]
+            out_channels = self.encoder_channels[-(i+2)]
+            print(f"DecoderBlock - in_channels: {in_channels}, skip_channels: {skip_channels}, out_channels: {out_channels}")
+            self.decoder_blocks.append(
+                DecoderBlock2d(in_channels, skip_channels, out_channels)
+            )
+            in_channels = out_channels
+            
+        # Final projection layer
+        self.final_proj = nn.Conv2d(self.encoder_channels[0], 1, kernel_size=1)
         
-        # Get encoder channels
-        encoder_channels = self.backbone.feature_info.channels()
-        print(f"Encoder channels: {encoder_channels}")  # Debug print
-        
-        # Create decoder
-        self.decoder = UnetDecoder2d(
-            encoder_channels=encoder_channels,
-            decoder_channels=(256, 128, 64, 32),
-            scale_factors=(1,2,2,2),
-            attention_type="scse",
-            intermediate_conv=True,
-        )
-        
-        # Create head with target size
-        self.head = SegmentationHead2d(
-            in_channels=32,
-            out_channels=1,
-            target_size=(70, 70),  # Set target output size
-            mode="nontrainable",
-        )
+        # Final resize layer to match target dimensions
+        self.final_resize = nn.Upsample(size=(70, 70), mode='bilinear', align_corners=False)
         
         # Initialize EMA
-        self.ema = ModelEMA(self, decay=ema_decay) if ema_decay > 0 else None
-        
-    def _update_stem(self):
-        """Update stem convolution stride."""
-        if hasattr(self.backbone, 'stem'):
-            if hasattr(self.backbone.stem, 'stem1'):
-                self.backbone.stem.stem1.conv.stride = (1,1)
-            elif hasattr(self.backbone.stem, 'conv'):
-                self.backbone.stem.conv.stride = (1,1)
-            else:
-                raise ValueError("Unknown stem structure in backbone")
-        else:
-            raise ValueError("Backbone does not have stem attribute")
+        self.ema_decay = ema_decay
+        self.ema_model = None
         
     def forward(self, x):
-        # Input shape assertions
-        assert isinstance(x, torch.Tensor), "Input must be a torch.Tensor"
-        assert x.ndim in [2, 3, 4, 5], f"Unexpected input ndim: {x.ndim}"
-        if x.ndim == 5:
-            B, S, C, T, R = x.shape
-            assert C == 1 or C == 5, f"Expected channel dim 1 or 5, got {C}"
-        elif x.ndim == 3:
-            B, T, R = x.shape
-        elif x.ndim == 2:
-            T, R = x.shape
-        # Optionally, check for NaN/Inf
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            raise ValueError("Input contains NaN or Inf values!")
+        # Handle 5D input [batch, channels, sources, receivers, timesteps]
+        if x.dim() == 5:
+            B, C, S, R, T = x.shape
+            # Reshape to combine sources and channels: [batch, sources*channels, receivers, timesteps]
+            x = x.reshape(B, S*C, R, T)
+            
+        # Project input to 3 channels
+        x = self.input_proj(x)
+            
+        # Get features from backbone
+        features = self.backbone(x)
         
-        # Handle different input shapes
-        if len(x.shape) == 5:  # (B, S, C, T, R)
-            B, S, C, T, R = x.shape
-            # Reshape to combine source and channel dimensions
-            x = x.reshape(B, S*C, T, R)
-        elif len(x.shape) == 3:  # (B, T, R)
-            x = x.unsqueeze(1)  # Add source dimension -> (B, 1, T, R)
-        elif len(x.shape) == 2:  # (T, R)
-            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and source dimensions -> (1, 1, T, R)
+        # Decode features
+        x = features[-1]  # Start with last feature map
+        for i, decoder in enumerate(self.decoder_blocks):
+            skip = features[-(i+2)] if i < len(features)-1 else None
+            x = decoder(x, skip)
             
-        # print(f"Final shape before unpacking: {x.shape}")
-        B, S, T, R = x.shape
+        # Final projection
+        x = self.final_proj(x)
         
-        # Process each source separately to save memory
-        outputs = []
-        for s in range(S):
-            # Get current source
-            x_s = x[:, s:s+1, :, :]  # (B, 1, T, R)
-            x_s = x_s.repeat(1, 5, 1, 1)  # (B, 5, T, R)
-            
-            # Get encoder features
-            feats = self.backbone(x_s)
-            
-            # Decode
-            x_s = self.decoder(feats)
-            
-            # Final head
-            x_s = self.head(x_s)
-            
-            outputs.append(x_s)
-            
-        # Combine outputs
-        x = torch.stack(outputs, dim=1)  # (B, S, 1, H, W)
-        x = x.mean(dim=1)  # Average over sources
+        # Resize to target dimensions
+        x = self.final_resize(x)
         
         return x
         
     def update_ema(self):
         """Update EMA weights."""
-        if self.ema is not None:
-            self.ema.update(self)
+        if self.ema_model is not None:
+            self.ema_model.update(self)
             
     def set_ema(self):
         """Set EMA weights."""
-        if self.ema is not None:
-            self.ema.set(self)
+        if self.ema_model is not None:
+            self.ema_model.set(self)
             
     def get_ema_model(self):
         """Get EMA model."""
-        return self.ema.module if self.ema is not None else self 
+        return self.ema_model if self.ema_model is not None else self 
 
 
 # %%
@@ -1684,10 +1835,11 @@ def create_iunet() -> IUNet:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import CFG
-from .proj_mask import PhysMask, SpectralAssembler
-from .iunet import create_iunet
+from src.core.config import CFG
+from src.core.proj_mask import PhysMask, SpectralAssembler
+from src.core.iunet import create_iunet
 from .specproj_unet import SmallUNet
+import logging
 
 class WaveDecoder(nn.Module):
     """Simple decoder for wavefield prediction."""
@@ -1709,18 +1861,29 @@ class WaveDecoder(nn.Module):
 class HybridSpecProj(nn.Module):
     """
     Hybrid model combining physics-guided splitting with IU-Net translation.
+    Memory-efficient implementation for Kaggle.
     """
     def __init__(self, chans=32, depth=4):
         super().__init__()
         self.mask = PhysMask()
         self.assembler = SpectralAssembler()
         
-        # IU-Net for latent translation
+        # IU-Net for latent translation (only if joint training)
         self.iunet = create_iunet() if CFG.is_joint() else None
         
         # Decoders
-        self.vel_decoder = SmallUNet(in_ch=5, out_ch=1, base=chans, depth=depth)
+        self.vel_decoder = SpecProjNet(
+            backbone=CFG.backbone,
+            pretrained=False,
+            ema_decay=CFG.ema_decay
+        )
         self.wave_decoder = WaveDecoder() if CFG.is_joint() else None
+        
+        # Enable gradient checkpointing if configured
+        if CFG.gradient_checkpointing:
+            self.vel_decoder.backbone.use_checkpoint = True
+            if self.iunet is not None:
+                self.iunet.use_checkpoint = True
         
     def forward(self, seis: torch.Tensor, mode: str = "inverse") -> tuple:
         """
@@ -1737,7 +1900,7 @@ class HybridSpecProj(nn.Module):
         up, down = self.mask(seis)
         
         if not CFG.is_joint() or mode == "inverse":
-            # Use original SmallUNet path
+            # Use original SpecProjNet path
             B,S,T,R = up.shape
             up = up.reshape(B*S, 1, T, R).repeat(1,5,1,1)
             down = down.reshape(B*S, 1, T, R).repeat(1,5,1,1)
@@ -1776,64 +1939,123 @@ SpecProjUNet = HybridSpecProj
 # Source: losses.py
 import torch
 import torch.nn.functional as F
-from config import CFG
+from src.core.config import CFG
+import torch.cuda.amp as amp
+from typing import Dict, Tuple, Optional
+
+def track_memory_usage():
+    """Track current GPU memory usage."""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024**2  # MB
+    return 0.0
 
 def pde_residual(v_pred: torch.Tensor,
                  seis: torch.Tensor,
-                 dt=1e-3, dx=10.):
+                 dt: float = 1e-3,
+                 dx: float = 10.,
+                 use_amp: bool = True) -> torch.Tensor:
     """
-    Quick acoustic residual: ∂²_t p − v² ∇² p  ≈ 0 on predicted velocity.
-    Here we just coarse-sample a random source index to keep it cheap.
+    Enhanced acoustic wave equation residual with mixed precision support.
+    
+    Args:
+        v_pred: Predicted velocity field
+        seis: Seismic data
+        dt: Time step
+        dx: Spatial step
+        use_amp: Whether to use automatic mixed precision
+        
+    Returns:
+        PDE residual loss
     """
-    p = seis[:,0]            # (B,T,R)
-    d2t = (p[:,2:] - 2*p[:,1:-1] + p[:,:-2]) / (dt*dt)
-    lap = (p[:,:,2:] - 2*p[:,:,1:-1] + p[:,:,:-2]) / (dx*dx)
-    v2  = v_pred[...,1:-1,1:-1]**2
-    res = d2t[...,1:-1] - v2*lap[:,1:-1]
-    return res.abs()
+    with amp.autocast(enabled=use_amp):
+        p = seis[:,0]  # (B,T,R)
+        
+        # Second-order time derivative
+        d2t = (p[:,2:] - 2*p[:,1:-1] + p[:,:-2]) / (dt*dt)
+        
+        # Laplacian in both dimensions
+        lap_x = (p[:,:,2:] - 2*p[:,:,1:-1] + p[:,:,:-2]) / (dx*dx)
+        lap_y = (p[:,2:,:] - 2*p[:,1:-1,:] + p[:,:-2,:]) / (dx*dx)
+        lap = lap_x + lap_y
+        
+        # Velocity squared
+        v2 = v_pred[...,1:-1,1:-1]**2
+        
+        # Full residual
+        res = d2t[...,1:-1] - v2*lap[:,1:-1]
+        
+        return res.abs()
 
 class JointLoss(torch.nn.Module):
     """
-    Combined loss for joint forward-inverse training.
+    Enhanced joint loss with memory tracking and mixed precision support.
     """
-    def __init__(self, λ_inv=1.0, λ_fwd=1.0, λ_pde=0.1):
+    def __init__(self,
+                 λ_inv: float = 1.0,
+                 λ_fwd: float = 1.0,
+                 λ_pde: float = 0.1,
+                 λ_reg: float = 0.01,
+                 use_amp: bool = True):
         super().__init__()
         self.λ_inv = λ_inv
         self.λ_fwd = λ_fwd
         self.λ_pde = λ_pde
+        self.λ_reg = λ_reg
+        self.use_amp = use_amp
         
-    def forward(self, v_pred, v_true, p_pred=None, p_true=None, seis_batch=None):
-        # Inverse loss (velocity)
-        l_inv = F.l1_loss(v_pred, v_true)
+    def forward(self,
+                v_pred: torch.Tensor,
+                v_true: torch.Tensor,
+                p_pred: Optional[torch.Tensor] = None,
+                p_true: Optional[torch.Tensor] = None,
+                seis_batch: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
         
-        # Forward loss (wavefield)
-        l_fwd = 0.0
-        if p_pred is not None and p_true is not None:
-            l_fwd = F.l1_loss(p_pred, p_true)
+        with amp.autocast(enabled=self.use_amp):
+            # Inverse loss (velocity)
+            l_inv = F.l1_loss(v_pred, v_true)
             
-        # PDE residual
-        l_pde = 0.0
-        if seis_batch is not None:
-            l_pde = pde_residual(v_pred, seis_batch).mean()
-            
-        # Combine losses
-        total = (self.λ_inv * l_inv + 
-                self.λ_fwd * l_fwd + 
-                self.λ_pde * l_pde)
+            # Forward loss (wavefield)
+            l_fwd = torch.tensor(0.0, device=v_pred.device)
+            if p_pred is not None and p_true is not None:
+                l_fwd = F.l1_loss(p_pred, p_true)
                 
-        return total, {
-            'l_inv': l_inv.item(),
-            'l_fwd': l_fwd.item() if isinstance(l_fwd, torch.Tensor) else l_fwd,
-            'l_pde': l_pde.item() if isinstance(l_pde, torch.Tensor) else l_pde
-        }
+            # PDE residual
+            l_pde = torch.tensor(0.0, device=v_pred.device)
+            if seis_batch is not None:
+                l_pde = pde_residual(v_pred, seis_batch, use_amp=self.use_amp).mean()
+                
+            # Regularization loss (optional)
+            l_reg = torch.tensor(0.0, device=v_pred.device)
+            if hasattr(self, 'λ_reg') and self.λ_reg > 0:
+                l_reg = F.mse_loss(v_pred[:,:,1:] - v_pred[:,:,:-1], 
+                                 torch.zeros_like(v_pred[:,:,1:]))
+            
+            # Combine losses
+            total = (self.λ_inv * l_inv + 
+                    self.λ_fwd * l_fwd + 
+                    self.λ_pde * l_pde +
+                    self.λ_reg * l_reg)
+            
+            # Track memory usage
+            memory_used = track_memory_usage()
+                    
+            return total, {
+                'l_inv': l_inv.item(),
+                'l_fwd': l_fwd.item() if isinstance(l_fwd, torch.Tensor) else l_fwd,
+                'l_pde': l_pde.item() if isinstance(l_pde, torch.Tensor) else l_pde,
+                'l_reg': l_reg.item() if isinstance(l_reg, torch.Tensor) else l_reg,
+                'memory_mb': memory_used
+            }
 
-def get_loss_fn():
+def get_loss_fn() -> torch.nn.Module:
     """Get the appropriate loss function based on configuration."""
     if CFG.is_joint():
         return JointLoss(
             λ_inv=CFG.lambda_inv,
             λ_fwd=CFG.lambda_fwd,
-            λ_pde=CFG.lambda_pde
+            λ_pde=CFG.lambda_pde,
+            λ_reg=CFG.lambda_reg if hasattr(CFG, 'lambda_reg') else 0.01,
+            use_amp=CFG.use_amp if hasattr(CFG, 'use_amp') else True
         )
     else:
         return torch.nn.L1Loss()  # Default to L1 loss for non-joint training
@@ -1850,6 +2072,7 @@ Training script that uses DataManager for all data IO.
 import torch
 import random
 import numpy as np
+import gc  # Add this import for garbage collection
 from pathlib import Path
 from tqdm import tqdm
 import torch.cuda.amp as amp
@@ -1863,6 +2086,10 @@ import boto3
 from botocore.exceptions import ClientError
 import signal
 import time
+import torch.nn as nn
+import shutil
+
+# Local imports - ensure these are at the top level
 from src.core.config import CFG
 from src.core.data_manager import DataManager
 from src.core.model import get_model
@@ -1897,32 +2124,24 @@ def convert_to_serializable(obj):
     return obj
 
 class SpotInstanceHandler:
-    """Handles spot instance interruptions gracefully."""
-    def __init__(self, checkpoint_dir: Path, checkpoint_interval: int = 5):
+    """Handles spot instance interruptions gracefully and manages S3 uploads/cleanup."""
+    def __init__(self, checkpoint_dir: Path, s3_upload_interval: int):
         self.checkpoint_dir = checkpoint_dir
-        self.checkpoint_interval = checkpoint_interval
+        self.s3_upload_interval = s3_upload_interval
         self.last_checkpoint = 0
         self.interrupted = False
-        
-        # Register signal handlers
         signal.signal(signal.SIGTERM, self.handle_interruption)
         signal.signal(signal.SIGINT, self.handle_interruption)
-        
+
     def handle_interruption(self, signum, frame):
-        """Handle spot instance interruption."""
         logging.info(f"Received signal {signum}, preparing for interruption...")
         self.interrupted = True
-        
-    def should_checkpoint(self, epoch: int) -> bool:
-        """Check if we should save a checkpoint based on interval and interruption status."""
-        return (epoch % self.checkpoint_interval == 0 or 
-                self.interrupted or 
-                time.time() - self.last_checkpoint > 300)  # 5 minutes
-        
-    def save_checkpoint(self, model, optimizer, scheduler, scaler, epoch, metrics):
-        """Save checkpoint to local disk and S3 with cleanup strategy."""
+
+    def should_upload_s3(self, epoch: int, is_last_epoch: bool) -> bool:
+        return self.interrupted or (epoch % self.s3_upload_interval == 0) or is_last_epoch
+
+    def save_checkpoint(self, model, optimizer, scheduler, scaler, epoch, metrics, upload_s3=False):
         try:
-            # Prepare checkpoint data
             checkpoint = {
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -1931,302 +2150,212 @@ class SpotInstanceHandler:
                 'epoch': epoch,
                 'metrics': metrics
             }
-            
-            # Save locally with cleanup
             ckpt_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
             torch.save(checkpoint, ckpt_path)
-            
-            # Keep only last 3 local checkpoints
             local_checkpoints = sorted(self.checkpoint_dir.glob('checkpoint_epoch_*.pt'))
             if len(local_checkpoints) > 3:
                 for old_ckpt in local_checkpoints[:-3]:
                     old_ckpt.unlink()
                     logging.info(f"Removed old local checkpoint: {old_ckpt}")
-            
-            # Save metadata
-            metadata = {
-                'epoch': epoch,
-                'optimizer_state_dict': convert_to_serializable(optimizer.state_dict()),
-                'scheduler_state_dict': convert_to_serializable(scheduler.state_dict()),
-                'scaler_state_dict': convert_to_serializable(scaler.state_dict()),
-                'metrics': metrics,
-                'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
-            }
-            
             meta_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}_metadata.json'
             with open(meta_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
-            # Upload to S3
-            if CFG.env.kind == 'aws':
+                json.dump({
+                    'epoch': epoch,
+                    'optimizer_state_dict': convert_to_serializable(optimizer.state_dict()),
+                    'scheduler_state_dict': convert_to_serializable(scheduler.state_dict()),
+                    'scaler_state_dict': convert_to_serializable(scaler.state_dict()),
+                    'metrics': metrics,
+                    'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
+                }, f, indent=2)
+            if upload_s3 and CFG.env.kind == 'aws':
                 s3 = boto3.client('s3', region_name=CFG.env.aws_region)
                 s3_key = f"checkpoints/checkpoint_epoch_{epoch}.pt"
                 s3.upload_file(str(ckpt_path), CFG.env.s3_bucket, s3_key)
-                
-                # Keep only last 5 checkpoints in S3
-                response = s3.list_objects_v2(
-                    Bucket=CFG.env.s3_bucket,
-                    Prefix='checkpoints/checkpoint_epoch_'
-                )
+                response = s3.list_objects_v2(Bucket=CFG.env.s3_bucket, Prefix='checkpoints/checkpoint_epoch_')
                 if 'Contents' in response:
                     checkpoints = sorted(response['Contents'], key=lambda x: x['LastModified'])
                     if len(checkpoints) > 5:
                         for old_ckpt in checkpoints[:-5]:
-                            s3.delete_object(
-                                Bucket=CFG.env.s3_bucket,
-                                Key=old_ckpt['Key']
-                            )
+                            s3.delete_object(Bucket=CFG.env.s3_bucket, Key=old_ckpt['Key'])
                             logging.info(f"Removed old S3 checkpoint: {old_ckpt['Key']}")
-            
-            # Push to Kaggle if configured
-            if CFG.env.kind == 'aws' and epoch % 5 == 0:
-                push_to_kaggle(
-                    self.checkpoint_dir,
-                    f"epoch {epoch} {datetime.utcnow().isoformat()}",
-                    "uncertainlyprincipaled/yalegwi"
-                )
-            
             self.last_checkpoint = time.time()
             logging.info(f"Checkpoint saved for epoch {epoch}")
-            
         except Exception as e:
             logging.error(f"Failed to save checkpoint: {e}")
             raise
 
-def train(dryrun: bool = False, fp16: bool = True):
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, data_manager):
+    logging.info(f"Starting save_checkpoint for epoch {epoch} with loss {loss}")
+    out_dir = Path('outputs')
+    out_dir.mkdir(exist_ok=True)
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss,
+    }
     try:
-        logging.info("Starting training...")
-        set_seed(CFG.seed)
-        save_dir = Path('outputs')
-        save_dir.mkdir(exist_ok=True)
-        
-        # Initialize spot instance handler
-        spot_handler = SpotInstanceHandler(save_dir)
-        
-        # Initialize DataManager with memory tracking
-        logging.info("Initializing DataManager...")
-        data_manager = DataManager(use_mmap=True)
-        
-        # Prepare train loaders for each family
-        train_loaders = []
-        families = list(CFG.paths.families.keys())
-
-        for family in families:
-            seis_files, vel_files, family_type = data_manager.list_family_files(family)
-            print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
-            loader = data_manager.create_loader(
-                seis_files=seis_files,
-                vel_files=vel_files,
-                family_type=family_type,
-                batch_size=2,         # Set your desired batch size
-                shuffle=True,
-                num_workers=0,        # Set your desired number of workers
-                distributed=CFG.distributed
-            )
-            train_loaders.append(loader)
-        
-        # Initialize model and loss
-        logging.info("Initializing model and loss function...")
-        model = get_model()
-        loss_fn = get_loss_fn()
-        
-        # Initialize optimizer and scaler for mixed precision
-        logging.info("Setting up optimizer and mixed precision training...")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
-        
-        # Calculate total steps for OneCycleLR
-        total_steps = sum(len(loader) for loader in train_loaders) * CFG.epochs
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=CFG.lr,
-            total_steps=total_steps,
-            pct_start=0.3,  # Warm up for 30% of training
-            div_factor=25,  # Initial lr = max_lr/25
-            final_div_factor=1e4  # Final lr = initial_lr/1e4
-        )
-        
-        scaler = GradScaler(enabled=fp16)
-        
-        # Enable memory optimization
-        torch.cuda.empty_cache()
-        if torch.cuda.is_available():
-            torch.cuda.set_per_process_memory_fraction(0.8)  # Use 80% of available memory
-            # Enable memory efficient attention if available
-            if hasattr(torch.cuda, 'memory_summary'):
-                torch.cuda.memory_summary(device=0)
-            # Set memory allocator settings
-            torch.cuda.memory.set_per_process_memory_fraction(0.8)
-            # Enable memory efficient attention
-            torch.backends.cuda.enable_mem_efficient_sdp(True)
-        
-        # Training loop
-        logging.info("Starting training loop...")
-        best_mae = float('inf')
-        patience = 5  # Number of epochs to wait for improvement
-        patience_counter = 0  # Counter for early stopping
-        min_delta = 1e-4  # Minimum change in validation MAE to be considered as improvement
-        
-        for epoch in range(CFG.epochs):
-            if spot_handler.interrupted:
-                logging.info("Spot instance interruption detected, saving checkpoint and exiting...")
-                spot_handler.save_checkpoint(
-                    model, optimizer, scheduler, scaler, epoch,
-                    {'best_mae': best_mae, 'patience_counter': patience_counter}
-                )
-                break
-                
-            logging.info(f"Epoch {epoch+1}/{CFG.epochs}")
-            model.train()
-            epoch_loss = 0.0
-            num_batches = 0
-            
-            for loader_idx, loader in enumerate(train_loaders):
-                logging.info(f"Processing loader {loader_idx+1}/{len(train_loaders)}")
-                for batch_idx, (x, y) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}")):
-                    try:
-                        # Move to GPU if available
-                        x = x.cuda()
-                        y = y.cuda()
-                        
-                        # Forward pass with mixed precision
-                        with autocast(enabled=fp16):
-                            pred = model(x)
-                            # Check for NaNs/Infs in model output
-                            if torch.isnan(pred).any() or torch.isinf(pred).any():
-                                logging.error(f"NaN or Inf detected in model output at batch {batch_idx}")
-                                continue
-                            loss, loss_components = loss_fn(pred, y)
-                            # Check for NaNs/Infs in loss
-                            if torch.isnan(loss) or torch.isinf(loss):
-                                logging.error(f"NaN or Inf detected in loss at batch {batch_idx}")
-                                continue
-                        
-                        # Backward pass with gradient scaling
-                        scaler.scale(loss).backward()
-                        
-                        # Gradient clipping before unscaling
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                        
-                        # Optimizer step with gradient scaling
-                        scaler.step(optimizer)
-                        scaler.update()
-                        optimizer.zero_grad(set_to_none=True)
-                        
-                        # Update learning rate
-                        scheduler.step()
-                        
-                        # Track epoch loss
-                        epoch_loss += loss.item()
-                        num_batches += 1
-                        
-                        # Clear cache periodically
-                        if batch_idx % 10 == 0:
-                            torch.cuda.empty_cache()
-                            if torch.cuda.is_available():
-                                allocated = torch.cuda.memory_allocated() / 1e9
-                                reserved = torch.cuda.memory_reserved() / 1e9
-                                logging.info(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
-                    
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            logging.error(f"OOM Error at epoch {epoch+1}, loader {loader_idx+1}, batch {batch_idx}")
-                            logging.error(f"Last successful operation: Forward pass")
-                            if torch.cuda.is_available():
-                                logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
-                            torch.cuda.empty_cache()
-                            continue
-                        else:
-                            raise e
-                    except (AttributeError, NameError) as e:
-                        logging.error(f"{type(e).__name__} encountered at batch {batch_idx}: {e}")
-                        raise e
-            
-            # Calculate average epoch loss
-            avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
-            logging.info(f"Epoch {epoch+1} average loss: {avg_epoch_loss:.4f}")
-            
-            # Validation
-            logging.info("Starting validation...")
-            model.eval()
-            val_mae = 0.0
-            val_loss = 0.0
-            num_val_batches = 0
-            
+        torch.save(checkpoint, out_dir / 'checkpoint.pth')
+        logging.info(f"Checkpoint saved at outputs/checkpoint.pth for epoch {epoch}")
+        best_path = out_dir / 'best.pth'
+        is_best = False
+        if not best_path.exists():
+            is_best = True
+        else:
             try:
-                with torch.no_grad():
-                    val_loader = train_loaders[0]
-                    for batch_idx, (seis, vel) in enumerate(val_loader):
-                        seis, vel = seis.to(CFG.env.device), vel.to(CFG.env.device)
-                        with autocast(enabled=fp16):
-                            v_pred = model.get_ema_model()(seis)
-                            if torch.isnan(v_pred).any() or torch.isinf(v_pred).any():
-                                logging.error(f"NaN or Inf detected in validation output at batch {batch_idx}")
-                                continue
-                            val_mae += torch.nn.functional.l1_loss(v_pred, vel).item()
-                            val_loss += loss_fn(v_pred, vel)[0].item()
-                            num_val_batches += 1
-                        
-                        if batch_idx % 10 == 0:
-                            torch.cuda.empty_cache()
-                    
-                    val_mae /= num_val_batches
-                    val_loss /= num_val_batches
-                    
-                    # Save checkpoint if needed
-                    if spot_handler.should_checkpoint(epoch):
-                        spot_handler.save_checkpoint(
-                            model, optimizer, scheduler, scaler, epoch,
-                            {
-                                'val_mae': val_mae,
-                                'val_loss': val_loss,
-                                'avg_epoch_loss': avg_epoch_loss,
-                                'best_mae': best_mae,
-                                'patience_counter': patience_counter
-                            }
-                        )
-                    
-                    # Update best model
-                    if val_mae < best_mae - min_delta:
-                        best_mae = val_mae
-                        checkpoint = {
-                            'model_state_dict': model.state_dict(),
-                        }
-                        torch.save(checkpoint, save_dir/'best.pth')
-                        logging.info(f"New best model saved! MAE: {val_mae:.4f}")
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                        if patience_counter >= patience:
-                            logging.info(f"Early stopping triggered after {epoch+1} epochs")
-                            break
-                    
-                    logging.info(f"Epoch {epoch+1} complete - val_mae = {val_mae:.4f}, val_loss = {val_loss:.4f}")
-                    
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    logging.error(f"OOM Error during validation at epoch {epoch+1}")
-                    logging.error(f"Last successful operation: Validation batch {batch_idx}")
-                    if torch.cuda.is_available():
-                        logging.error(f"GPU Memory at error: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, {torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
-                    torch.cuda.empty_cache()
-                    continue
-                else:
-                    raise e
-            except (AttributeError, NameError) as e:
-                logging.error(f"{type(e).__name__} encountered during validation at batch {batch_idx}: {e}")
-                raise e
-            
-            # Clear cache at end of epoch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logging.info("GPU cache cleared")
-                
+                prev_checkpoint = torch.load(best_path)
+                prev_loss = prev_checkpoint.get('loss', float('inf'))
+                is_best = loss < prev_loss
+            except Exception as e:
+                logging.warning(f"Could not load previous checkpoint: {e}")
+                is_best = True
+        if is_best:
+            torch.save(checkpoint, best_path)
+            logging.info(f"New best model saved at outputs/best.pth with loss: {loss:.4f}")
+            metadata = {
+                'epoch': epoch,
+                'loss': float(loss),
+                'timestamp': datetime.now().isoformat(),
+                'config': {
+                    'batch_size': CFG.batch,
+                    'learning_rate': CFG.lr,
+                    'weight_decay': CFG.weight_decay,
+                    'backbone': CFG.backbone,
+                }
+            }
+            with open(out_dir / 'best_metadata.json', 'w') as f:
+                json.dump(metadata, f, indent=2)
+            logging.info(f"Best model metadata saved at outputs/best_metadata.json")
+            print("Uploading best model and metadata to S3")
+            data_manager.upload_best_model_and_metadata(
+                out_dir,
+                f"Update best model - loss: {loss:.4f} at epoch {epoch}"
+            )
+        logging.info(f"save_checkpoint completed for epoch {epoch}")
     except Exception as e:
-        logging.error(f"Uncaught exception in train(): {type(e).__name__}: {e}")
-        raise
+        logging.error(f"Exception in save_checkpoint: {e}")
+    print(f"Checkpoint saved at epoch {epoch} with loss {loss:.4f}")
+
+def train(dryrun: bool = False, fp16: bool = False):
+    """Main training loop."""
+    # Initialize data manager
+    data_manager = DataManager()
+    
+    # Create loaders for each family
+    train_loaders = []
+    for family in CFG.paths.families:
+        if CFG.debug_mode and family in CFG.families_to_exclude:
+            continue
+            
+        seis_files, vel_files, family_type = data_manager.list_family_files(family)
+        if seis_files is None:  # Skip excluded families
+            continue
+            
+        print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
+        
+        loader = data_manager.create_loader(
+            seis_files, vel_files, family_type,
+            batch_size=CFG.batch,
+            shuffle=True,
+            num_workers=CFG.num_workers
+        )
+        if loader is not None:
+            train_loaders.append(loader)
+            
+    if not train_loaders:
+        raise ValueError("No valid data loaders created!")
+        
+    # Initialize model and move to device
+    model = get_model()
+    model.train()
+    
+    # Initialize optimizer and scheduler
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=CFG.lr,
+        weight_decay=CFG.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=CFG.epochs,
+        eta_min=CFG.lr/100
+    )
+    
+    # Initialize loss function
+    loss_fn = nn.MSELoss()
+    
+    # Training loop
+    for epoch in range(CFG.epochs):
+        total_loss = 0
+        total_batches = 0
+        
+        for loader in train_loaders:
+            for batch_idx, (x, y) in enumerate(loader):
+                try:
+                    # Move data to device and convert to float32
+                    x = x.to(CFG.env.device).float()
+                    y = y.to(CFG.env.device).float()
+                    
+                    # Forward pass
+                    pred = model(x)
+                    loss = loss_fn(pred, y)
+                    
+                    # Backward pass
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    
+                    # Update statistics
+                    total_loss += loss.item()
+                    total_batches += 1
+                    
+                    # Print progress
+                    if batch_idx % 10 == 0:
+                        print(f"Epoch {epoch+1}/{CFG.epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+                        
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        if hasattr(torch.cuda, 'empty_cache'):
+                            torch.cuda.empty_cache()
+                        print(f"WARNING: out of memory in batch {batch_idx}. Skipping batch.")
+                        continue
+                    else:
+                        raise e
+                        
+        # Update learning rate
+        scheduler.step()
+        
+        # Print epoch statistics
+        avg_loss = total_loss / total_batches
+        print(f"Epoch {epoch+1}/{CFG.epochs} completed. Average loss: {avg_loss:.4f}")
+        
+        # Save checkpoint
+        if (epoch + 1) % CFG.debug_upload_interval == 0:
+            save_checkpoint(model, optimizer, scheduler, epoch, avg_loss, data_manager)
+            
+    # After all epochs:
+    # Save best.pth and best_metadata.json to /kaggle/working for persistence
+    kaggle_working = Path('/kaggle/working')
+    kaggle_working.mkdir(parents=True, exist_ok=True)
+    out_dir = Path('outputs')
+    for fname in ['best.pth', 'best_metadata.json']:
+        src = out_dir / fname
+        dst = kaggle_working / fname
+        if src.exists():
+            shutil.copy(src, dst)
+            print(f"Copied {src} to {dst}")
+        else:
+            print(f"File {src} does not exist, skipping copy.")
+    print("Uploading model to Kaggle dataset (final upload)...")
+    push_to_kaggle(out_dir, "Final upload after training")
+    print("Upload complete.")
+
+    return model
 
 if __name__ == '__main__':
+    # Set debug mode to True and update settings
+    CFG.set_debug_mode(True)
     train() 
 
 

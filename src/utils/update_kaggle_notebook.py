@@ -3,6 +3,12 @@ from pathlib import Path
 import re
 from typing import List
 import logging
+import sys
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root))
+
 from src.core.config import CFG
 
 def extract_code_blocks(content: str, source_path: str = None) -> List[tuple[str, str]]:

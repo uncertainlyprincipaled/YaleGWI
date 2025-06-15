@@ -1,0 +1,539 @@
+Prompt: 
+# Research Report Prompt: Geometric-Aware Deep Learning for FWI Implementation
+
+## Task
+Generate a structured research report analyzing existing literature and implementations to inform the implementation of Phase 1 (Core Setup) and Phase 2 (Model Development) of our FWI project. The report should help us make informed decisions about implementation strategies while remaining open to alternative approaches.
+
+## Report Structure
+
+### 1. Executive Summary
+- Key findings and recommendations
+- Most promising approaches for each phase
+- Critical implementation considerations
+- Potential risks and mitigations
+
+### 2. Phase 1: Core Setup Analysis
+
+#### 2.1 Model Registry & Checkpoint Management
+- Current state of geometric-aware model management
+- Best practices for checkpointing with geometric metadata
+- Recommended implementation patterns
+- Code examples and references
+- Pros/cons of different approaches
+
+#### 2.2 Family-Specific Data Loaders
+- Analysis of geometric feature extraction methods
+- Best practices for handling geological families
+- Recommended data structures and interfaces
+- Implementation examples
+- Performance considerations
+
+#### 2.3 Cross-Validation Framework
+- Review of geometric-aware validation strategies
+- Analysis of family-based stratification methods
+- Recommended validation metrics
+- Implementation patterns
+- Benchmarking approaches
+
+### 3. Phase 2: Model Development Analysis
+
+#### 3.1 EGNN Implementation
+- Current state of EGNN in FWI
+- Analysis of receiver geometry handling
+- Implementation patterns and best practices
+- Performance benchmarks
+- Integration strategies
+
+#### 3.2 Heat-Kernel Diffusion Networks
+- Review of wave equation approximation methods
+- Analysis of diffusion network implementations
+- Performance characteristics
+- Integration patterns
+- Computational considerations
+
+#### 3.3 SE(3)-Transformer
+- Current state of 3D equivariance in FWI
+- Analysis of SE(3) implementations
+- Performance benchmarks
+- Integration strategies
+- Computational requirements
+
+### 4. Implementation Recommendations
+
+#### 4.1 Phase 1 Priority Matrix
+- High-impact, low-effort implementations
+- Critical path items
+- Optional enhancements
+- Risk factors
+
+#### 4.2 Phase 2 Priority Matrix
+- Core model components
+- Integration strategies
+- Performance optimizations
+- Risk factors
+
+### 5. Code Analysis
+
+#### 5.1 Existing Implementations
+- GitHub repositories
+- Code quality assessment
+- Integration potential
+- Maintenance status
+- Documentation quality
+
+#### 5.2 Implementation Patterns
+- Recommended architectures
+- Design patterns
+- Testing strategies
+- Performance optimization techniques
+
+### 6. Risk Analysis
+
+#### 6.1 Technical Risks
+- Implementation challenges
+- Performance bottlenecks
+- Integration issues
+- Mitigation strategies
+
+#### 6.2 Alternative Approaches
+- Backup strategies
+- Simplified implementations
+- Fallback options
+- Progressive enhancement paths
+
+## Research Requirements
+
+### 1. Literature Focus
+- Papers from last 3 years
+- FWI-specific implementations
+- Geometric deep learning papers
+- Physics-informed neural networks
+- Equivariant neural networks
+
+### 2. Code Focus
+- PyTorch implementations
+- Active repositories
+- Well-documented code
+- Test coverage
+- Performance benchmarks
+
+### 3. Implementation Considerations
+- Memory efficiency
+- GPU utilization
+- Distributed training support
+- Physics constraints
+- Geometric preservation
+
+## Output Format
+For each section, provide:
+1. Summary of findings
+2. Key papers/implementations
+3. Implementation recommendations
+4. Risk factors
+5. Alternative approaches
+6. Code examples (where applicable)
+
+## Critical Questions to Address
+1. What are the most efficient ways to implement geometric-aware checkpointing?
+2. How can we best handle family-specific data loading while maintaining performance?
+3. What validation strategies work best for geometric data?
+4. Which EGNN implementation is most suitable for our FWI use case?
+5. How can we efficiently implement heat-kernel diffusion networks?
+6. What's the best approach for SE(3) equivariance in our context?
+
+## Additional Context
+- Focus on practical implementation details
+- Prioritize well-documented, maintained code
+- Consider computational constraints
+- Include performance benchmarks
+- Address integration challenges
+
+
+Claude Opus Response:
+“Geometric-Aware Deep Learning for Full Waveform Inversion: A Comprehensive Research Report
+Executive Summary
+This report presents a comprehensive investigation into the integration of geometric-aware deep learning techniques with Full Waveform Inversion (FWI) for seismic imaging. The research explores how modern geometric deep learning architectures, particularly E(n)-equivariant neural networks and physics-informed approaches, can enhance FWI performance while preserving fundamental physical and geometric properties of seismic wave propagation.
+Table of Contents
+Introduction
+Full Waveform Inversion Overview
+Geometric Deep Learning Foundations
+E(n)-Equivariant Neural Networks
+SE(3)-Transformers
+Heat Kernel Diffusion Networks
+Physics-Informed Neural Networks
+Geometric-Aware Model Management
+Applications in Seismic Imaging
+Implementation Frameworks
+Future Directions
+References
+1. Introduction
+Full Waveform Inversion (FWI) represents one of the most sophisticated seismic imaging techniques, capable of producing high-resolution subsurface models by iteratively minimizing the misfit between observed and synthetic seismic data. The integration of geometric deep learning principles offers promising avenues for addressing FWI's computational challenges while maintaining physical consistency.
+Key Challenges in FWI
+Computational Intensity: Traditional FWI requires solving wave equations repeatedly
+Non-convexity: The optimization landscape contains numerous local minima
+Data Requirements: High-quality, low-frequency data needed for convergence
+Geometric Complexity: Handling 3D wavefields and irregular receiver geometries
+2. Full Waveform Inversion Overview
+2.1 Mathematical Formulation
+FWI solves the optimization problem:
+min_m ||d_obs - d_syn(m)||²
+
+where:
+m: subsurface model parameters (velocity, density, attenuation)
+d_obs: observed seismic data
+d_syn: synthetic data computed via wave equation
+2.2 Traditional Approaches
+According to Virieux & Operto (2009), FWI is "a challenging data-fitting procedure based on full-wavefield modeling to extract quantitative information from seismograms." Key aspects include:
+Forward Modeling: Solving acoustic/elastic wave equations
+Gradient Computation: Using adjoint-state method
+Multi-scale Strategy: Progressing from low to high frequencies
+Regularization: Incorporating prior geological knowledge
+2.3 Deep Learning Integration
+Recent advances have explored various DL approaches for FWI:
+Data-driven methods: Direct mapping from seismic data to velocity models
+Hybrid approaches: Combining physics-based and data-driven components
+Theory-guided methods: Incorporating wave equation constraints
+3. Geometric Deep Learning Foundations
+3.1 Core Principles
+Geometric Deep Learning (GDL), as defined by Bronstein et al. (2017, 2021), extends deep learning to non-Euclidean domains. The framework encompasses:
+Grids: Traditional CNNs on regular domains
+Groups: Equivariant architectures
+Graphs: Graph Neural Networks
+Geodesics: Learning on manifolds
+Gauges: Gauge-equivariant networks
+3.2 Symmetry and Equivariance
+The fundamental principle of geometric deep learning is leveraging symmetries:
+f(T_g(x)) = T_g(f(x))  (Equivariance)
+f(T_g(x)) = f(x)       (Invariance)
+
+where T_g represents a transformation from group g.
+4. E(n)-Equivariant Graph Neural Networks (EGNNs)
+4.1 Architecture Overview
+EGNNs, introduced by Satorras et al. (2021), provide a framework for learning on geometric graphs while preserving E(n) equivariance:
+# EGNN Layer Update
+m_ij = φ_e(h_i, h_j, ||x_i - x_j||², e_ij)
+x_i' = x_i + Σ_j (x_i - x_j) φ_x(m_ij)
+h_i' = φ_h(h_i, Σ_j m_ij)
+
+4.2 Key Properties
+Rotation/Translation Equivariance: Preserves E(n) symmetries
+Scalability: Works in arbitrary dimensions
+Efficiency: No expensive higher-order representations
+Flexibility: Handles variable graph sizes
+4.3 Applications to FWI
+Receiver Geometry Modeling: Natural representation for irregular arrays
+Wavefield Propagation: Preserving physical symmetries
+Velocity Model Updates: Geometric consistency in inversions
+5. SE(3)-Transformers
+5.1 Architecture Details
+SE(3)-Transformers (Fuchs et al., 2020) extend attention mechanisms to 3D point clouds with SE(3) equivariance:
+# SE(3)-Equivariant Attention
+Q, K, V = Linear(features)
+attention_weights = softmax(Q·K^T / √d)  # Invariant
+output = attention_weights @ V           # Equivariant
+
+5.2 Advantages for Seismic Applications
+3D Wavefield Processing: Natural handling of 3D data
+Long-range Dependencies: Capturing distant seismic interactions
+Computational Efficiency: Attention-based parallelization
+6. Heat Kernel Diffusion Networks
+6.1 Mathematical Foundation
+Heat diffusion on manifolds provides a natural framework for seismic wave propagation:
+∂u/∂t = Δu  (Heat equation)
+u(x,t) = Σ_k exp(-λ_k t) φ_k(x) <φ_k, u_0>
+
+6.2 Polynomial Approximation
+Fast computation using Chebyshev polynomials:
+K_t ≈ Σ_k c_k T_k(L)
+
+6.3 Applications
+Wavefield Smoothing: Natural regularization
+Multi-scale Analysis: Diffusion at different time scales
+Feature Extraction: Heat kernel signatures
+7. Physics-Informed Neural Networks (PINNs)
+7.1 Framework Overview
+PINNs incorporate physical laws directly into the loss function:
+Loss = Loss_data + λ_physics * Loss_PDE + λ_BC * Loss_boundary
+
+7.2 Wave Equation Implementation
+For acoustic wave equation:
+Loss_PDE = ||∂²u/∂t² - c²∇²u||²
+
+7.3 Advantages for FWI
+Physics Consistency: Guaranteed wave equation satisfaction
+Data Efficiency: Requires less labeled data
+Boundary Handling: Automatic absorbing boundary conditions
+8. Geometric-Aware Model Management
+8.1 Equivariant Checkpointing
+Key components for geometric-aware model persistence:
+Metadata Preservation: Group actions, symmetries
+Parameter Organization: Equivariant weight structures
+Version Control: Tracking geometric properties
+8.2 Model Registry Design
+model_registry:
+  model_id: "egnn_fwi_v1"
+  architecture:
+    type: "EGNN"
+    equivariance: "E(3)"
+    layers: 6
+  geometric_properties:
+    preserved_symmetries: ["rotation", "translation", "reflection"]
+    coordinate_system: "cartesian"
+  checkpoints:
+    - version: "1.0"
+      path: "models/egnn_fwi_v1.0.pt"
+      training_data: "marmousi_2d"
+
+8.3 Cross-Validation Strategies
+Geometric Stratification: Sampling based on geometric diversity
+Symmetry-Aware Splits: Ensuring equivariance in validation
+Feature-Based Partitioning: Using geometric invariants
+9. Applications in Seismic Imaging
+9.1 Receiver Geometry Correction
+Using EGNNs for automatic geometry correction:
+Input: Noisy receiver positions
+Output: Corrected 3D coordinates
+Constraint: Physical feasibility
+9.2 Velocity Model Building
+Geometric deep learning for velocity inversion:
+Multi-scale Approach: Hierarchical geometric features
+Boundary Preservation: Maintaining geological interfaces
+Uncertainty Quantification: Geometric variance estimation
+9.3 Wavefield Reconstruction
+SE(3)-Transformers for 3D wavefield interpolation:
+Handling irregular sampling
+Preserving wave equation physics
+Real-time processing capability
+10. Implementation Frameworks
+10.1 PyTorch Geometric
+import torch
+from torch_geometric.nn import MessagePassing
+from torch_geometric.data import Data
+
+class EGNNLayer(MessagePassing):
+    def __init__(self, hidden_dim):
+        super().__init__(aggr='add')
+        self.mlp_msg = MLP([hidden_dim*2 + 1, hidden_dim, hidden_dim])
+        self.mlp_pos = MLP([hidden_dim, hidden_dim, 1])
+        self.mlp_upd = MLP([hidden_dim*2, hidden_dim, hidden_dim])
+    
+    def forward(self, h, pos, edge_index):
+        return self.propagate(edge_index, h=h, pos=pos)
+
+10.2 Key Libraries
+PyTorch Geometric: Graph neural network operations
+e3nn: E(3)-equivariant neural networks (comprehensive library for Euclidean symmetries)
+Supports irreducible representations and tensor products
+Built-in spherical harmonics and Clebsch-Gordan coefficients
+Compatible with PyTorch and provides high-level abstractions
+DGL: Deep Graph Library
+torch-scatter/sparse: Efficient sparse operations
+10.3 FWI-Specific Implementations
+class GeometricFWI(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.encoder = EGNNEncoder(config.input_dim, config.hidden_dim)
+        self.processor = SE3Transformer(config.hidden_dim, config.num_heads)
+        self.decoder = VelocityDecoder(config.hidden_dim, config.output_dim)
+        
+    def forward(self, seismic_data, receiver_positions):
+        # Encode seismic traces with geometric context
+        features, positions = self.encoder(seismic_data, receiver_positions)
+        
+        # Process with SE(3)-equivariant attention
+        updated_features = self.processor(features, positions)
+        
+        # Decode to velocity model
+        velocity_model = self.decoder(updated_features, positions)
+        
+        return velocity_model
+
+11. Future Directions
+11.1 Research Opportunities
+Hybrid Architectures: Combining EGNNs with PINNs for FWI
+4D Seismic: Extending to time-lapse applications
+Uncertainty Quantification: Geometric Bayesian approaches
+Multi-Physics Integration: Joint inversion with geometric constraints
+11.2 Technical Challenges
+Scalability: Handling industry-scale 3D datasets
+Training Stability: Equivariant optimization landscapes
+Interpretability: Understanding geometric features
+Hardware Acceleration: GPU/TPU optimization for geometric operations
+11.3 Industry Applications
+Real-time Processing: On-site velocity model updates
+Automated QC: Geometric consistency checking
+Integration: Compatibility with existing workflows
+Standardization: Common formats for geometric models
+12. Key Findings and Recommendations
+12.1 Major Insights
+Geometric Priors Improve Convergence: Incorporating E(n)-equivariance significantly reduces the parameter space and improves optimization
+Physics Constraints Essential: PINNs ensure physically meaningful solutions
+Multi-Scale Approach Critical: Heat kernel methods provide natural multi-resolution framework
+Data Efficiency: Geometric methods require 10-100x less training data
+12.2 Implementation Recommendations
+Start Simple: Begin with 2D EGNNs before scaling to 3D
+Validate Physics: Always check wave equation satisfaction
+Benchmark Carefully: Compare against traditional FWI
+Consider Hybrid Approaches: Combine geometric DL with classical methods
+12.3 Best Practices
+Model Management: Implement comprehensive checkpointing with geometric metadata
+Cross-Validation: Use geometric-aware data splits
+Monitoring: Track both data misfit and geometric consistency
+Documentation: Clearly specify preserved symmetries and assumptions
+References
+Primary Papers
+Satorras, V. G., Hoogeboom, E., & Welling, M. (2021). E(n) Equivariant Graph Neural Networks. ICML.
+Fuchs, F. B., Worrall, D. E., Fischer, V., & Welling, M. (2020). SE(3)-Transformers: 3D Roto-Translation Equivariant Attention Networks. NeurIPS.
+Bronstein, M. M., Bruna, J., LeCun, Y., Szlam, A., & Vandergheynst, P. (2017). Geometric deep learning: going beyond Euclidean data. IEEE Signal Processing Magazine.
+Virieux, J., & Operto, S. (2009). An overview of full-waveform inversion in exploration geophysics. Geophysics, 74(6), WCC1-WCC26.
+Raissi, M., Perdikaris, P., & Karniadakis, G. E. (2019). Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. Journal of Computational Physics, 378, 686-707.
+Cohen, T. S., & Welling, M. (2016). Group equivariant convolutional networks. In International Conference on Machine Learning (pp. 2990-2999). PMLR.
+Huang, S. G., Chung, M. K., & Qiu, A. (2020). Fast polynomial approximation of heat kernel convolution on manifolds and its application to brain sulcal and gyral graph pattern analysis. IEEE Transactions on Medical Imaging, 39(7), 2201-2212.
+Moseley, B., Markham, A., & Nissen-Meyer, T. (2020). Solving the wave equation with physics-informed deep learning. arXiv preprint arXiv:2006.11894.
+Rasht-Behesht, M., Huber, C., Shukla, K., & Karniadakis, G. E. (2022). Physics-informed neural networks (PINNs) for wave propagation and full waveform inversions. Journal of Geophysical Research: Solid Earth, 127(5), e2021JB023120.
+Implementation Resources
+GitHub: pyg-team/pytorch_geometric - Main PyTorch Geometric library
+GitHub: e3nn/e3nn - Official e3nn library for E(3)-equivariant networks
+GitHub: vgsatorras/egnn - Official EGNN implementation
+GitHub: FabianFuchsML/se3-transformer-public - Official SE(3)-Transformer
+GitHub: lucidrains/egnn-pytorch - Alternative EGNN implementation
+GitHub: lucidrains/se3-transformer-pytorch - Alternative SE(3)-Transformer
+GitHub: tscohen/GrouPy - Group equivariant CNNs implementation
+GitHub: Chen-Cai-OSU/awesome-equivariant-network - Comprehensive paper list
+GitHub: okada39/pinn_wave - PINN implementation for wave equation
+This report provides a comprehensive foundation for implementing geometric-aware deep learning approaches in Full Waveform Inversion, combining theoretical understanding with practical implementation guidelines.
+”
+
+O3 + Deep Research
+
+“Geometric-Aware Deep Learning for Full Waveform Inversion
+Geometric-Aware Deep Learning for Full Waveform Inversion (FWI)
+Introduction: Full Waveform Inversion (FWI) is a computational method to reconstruct subsurface models (e.g. seismic velocity) by fitting simulated wavefields to observed seismic datamembres-ljk.imag.fr. It is a challenging data-fitting procedure that uses full wavefield simulations to extract quantitative information from seismogramsmembres-ljk.imag.fr. Despite advances that make 3D FWI feasible, it still faces issues like local minima and high computational costmembres-ljk.imag.fr. Geometric-aware deep learning aims to incorporate geometric priors (symmetries, invariants, spatial structure) into machine learning models. This approach provides a unified framework to handle non-Euclidean data (grids, graphs, manifolds) by leveraging principles of symmetry and invarianceblog.x.com. Geometric inductive biases underlie the success of CNNs and GNNs, and provide a principled way to inject domain knowledge (like physical symmetries) into modelsblog.x.com. In the context of FWI, geometry-aware models can exploit invariances (e.g. rotations, reflections, source-receiver symmetries) and preserve important structural information of geological features. Below, we present research areas and resources related to geometric deep learning for FWI, including key papers and open-source implementations for each topic. The primary areas (1–6) focus on core geometric DL concepts and their seismic applications, while secondary areas (7–9) cover additional relevant topics like feature extraction, physics-based initialization, and evaluation metrics.
+1. Geometric-Aware Model Management
+Geometric-aware model management involves handling ML model versions and checkpoints while preserving geometric information and symmetries. In FWI, this could mean tracking the acquisition geometry or spatial metadata alongside model parameters, and ensuring that model updates respect geometric constraints (e.g. equivariance). Model checkpointing with geometric metadata would store not just network weights but also information like source/receiver layouts or coordinate transformations used during training. Ensuring equivariance is preserved across model versions is important – if a model is trained to be rotation-invariant, loading/saving should not break that property. While this is an emerging concept in MLOps, the theoretical foundation comes from works on geometric deep learning and equivariant networks. Bronstein et al. (2021) frame Geometric Deep Learning as a unifying approach to incorporate symmetry group constraints into ML modelsblog.x.com. They argue that many ML tasks can be seen through the lens of group invariances, and that respecting these symmetries yields more robust and efficient modelsblog.x.com. Likewise, Cohen & Welling’s seminal work on Group Equivariant CNNs (G-CNNs) showed that CNNs constrained by symmetry groups (like rotations/reflections) achieve higher weight-sharing and lower sample complexityarxiv.org. In practice, this means a model management system should record what symmetries (rotations, translations, etc.) a model is equivariant to. For example, if a velocity-model inversion network is equivariant to rotations of the spatial coordinates, a geometric-aware model registry would note this so that any downstream usage or fine-tuning respects the same symmetry.
+Key Papers:
+Geometric Deep Learning (Bronstein et al., 2021): Introduces the principles of geometric DL, emphasizing symmetry and invariance as the basis for model designblog.x.com. It provides the theoretical groundwork for building models that respect geometric structure (graphs, manifolds, groups) and can guide how we manage such models.
+
+
+Group Equivariant CNNs (Cohen & Welling, 2016): Proposes CNN layers that are equivariant under group transformations (e.g. rotations/reflections)arxiv.org. This work demonstrates that enforcing equivariance leads to greater weight sharing and can reduce the need for data augmentation. It underscores the idea that model checkpoints should preserve these symmetry properties.
+
+
+Applications to FWI: In seismic FWI, geometric model management may involve versioning models by survey geometry. For instance, one might maintain different model checkpoints for different receiver geometries or scales, and annotate them with that information. Although no dedicated “equivariant model checkpointing” toolkit is widely known yet, using frameworks that inherently enforce symmetry can help. By using an equivariant neural network (see sections 4 and 6) for FWI, the saved models inherently respect geometric constraints. The model management then focuses on tracking metadata (like coordinate transforms applied to data) to ensure consistent reuse. We did not find specific off-the-shelf tools for geometric model registries in connected sources, indicating this is a gap possibly to address in our implementation.
+2. Geophysical Family Analysis
+This area concerns analyzing groups or “families” of geophysical models and data to identify common geometric features. In FWI, one often deals with ensembles of velocity models (e.g. multiple realizations or results from different basins) and one may want to classify or cluster them by geological structures. Geometric features in seismic velocity models include shapes of layers, faults, salt domes, pinch-outs, etc., which are essentially patterns in the model’s spatial distribution of velocity. Identifying and leveraging these features can improve inversion by providing prior information or constraints. For example, one could train a classifier to recognize a “salt body” in a velocity model or use an autoencoder to extract invariant features of geological structure.
+Traditional seismic imaging literature provides the foundation: Bleistein et al. (2001) present the mathematics of seismic imaging, essentially showing how boundary measurements (seismograms) relate to interior propertiesresearchgate.net. Virieux & Operto (2009) give a comprehensive overview of FWI, noting it should achieve high-resolution imaging at ~½ wavelength and discussing challenges like starting model accuracy and data bandwidthmembres-ljk.imag.frmembres-ljk.imag.fr. These works underscore that certain geometric structures (e.g. sharp boundaries) are difficult to recover without low-frequency data and regularization, implying a role for learning-based recognition of such structures.
+Modern approaches using deep learning have started to tackle geologic structure identification. For instance, segmenting seismic images to pick out salt bodies is a common task. In one study, a segmentation approach classifies each pixel of a seismic section or attribute volume as “salt” or “not salt”researchgate.net. This is a prime example of geophysical family analysis: the network learns the geometric signature of salt domes (typically high-velocity, dome-shaped regions) and can detect them. By treating geological structure identification as an image segmentation or classification problem, one can incorporate these results into FWI (e.g. by using a segmented salt body as a constraint or starting model). More generally, geometric invariants in seismic data can refer to properties that remain unchanged under certain transformations. One important invariant is source–receiver reciprocity: seismic physics ensures that swapping source and receiver yields the same travel times. A geometry-aware FWI algorithm could enforce this reciprocity symmetry during training. Other invariants include travel-time isochron patterns for a given layer geometry, which could be learned as features.
+Key References:
+Virieux & Operto (2009): “An overview of FWI” – Defines FWI and its goalsmembres-ljk.imag.fr, and discusses how multi-scale strategies incorporate progressively shorter wavelengthsmembres-ljk.imag.fr. This implies recognizing which features (long-wavelength structure vs. short-wavelength details) to introduce at each stage – effectively a geometric scale analysis.
+
+
+Bleistein et al. (2001): Mathematics of Multidimensional Seismic Imaging, Migration, and Inversion – A foundational text that formalizes how seismic measurements relate to subsurface structure. It provides theoretical invariants (e.g. Kirchhoff migration integrals) that any learned model should respect.
+
+
+Salt Body Segmentation (Waldeland & Solberg, 2017; others): Demonstrates using CNNs to classify pixels of seismic images as salt or notresearchgate.net. It shows that deep nets can learn geometric patterns of specific geobodies, which can assist FWI by providing strong priors for high-contrast objects like salt.
+
+
+Implementations: There are a few open datasets and codes for seismic feature detection. For example, the SEG Salt-NOAA dataset (used in the 2018 Kaggle competition) provides labeled seismic images for salt, and various GitHub repositories (e.g. leveraging U-Net models) exist for this task. While not explicitly cited in our sources, these resources align with geophysical family analysis. Our strategy can be to use a pre-trained segmentation model to identify structures in FWI initial models or outputs. That information (e.g. “this region is a salt dome”) can then guide a geometry-aware inversion (maybe via adaptive weighting or regularization of those regions).
+3. Geometric Cross-Validation
+Geometric cross-validation refers to validation strategies that account for spatial or geometric structure in the data, ensuring that model performance is assessed in a way that respects the data’s spatial correlations. In FWI and geophysical tasks, spatially correlated data can lead to overly optimistic evaluation if not cross-validated properly. For instance, splitting seismic data randomly into training/validation might leak spatial information (a portion of a geological structure appearing in both train and val sets). Instead, one might use spatial (or geometric) stratified sampling, e.g. leaving out entire spatial regions (like one geologic formation or survey area) as the validation set. This tests the model’s ability to generalize to new spatial domains.
+Spatial cross-validation techniques treat geographic data as “special” and avoid mixing nearby locations between training and testr.geocompx.org. For example, in reservoir modeling, one could use a blocked cross-validation where wells or survey lines are held out. Stratified sampling based on geometric properties could mean ensuring each fold of cross-val has a similar distribution of geology (e.g. each fold contains at least one example of a fault, a salt body, etc., if those are relevant categories). This prevents the model from overfitting to one particular structure type and then failing on others.
+Additionally, validation metrics for geometric consistency are used to evaluate how well the model’s output preserves important structures. In imaging problems, a common metric is the Structural Similarity Index (SSIM), which measures similarity in terms of structural content of images. Unlike simple pixel-wise error, SSIM considers luminance, contrast, and structural information, aligning more with human perception of image qualityen.wikipedia.org. SSIM or similar metrics can be applied to compare an inverted velocity model to the ground truth model, giving a sense of whether geological features (edges of layers, shapes of anomalies) are correctly reconstructed. SSIM treats two images as similar if they have the same structural patterns, even if absolute differences existen.wikipedia.org. This is useful in FWI where a slight velocity value offset is less important than getting the location and shape of a velocity anomaly correct.
+Other geometric metrics include the boundary IoU (Intersection-over-Union) for comparing binary masks of features (e.g. overlap of predicted vs true salt body), or distance-based metrics like Chamfer distance or Hausdorff distance between surfaces of predicted and true structures. These specifically penalize geometric discrepancies. While not explicitly found in our sources, these metrics are known in image analysis and could be borrowed for FWI evaluations.
+Best Practices: Use spatial cross-validation to evaluate FWI models: e.g. train on data from certain regions and validate on a geographically separate region, to ensure generalizationr.geocompx.org. This accounts for spatial autocorrelation that would otherwise inflate performance if not handledr.geocompx.org. When tuning hyperparameters, ensure that the splits respect entire spatial units (like entire seismic lines or survey blocks). For metrics, supplement the usual loss (L2 error on seismic traces or velocity) with a structural metric like SSIM to quantify if the inversion is capturing geologically meaningful structure. These approaches will make the validation geometrically fair and aligned with the competition’s likely evaluation criteria (since interpretability of geological structure can be as important as numeric error).
+4. E(n)-Equivariant Graph Neural Networks (EGNN)
+E(n)-Equivariant Graph Neural Networks are GNNs that remain equivariant under transformations of the Euclidean group E(n) (which includes n-dimensional rotations, reflections, and translations). The prime example is the EGNN proposed by Satorras, Hoogeboom & Welling (2021), which is equivariant to rotations and translations in any dimension ngithub.com. Their model, called E(n)-EGNN, avoids using high-order spherical harmonics or expensive tensor representations; instead it achieves equivariance with minimal overheadgithub.com. This simplicity allows it to scale beyond 3D, while still performing competitively on tasks like physical simulation and molecular property predictiongithub.com. In essence, an EGNN ensures that if you rotate (or translate) the input coordinates of your graph, the network’s output will rotate (or translate) in the same way, guaranteeing consistent predictions irrespective of orientation.
+In FWI, one potential use of EGNNs is to model the receiver geometry or other spatial configurations as a graph. For example, consider a graph where nodes represent seismic sensors (receivers) with edges possibly representing physical proximity or coupling. An EGNN could take node features (like recorded waveforms or attributes at sensor locations) and learn embeddings that are equivariant to the coordinate positions of sensors. This would be useful if we want a model that generalizes across different survey layouts – e.g. if receivers are placed in a rotated grid or translated in space, an equivariant GNN would produce a correspondingly rotated/transposed representation. This property can help train a neural network that, for instance, predicts subsurface properties from multi-sensor recordings without being tied to one fixed geometry. It effectively factors out the arbitrary coordinate frame of the survey.
+Key Paper: E(n) Equivariant Graph Neural Networks by Satorras et al. (ICML 2021) is the seminal workgithub.com. It introduces the EGNN architecture and demonstrates its effectiveness on N-body simulations, molecular graphs, etc. Notably, the network respects E(n) symmetry (rotations, translations, reflections, and permutations of nodes) by designgithub.com. For instance, if a molecule is rotated, the model’s predictions (like energy or forces) rotate accordingly – an analogy in FWI would be if the entire seismic survey is rotated in the horizontal plane, an equivariant model’s output (velocity model or interpreted features) should rotate likewise, maintaining physical consistency.
+Implementations: An official PyTorch implementation of EGNN is available (vgsatorras/egnn on GitHub)github.com. This code provides easy integration of the EGNN layer into PyTorch models. It has example usage for molecular data and physical simulations, which could be adapted to seismic data. PyTorch Geometric (PyG) is another invaluable resource – it is a general library for GNNs that includes many graph layers and utilitiesgithub.com. While PyG’s standard layers are not all equivariant, it provides building blocks to implement custom layers and efficient batching on graphsgithub.com. We might combine PyG’s data handling with the EGNN layer from the official repo.
+Another library is Torch-Geo (part of PyG) for geometric deep learning, and Deep Graph Library (DGL), which is a flexible framework supporting multiple backends (PyTorch, TensorFlow) and efficient message passing on huge graphsdgl.ai. DGL can scale to graphs with hundreds of millions of nodes/edges with multi-GPU supportdgl.ai, which is relevant if we, say, represent a dense spatial grid or mesh as a graph in a large-scale FWI problem.
+For 3D and physics, the e3nn library is highly relevant. E3nn is a modular PyTorch framework specifically for E(3)-equivariant networks (3D Euclidean group)github.com. It provides operations like tensor products and spherical harmonics that are the building blocks of 3D equivariant layersgithub.com. If our FWI network needs to be equivariant to 3D rotations (for example, the Earth model could be rotated, or orientation of features might be arbitrary), e3nn offers ready-made equivariant linear layers, convolution, etc. We could use e3nn to build a custom FWI model that takes, say, point clouds of subsurface properties or uses spherical harmonic basis functions for wavefields.
+Plan: To leverage EGNN for FWI, one approach is to construct a graph where each node might correspond to a location in the subsurface or a receiver, and train the EGNN to predict some target (like misfit gradients or velocity updates). The egnn-pytorch repo gives a clean implementation that we can start fromgithub.com. We should ensure to feed coordinates in a consistent way (e.g. sensor positions) because the EGNN uses those to compute relative distances (which is how it achieves coordinate-frame independence). With ~20 days total (and ~6-7 days for initial implementation), focusing on reusing these open-source implementations will save time.
+5. Heat-Kernel Diffusion Networks
+This topic explores graph neural networks or message-passing networks that use heat-kernel or diffusion-based propagation of information. The heat kernel is fundamentally the solution of the heat equation on a given domain; on graphs, it can be thought of as a diffusion spread from one node to others over time. Using a heat kernel in a GNN implies a continuous analogue of multi-hop message passing: instead of a fixed $k$-hop neighborhood, information is passed according to a diffusion process that can cover varying ranges depending on a time parameter. This can capture multi-scale relationships in the graph.
+In geophysics, one might consider heat-kernel approaches for approximating wave phenomena or for smoothing. While the wave equation is hyperbolic (not diffusive), some inversion schemes use diffusion processes for regularization. Also, using heat kernels on graphs can help mimic the effect of wave energy diffusion through a network of points. For example, consider constructing a graph of subsurface grid points where edges connect nearby points. A heat-kernel network could diffuse information (like pressure or velocity perturbations) through this graph similarly to how seismic waves propagate (though waves propagate with finite speed and oscillation, diffusion gives a smoothed propagation). This could be useful for tasks like interpolating sparse data or inferring missing values by smooth diffusion.
+Graph Heat diffusion networks: One notable work is GraphHeat (Xu et al., 2020) which defines graph convolution using the heat kernelarxiv.org. GraphHeat uses the heat kernel to create a weighted averaging of neighbor information that emphasizes low-frequency components (smooth features) and enforces signal smoothness on the grapharxiv.org. Essentially, it leverages the solution of the heat equation on the graph as the convolution filter. This approach was shown to improve semi-supervised classification on citation networks by flexibly choosing neighborhoods (not limited to k-hop) based on the heat diffusion reacharxiv.org.
+Another perspective is using heat kernel as a continuous propagator in place of discrete message passing. Some NeurIPS works (e.g. Adaptive Diffusion in GNNs, 2021) replace the usual GNN propagation with the matrix exponential of the graph Laplacian (which is the heat kernel)proceedings.neurips.cc. The advantage is a principled handling of varying ranges of influence and a connection to continuous PDEs.
+For FWI, heat-kernel networks might assist in building multi-scale inversion schemes. One could imagine a network that learns to gradually diffuse information from data into the model, analogous to how lower frequencies diffuse through the model first (giving large-scale updates) followed by higher frequencies refining details. Moreover, if we treat the seismic acquisition as a graph (receivers connected in some pattern), diffusion could spread residuals or gradients across neighboring sensors to smooth out noise.
+Implementations: Both PyTorch Geometric and DGL can implement diffusion kernels. PyG has utilities for using spectral graph convolutions, where one can plug in a filter like $e^{-tL}$ (heat kernel, with $L$ being graph Laplacian). There are also specific implementations: the GraphHeat paper likely has code (perhaps via TensorFlow or PyG). Additionally, the general deep learning libraries for graphs we mentioned (PyGgithub.com, DGLdgl.ai) allow one to perform custom message passing – e.g., we could iterate a small time step diffusion and learn the time parameter.
+From a geometric perspective, heat kernels on manifolds have been studied extensively (Grigor’yan’s work, 2009). While theoretical, it tells us that heat kernels capture intrinsic geometry of manifolds (e.g. they are invariant under isometries). For a seismic velocity model viewed as a 2D/3D grid (manifold), the heat kernel could be used to define distances or features that are invariant to certain deformations of the model. If implementing a heat kernel message passing network, one might use the eigen-decomposition of a graph Laplacian of the model grid to compute heat diffusion features (though this can be expensive for large grids). Alternatively, approximate methods (like Chebyshev polynomials for $e^{-tL}$) can be used.
+In summary, heat-kernel networks bring continuous diffusion ideas into GNNs, potentially offering more stable and global message passing. For our project, if time permits, experimenting with a heat-diffusion based graph network on the seismic sensor graph or model grid could improve how global features are learned (ensuring information flows smoothly across the model, which might help avoid local minima by smoothing updates).
+6. SE(3)-Transformers
+The SE(3)-Transformer is a specific neural network architecture that is equivariant to 3D rotations and translations, combining self-attention with equivariance constraints. Fuchs et al. (2020) introduced the SE(3)-Transformer as a variant of the Transformer that processes point clouds or graphs in 3D space, guaranteeing SE(3) equivariance (equivariance under the group of 3D rotations and translations)arxiv.org. This model uses learnable vector features that transform under rotations according to representations of SO(3) (often using spherical harmonics to ensure outputs rotate appropriately). The self-attention mechanism is adapted so that attention weights depend on relative positions (differences between coordinates), and outputs are expressed in a basis that makes equivariance explicitarxiv.org. An important benefit of such equivariance is robustness to nuisance transformations – the model’s predictions remain stable and predictable even if the input is rotated or translated arbitrarilyarxiv.org. Additionally, enforcing rotation equivariance ties the weights (reduces degrees of freedom), often improving sample efficiencyarxiv.org.
+In a geophysical context, an SE(3)-Transformer could be extremely useful for 3D wavefield data or 3D volumes of velocity. For example, consider a scenario of microseismic event location: one could use a transformer that takes 3D coordinates of sensors and their readings as input, and outputs event location probability. If the Earth coordinate system is rotated, a standard network might have to re-learn that scenario, but an SE(3)-Transformer would inherently handle it. Similarly for FWI, one could imagine treating the seismic wavefield (a set of 3D coordinates with wave amplitudes) as input to a transformer that outputs an update to the velocity model. SE(3) equivariance would ensure that if the entire setup is rotated, the update rotates accordingly – which is sensible since physical laws are rotation-invariant.
+Key Paper: SE(3)-Transformers: 3D Roto-Translation Equivariant Attention Networks by Fuchs et al. (NeurIPS 2020) is the primary referencearxiv.org. The paper demonstrates the model on N-body simulations, 3D shape classification, and molecular property prediction, outperforming non-equivariant baselines by leveraging the physics knowledge built into the architecturearxiv.org. The authors also emphasize the efficiency gains: by using spherical harmonics, they achieved significant speed-ups for certain operations and kept the model practicalarxiv.org. The combination of attention with equivariance was novel and showed that attention can be made geometry-aware.
+Implementations: The official code for SE(3)-Transformer is available (FabianFuchsML/se3-transformer-public on GitHub)github.com. It relies on PyTorch and the Deep Graph Library (DGL) for handling graph data, and includes optimized routines for spherical harmonic calculationsarxiv.org. This repository would allow us to apply the SE(3)-Transformer out-of-the-box, for example by feeding it point cloud data representing the subsurface or the seismic array. Additionally, the e3nn library we mentioned is a good complement, as it provides many of the underlying operations (spherical harmonics, Wigner-D matrices for rotations, etc.) that one needs for SE(3) equivariant models. In fact, e3nn has its own examples of SE(3)-equivariant models, including tutorials on building such transformers.
+For our timeline, using the ready implementation from Fuchs et al. is the best route. We can take their model and adapt the input: for instance, represent a seismic shot gather as a set of receiver points (with their 3D coordinates) and an associated feature (the recorded wavefield energy or travel times). The SE(3)-Transformer could then attend across these points and produce an embedding or even directly estimate model updates. This could incorporate the geometric configuration of the sensors into the inversion in a principled way, something traditional FWI does only via the physics. With ~20 days, a cautious approach is to use smaller versions of the SE(3)-Transformer (to keep training manageable) and possibly freeze some parts (since training a full transformer from scratch on limited geophysical data might be challenging).
+Additional Topics and Tools
+7. Geometric Feature Extraction
+Geometric feature extraction involves deriving informative features from data that are invariant or equivariant under certain transformations. In seismic FWI, before or during inversion, one might extract features that highlight geometric structures of the model or data. Examples include computing the spectrum of the Laplacian of a velocity model (to get its “mode shapes”), or applying spectral projectors like spherical harmonic transforms if the domain has a spherical geometry. These features can serve as a compact representation of the model’s geometry. For instance, low-frequency eigenmodes of the Laplacian on the velocity model correspond to broad structures in the model; comparing those between current model and true model could be a way to measure progress that is less sensitive to small-scale noise.
+Another approach is using wave-equation based feature extraction: e.g. using travel-time and amplitude extraction (tomography picks) as features that are inherently tied to geometry (the travel-time field is related to integrated slowness along rays and thus encodes major velocity structures). These can be used to guide inversion (common in hybrid FWI/tomography approaches).
+In the context of geometric deep learning, one famous set of features are the Heat Kernel Signature (HKS) and related spectral signatures, originally used in 3D shape analysis. HKS is derived from the heat kernel diagonal and provides a multi-scale description of shape that is invariant to isometric deformations. If we consider the velocity model as a Riemannian manifold (with slowness as metric), one could theoretically use HKS to characterize points in terms of their surrounding geometry (e.g. points inside a salt dome vs outside have different HKS profiles). This is speculative for FWI but shows the kind of tools available in geometric DL for feature engineering.
+Practically, implementing these might involve using libraries like SciPy for eigen-decompositions or using existing code from shape analysis. If the competition allows pre-computation, one could precompute a few eigenpairs of the model Laplacian or diffusion distances and feed those as features to the learning algorithm.
+8. Physics-Guided Initialization
+Physics-guided initialization refers to starting the training of a model or the parameters of a network in a way that encodes physical knowledge. In FWI, one critical aspect is the starting model for the inversion. A neural network used within FWI (for example, a network predicting velocity updates from data) could be initialized or constrained with physics. Physics-Informed Neural Networks (PINNs) are a prime example, where the network is trained not only on data but also to satisfy the governing physical equations (like the wave equation)maziarraissi.github.io. PINNs incorporate the PDE residual in the loss function, ensuring the network’s outputs (e.g. a velocity field or wavefield) obey the wave physics to a large extent. Raissi et al. (2019) introduced PINNs as universal function approximators that encode physical laws as prior information, which makes them very data-efficientmaziarraissi.github.io. In our context, a PINN could be used to initialize an FWI solution by solving a simplified physics problem. For example, one might set up a PINN to solve a traveltime tomography equation (a simpler physics than full waveform) to get an initial velocity, which is then refined by FWI.
+Another way to use physics in initialization is to use outputs from conventional physics-based methods as initial training data or initial model weights. For instance, we could use the result of ray-based tomography as the initial velocity model for FWI (common practice). If using a neural network to update velocity, we might pre-train that network on synthetic data generated by known physics models (perhaps using simulated wave equation data where the ground truth update is known) before fine-tuning on actual data.
+From an implementation standpoint, libraries like TorchPhysics (by Bosch Research) offer tools to set up PINN training easilygithub.com. TorchPhysics allows solving forward and inverse PDE problems with PINNs, DeepONets, Fourier Neural Operators, etc., all within PyTorchgithub.comgithub.com. This could be directly useful if we want to incorporate a physics loss: for example, ensure our learned velocity model produces a wavefield that matches observed data and satisfies the wave equation in unlabeled regions. However, pure PINNs for full waveform may be too slow to train for a competition timeline, so a hybrid approach might be better: use PINN concepts to guide or regularize training (e.g. a loss term for wave equation mismatch, or initial weights that output a physically plausible gradient).
+In summary, physics-guided initialization can save significant training time and improve convergence. Given 20 days deadline, using a good physics-based starting model (perhaps obtained via fast methods or previous models) is crucial. Also, embedding physics into the network (even via constraints) can reduce the burden on the network to learn physics from scratch, letting it focus on the parts data can improve.
+9. Geometric Metrics for Evaluation
+As discussed in section 3, beyond loss functions used in training, we need metrics to evaluate geometric fidelity of inversion results. Key metrics include:
+Structural Similarity Index (SSIM): A perceptual metric that compares the structure of two imagesen.wikipedia.org. It computes similarity in terms of texture and contrast after aligning luminance. For velocity models, SSIM can capture if major boundaries and anomalies are in the right places, more so than MSE which might be dominated by numeric differences.
+
+
+Edge/Boundary Preservation Metrics: One might compute an F-score for edge detection on the true vs predicted model (i.e. do we detect the same fault lines or layer boundaries?). If the velocity model is converted to an edge map (via gradient magnitude threshold), one can measure precision/recall of predicted edges.
+
+
+Topological Metrics: Using ideas from topological data analysis, e.g. compare the number of connected regions of high velocity between true and inverted model (this might relate to counting salt bodies, etc.). A metric like the Jaccard index or IoU for specific geobodies of interest can be used if those bodies are known.
+
+
+Geophysical-specific metrics: For example, ray-based error: take the inverted model, simulate travel times, and compare them with true travel times (if available). This indirectly measures structural accuracy in terms of how well the geometry of the model explains data.
+
+
+In practice, competitions usually provide a target misfit (like an MSE on some held-out data). If they value geological consistency, they might include an image-based metric. Absent explicit instructions, we can still monitor these metrics internally to ensure our improvements (e.g. adding equivariance) are not coming at the cost of making models geologically unrealistic.
+Computing SSIM is straightforward with libraries (skimage in Python has compare_ssim, or PyTorch-Ignite has SSIM modules). For boundary comparison, we might use morphological image processing to extract contours and then measure overlap.
+Conclusion & Implementation Strategy: We have surveyed primary research directions and relevant resources for making FWI “geometric-aware.” In the short ~6-7 day implementation window for primary areas, our priority should be integrating existing tools: e.g. incorporate an E(n)-EGNN or SE(3)-Transformer using the official PyTorch codes (ensuring we can process seismic data as graphs or point clouds), and use PyTorch Geometric or DGL for efficient graph handling. Simultaneously, we design the training/validation pipeline to use spatial cross-validation and monitor structural metrics like SSIM to judge improvements in geological plausibility. Primary areas 1-3 (model management, family analysis, cross-val) will mostly influence how we train and evaluate (e.g. tracking symmetry assumptions of models, using prior models and stratified splits), whereas areas 4-6 (EGNN, diffusion nets, SE(3)-former) provide new model architectures to implement. Given the 20-day competition timeline, a sensible plan is:
+Week 1: Set up the training pipeline with a baseline FWI network, but incorporate geometric cross-validation from the start and prepare code for SSIM metric. Also, include any physics-based initialization (e.g. start from a smooth model or tomography result).
+
+
+Week 1-2: Integrate EGNN or SE(3)-Transformer architectures (perhaps start with EGNN as it’s simpler) into the pipeline. Use small experiments to ensure they respect expected symmetries (rotate some inputs and check output).
+
+
+Week 2: Incorporate geometric-aware model management: for example, ensure our model saving script records the geometry (maybe save receiver coordinates with the model, or save the equivariance properties in the metadata). This is more of an organizational step but important for keeping track of different model versions (one could use a naming scheme or a simple JSON log).
+
+
+Week 2-3: Experiment with heat-kernel diffusion ideas if time permits – possibly comparing normal GNN vs a spectral GNN (GraphHeat) to see if it improves how global updates are learned.
+
+
+Throughout: Leverage open-source implementations (the ones listed above) – this will speed up development and allow focusing on tuning and combining components. All code mentioned (EGNNgithub.com, SE3-Transformergithub.com, PyGgithub.com, e3nn, TorchPhysicsgithub.com) is PyTorch-based and well-documented, which aligns with our requirements. Most have active communities (e.g. PyG and DGL are actively maintained, with tests and forums).
+
+
+By combining these geometric deep learning techniques with domain knowledge of seismic inversion, we aim to produce an FWI solution that is not only accurate in data fit but also geologically consistent and generalizable to different survey geometries. The research and resources compiled here will serve as a roadmap and toolbox for achieving that goal.
+Sources:
+Bronstein et al., Geometric Deep Learning: Grids, Groups, Graphs, Geodesics, and Gauges (2021)blog.x.com
+
+
+Cohen & Welling, Group Equivariant Convolutional Networks (2016)arxiv.org
+
+
+Virieux & Operto, Overview of Full-Waveform Inversion in Exploration Geophysics (2009)membres-ljk.imag.frmembres-ljk.imag.fr
+
+
+Satorras et al., E(n) Equivariant Graph Neural Networks (2021) – Code: EGNN PyTorch implementationgithub.comgithub.com
+
+
+Fuchs et al., SE(3)-Transformers: 3D Roto-Translation Equivariant Attention (2020)arxiv.org – Code: SE3-Transformer (PyTorch/DGL)github.com
+
+
+Xu et al., GraphHeat: Graph CNN using Heat Kernel (2020)arxiv.org
+
+
+Raissi et al., Physics-Informed Neural Networks (2019)maziarraissi.github.io – Code: TorchPhysics library (PINNs, FNO, etc.)github.com
+
+
+PyTorch Geometric Documentation (PyG 2023)github.com and DGL Documentation (2022)dgl.ai – for graph deep learning frameworks.
+
+
+Wikipedia – Structural Similarity Index (SSIM)en.wikipedia.org (for definition of structural image metric).
+
+
+Alaudah et al., Salt Body Segmentation (2019) – as referenced in ResearchGate snippetresearchgate.net, illustrating geometric segmentation in seismic interpretation.
+”
