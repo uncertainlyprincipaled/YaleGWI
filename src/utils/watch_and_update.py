@@ -12,6 +12,15 @@ class SourceFileHandler(FileSystemEventHandler):
         self.update_script = update_script
         self.last_update = 0
         self.cooldown = 1  # seconds between updates
+        self.ensure_directories()
+
+    def ensure_directories(self):
+        """Ensure all required directories exist."""
+        for path in ['src', 'src/core', 'src/utils']:
+            init_dir = self.src_dir.parent / path
+            init_dir.mkdir(parents=True, exist_ok=True)
+            init_file = init_dir / '__init__.py'
+            init_file.touch(exist_ok=True)
 
     def on_modified(self, event):
         if event.is_directory:
@@ -40,6 +49,9 @@ class SourceFileHandler(FileSystemEventHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = f"{self.src_dir.parent}:{env.get('PYTHONPATH', '')}"
             
+            # Ensure we're in the project root directory
+            os.chdir(self.src_dir.parent)
+            
             result = subprocess.run([sys.executable, str(self.update_script)], 
                                  check=True, 
                                  capture_output=True, 
@@ -54,6 +66,8 @@ class SourceFileHandler(FileSystemEventHandler):
                 print("Output:", e.stdout)
             if e.stderr:
                 print("Errors:", e.stderr)
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             
         self.last_update = current_time
 

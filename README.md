@@ -86,6 +86,16 @@ This project supports the following environments:
 
 ## 3. Kaggle Instructions
 
+### Setting up AWS Credentials in Kaggle
+1. Go to your Kaggle account settings
+2. Click on "Add-ons" tab
+3. Click on "Secrets" in the left sidebar
+4. Add the following secrets:
+   - `aws_access_key_id`: Your AWS access key ID
+   - `aws_secret_access_key`: Your AWS secret access key
+   - `aws_region`: Your AWS region (optional, defaults to 'us-east-1')
+   - `aws_s3_bucket`: Your S3 bucket name for storing preprocessed data
+
 ### Quick Start
 1. Create a new notebook in the [Waveform Inversion competition](https://www.kaggle.com/competitions/waveform-inversion)
 2. **Important**: Add the required datasets to your notebook first:
@@ -103,10 +113,10 @@ This project supports the following environments:
 ```python
 !pip install -r requirements.txt
 ```
-5. Run preprocessing:
+5. Run preprocessing with S3 offloading:
 ```python
 from src.core.preprocess import main as preprocess_main
-preprocess_main()
+preprocess_main()  # Will use S3 bucket from Kaggle secrets
 ```
 6. Start training:
 ```python
@@ -138,15 +148,44 @@ The project uses a notebook update script (`update_kaggle_notebook.py`) that aut
 ```python
 !pip install -r requirements.txt
 ```
-3. Run preprocessing:
+3. Run preprocessing with S3 offloading:
 ```python
+# In Colab, you can run preprocessing directly
 from src.core.preprocess import main as preprocess_main
-preprocess_main()
+preprocess_main()  # Will use S3 bucket from environment variables or config
+
+# Or specify the bucket explicitly
+preprocess_main(s3_bucket='your-bucket-name')
 ```
-4. Start training:
+
+### Setting up AWS Credentials in Colab
+1. Set up environment variables in Colab:
 ```python
-from src.core.train import train
-train(fp16=True)
+import os
+os.environ['AWS_ACCESS_KEY_ID'] = 'your_access_key'
+os.environ['AWS_SECRET_ACCESS_KEY'] = 'your_secret_key'
+os.environ['AWS_REGION'] = 'your_region'  # optional
+os.environ['AWS_S3_BUCKET'] = 'your_bucket_name'
+```
+
+2. Or create a credentials file:
+```python
+import json
+import os
+
+# Create .env/aws directory
+os.makedirs('.env/aws', exist_ok=True)
+
+# Create credentials file
+credentials = {
+    "aws_access_key_id": "YOUR_ACCESS_KEY_ID",
+    "aws_secret_access_key": "YOUR_SECRET_ACCESS_KEY",
+    "region_name": "us-east-1",
+    "s3_bucket": "YOUR_BUCKET_NAME"
+}
+
+with open('.env/aws/credentials.json', 'w') as f:
+    json.dump(credentials, f)
 ```
 
 ### Data Management

@@ -153,9 +153,11 @@
 ## 3. Implementation Timeline (15 Days)
 
 ### Phase 1: Core Setup (Days 1-3)
+- Day 0: Preprocess data with downsampling using Nyquist sanity check and float16 into two datasets.
 - Day 1: Model registry and geometric-aware checkpoint management
 - Day 2: Family-specific data loaders with geometric features
 - Day 3: Cross-validation framework with geometric metrics
+- Day 
 
 ### Phase 2: Model Development (Days 4-6)
 - Day 4: EGNN implementation for receiver geometry
