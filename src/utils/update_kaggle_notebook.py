@@ -40,19 +40,18 @@ def update_kaggle_notebook():
     # Get the project root directory
     project_root = Path(__file__).parent.parent.parent
     
-    # Files to process in order
-    files = [
-        'config.py',  # Process config first to create base CFG
-        'setup.py',   # Then setup to configure environment
-        'data_manager.py',  # New unified data management interface
-        'eda.py', # EDA for families   
-        'model.py',   # Add model definitions and factory functions
-        'proj_mask.py',
-        'iunet.py',      # Add IU-Net for latent translation
-        'specproj_hybrid.py',  # Replace specproj_unet.py with hybrid version
-        'losses.py',
-        'train.py',
-        'infer.py'
+    # List of files to include in the notebook, in order of execution
+    FILES_TO_INCLUDE = [
+        'src/core/config.py',
+        'src/core/preprocess.py',  # Preprocessing with geometric validation
+        'src/core/registry.py',    # Model registry with geometric metadata
+        'src/core/checkpoint.py',  # Checkpoint management
+        'src/core/geometric_loader.py',  # Family-specific data loading
+        'src/core/geometric_cv.py',  # Cross-validation framework
+        'src/core/data_manager.py',
+        'src/core/model.py',
+        'src/core/train.py',
+        'src/core/inference.py'
     ]
     
     # Read all files
@@ -95,8 +94,8 @@ from src.core.config import CFG
     """, "imports"))
     
     # Process each file
-    for file in files:
-        file_path = project_root / 'src' / 'core' / file
+    for file in FILES_TO_INCLUDE:
+        file_path = project_root / file
         if not file_path.exists():
             print(f"Warning: {file} not found, skipping...")
             continue

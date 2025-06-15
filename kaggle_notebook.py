@@ -39,13 +39,13 @@ from src.core.config import CFG
 
 
 # %%
-# Source: config.py
+# Source: src/core/config.py
 # ## Configuration and Environment Setup
 
 
 
 # %%
-# Source: config.py
+# Source: src/core/config.py
 from __future__ import annotations
 import os
 import json
@@ -262,274 +262,1224 @@ class SeismicDataset(Dataset):
 
 
 # %%
-# Source: setup.py
+# Source: src/core/preprocess.py
 import os
-import subprocess
 from pathlib import Path
-import shutil
-import boto3
-from botocore.exceptions import ClientError
+import numpy as np
+from tqdm import tqdm
+import argparse
+import subprocess
+import zarr
+import dask.array as da
+from dask.diagnostics import ProgressBar
+from scipy.signal import decimate
 import logging
-import time
-from typing import Optional
-import kagglehub  # Optional import
-import json
-import sys
-import torch
-# from dotenv import load_dotenv
+from typing import Tuple, List, Optional
+import warnings
+from src.core.config import CFG
 
-def get_project_root() -> Path:
-    """Get the project root directory, handling both script and notebook environments."""
-    try:
-        # Try to get the path from __file__ (works in scripts)
-        return Path(__file__).parent.parent.parent
-    except NameError:
-        # In notebook environment, use current working directory
-        return Path.cwd()
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def push_to_kaggle(artefact_dir: Path, message: str, dataset: str = "jdmorgan/yalegwi"):
-    """Upload artefact_dir (or its contents) to S3, using credentials from .env/aws."""
-    logging.info("Starting push_to_kaggle...")
-    # load_dotenv(dotenv_path=Path('.env/aws'))
-    bucket = os.environ.get('AWS_S3_BUCKET')
-    region = os.environ.get('AWS_REGION', 'us-east-1')
-    aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID')
-    aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    logging.info(f"Read env: bucket={bucket}, region={region}, access_key={'set' if aws_access_key_id else 'missing'}, secret_key={'set' if aws_secret_access_key else 'missing'}")
-    if not bucket or not aws_access_key_id or not aws_secret_access_key:
-        logging.error("Missing AWS S3 configuration in environment variables")
-        return
-    try:
-        logging.info("Creating boto3 S3 client...")
-        s3 = boto3.client(
-            's3',
-            region_name=region,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key
-        )
-        logging.info("S3 client created successfully.")
-    except Exception as e:
-        logging.error(f"Failed to create S3 client: {e}")
-        return
-    artefact_dir = Path(artefact_dir)
-    for file_path in artefact_dir.glob('*'):
-        if file_path.is_file():
-            s3_key = f"yalegwi/{file_path.name}"
-            logging.info(f"Preparing to upload {file_path} to s3://{bucket}/{s3_key}")
-            try:
-                s3.upload_file(str(file_path), bucket, s3_key)
-                logging.info(f"Uploaded {file_path} to s3://{bucket}/{s3_key}")
-            except Exception as e:
-                logging.error(f"Failed to upload {file_path} to S3: {e}")
-    logging.info("push_to_kaggle completed.")
+# Constants for preprocessing
+CHUNK_TIME = 256  # After decimating by 4
+CHUNK_SRC_REC = 8
+DT_DECIMATE = 4  # 1 kHz → 250 Hz
+NYQUIST_FREQ = 500  # Hz (half of original sampling rate)
 
-def warm_kaggle_cache():
-    """Warm up the Kaggle FUSE cache by creating a temporary tar archive."""
-    data_dir = Path('/kaggle/input/waveform-inversion')
-    tmp_tar = Path('/kaggle/working/tmp.tar.gz')
-    
-    # Check if data directory exists
-    if not data_dir.exists():
-        print("Warning: Competition data not found at /kaggle/input/waveform-inversion")
-        print("Please add the competition dataset to your notebook first:")
-        print("1. Click on the 'Data' tab")
-        print("2. Click 'Add Data'")
-        print("3. Search for 'Waveform Inversion'")
-        print("4. Click 'Add' on the competition dataset")
-        return
-        
-    try:
-        subprocess.run([
-            'tar', '-I', 'pigz', '-cf', str(tmp_tar),
-            str(data_dir)
-        ], check=True)
-        tmp_tar.unlink()  # Clean up
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Failed to warm up cache: {e}")
-        print("This is not critical - continuing with setup...")
-    except Exception as e:
-        print(f"Warning: Unexpected error during cache warmup: {e}")
-        print("This is not critical - continuing with setup...")
-
-def setup_environment(env: str = 'kaggle'):
-    """Setup environment-specific configurations and download datasets if needed.
+def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
+    """
+    Validate that the data satisfies Nyquist criterion after downsampling.
     
     Args:
-        env: Environment to setup. One of: 'kaggle', 'colab', 'sagemaker', 'aws', 'local'
+        data: Input seismic data array
+        original_fs: Original sampling frequency in Hz
+        
+    Returns:
+        bool: True if data satisfies Nyquist criterion
     """
-    env = env.lower()
-    valid_envs = ['kaggle', 'colab', 'sagemaker', 'aws', 'local']
-    if env not in valid_envs:
-        raise ValueError(f"Invalid environment: {env}. Valid values: {', '.join(valid_envs)}")
+    # Compute FFT
+    fft_data = np.fft.rfft(data, axis=1)
+    freqs = np.fft.rfftfreq(data.shape[1], d=1/original_fs)
     
-    # from src.core.config import CFG
-
-    def setup_aws_environment():
-        """Setup AWS-specific environment configurations."""
-        
-        # Setup S3 client
-        s3 = boto3.client('s3', region_name=CFG.env.aws_region)
-        
-        # Setup paths
-        CFG.paths.root = CFG.env.ebs_mount / 'waveform-inversion'
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
-        CFG.paths.out = CFG.env.ebs_mount / 'output'
-        
-        # Create directories
-        for path in [CFG.paths.root, CFG.paths.train, CFG.paths.test, CFG.paths.out]:
-            path.mkdir(parents=True, exist_ok=True)
-        
-        # Sync data from S3
-        try:
-            subprocess.run([
-                "aws", "s3", "sync",
-                f"s3://{CFG.env.s3_bucket}/raw/", str(CFG.paths.root)
-            ], check=True)
-        except ClientError as e:
-            logging.error(f"Failed to sync data from S3: {e}")
-            raise
-
-    # Allow explicit environment override
-    if env:
-        CFG.env.kind = env
-        if CFG.env.kind == 'aws' and hasattr(CFG.env, 'set_aws_attributes'):
-            CFG.env.set_aws_attributes()
-
-    # --- Load config.json if present (for AWS) ---
-    config_path = Path('outputs/config.json')
-    if CFG.env.kind == 'aws' and config_path.exists():
-        with open(config_path) as f:
-            config_data = json.load(f)
-        # Override CFG values with those from config.json
-        for k, v in config_data.items():
-            if hasattr(CFG, k):
-                setattr(CFG, k, v)
-            elif hasattr(CFG.env, k):
-                setattr(CFG.env, k, v)
-            elif hasattr(CFG.paths, k):
-                setattr(CFG.paths, k, v)
-        print(f"Loaded configuration from {config_path}")
-
-    # Common path setup for all environments
-    def setup_paths(base_dir: Path):
-        CFG.paths.root = base_dir / 'waveform-inversion'
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
-        CFG.paths.families = {
-            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
-            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
-            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
-            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
-            'Style_A'     : CFG.paths.train/'Style_A',
-            'Style_B'     : CFG.paths.train/'Style_B',
-            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
-            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
-            'CurveFault_A': CFG.paths.train/'CurveFault_A',
-            'CurveFault_B': CFG.paths.train/'CurveFault_B',
-        }
-
-    if env == 'aws':
-        if hasattr(CFG.env, 'set_aws_attributes'):
-            CFG.env.set_aws_attributes()
-        setup_aws_environment()
-        print("Environment setup complete for AWS")
-    elif env == 'colab':
-        # Create data directory
-        data_dir = Path('/content/data')
-        data_dir.mkdir(exist_ok=True)
-        setup_paths(data_dir)
-
-        # Setup S3 client and sync data
-        try:
-            s3 = boto3.client('s3', region_name=CFG.env.aws_region)
-            print("Syncing data from S3...")
-            s3.sync(f's3://{CFG.env.s3_bucket}/raw/', str(CFG.paths.root))
-            print("S3 data sync complete")
-        except ClientError as e:
-            logging.error(f"Failed to sync data from S3: {e}")
-            raise
-        
-        print("Environment setup complete for Colab")
-    elif env == 'sagemaker':
-        # AWS SageMaker specific setup
-        data_dir = Path('/opt/ml/input/data')  
-        data_dir.mkdir(exist_ok=True)
-
-        # Create a symbolic link to the dataset
-        dataset_path = Path('/opt/ml/input/data/waveform-inversion')
-        dataset_path.symlink_to(data_dir / 'waveform-inversion')
-
-        # Download dataset
-        print("Downloading dataset from Kaggle...")
-        kagglehub.model_download('jamie-morgan/waveform-inversion', path=str(data_dir))
-        
-        setup_paths(data_dir)
-        print("Paths configured for SageMaker environment")
-    elif env == 'kaggle':
-        # In Kaggle, warm up the FUSE cache first
-        # warm_kaggle_cache()
-        # Use the competition data path directly
-        CFG.paths.root = Path('/kaggle/input/waveform-inversion')
-        CFG.paths.train = CFG.paths.root / 'train_samples'
-        CFG.paths.test = CFG.paths.root / 'test'
-        
-        # Update family paths
-        CFG.paths.families = {
-            'FlatVel_A'   : CFG.paths.train/'FlatVel_A',
-            'FlatVel_B'   : CFG.paths.train/'FlatVel_B',
-            'CurveVel_A'  : CFG.paths.train/'CurveVel_A',
-            'CurveVel_B'  : CFG.paths.train/'CurveVel_B',
-            'Style_A'     : CFG.paths.train/'Style_A',
-            'Style_B'     : CFG.paths.train/'Style_B',
-            'FlatFault_A' : CFG.paths.train/'FlatFault_A',
-            'FlatFault_B' : CFG.paths.train/'FlatFault_B',
-            'CurveFault_A': CFG.paths.train/'CurveFault_A',
-            'CurveFault_B': CFG.paths.train/'CurveFault_B',
-        }
-        print("Environment setup complete for Kaggle")
-    elif env == 'local':
-        # For local development, use a data directory in the project root
-        data_dir = get_project_root() / 'data'
-        data_dir.mkdir(exist_ok=True)
-        setup_paths(data_dir)
-        print("Environment setup complete for local development")
-
-def verify_openfwi_setup():
-    """Verify that OpenFWI dataset and weights are properly loaded."""
+    # Check if significant energy exists above Nyquist frequency
+    nyquist_mask = freqs > (original_fs / (2 * DT_DECIMATE))
+    high_freq_energy = np.abs(fft_data[:, nyquist_mask]).mean()
+    total_energy = np.abs(fft_data).mean()
     
-    # Check weights file
-    weights_path = Path('/mnt/waveform-inversion/openfwi_backbone.pth')
-    if not weights_path.exists():
-        logging.error("OpenFWI weights not found!")
+    # If more than 1% of energy is above Nyquist, warn
+    if high_freq_energy / total_energy > 0.01:
+        warnings.warn(f"Significant energy above Nyquist frequency detected: {high_freq_energy/total_energy:.2%}")
         return False
+    return True
+
+def preprocess_one(arr: np.ndarray) -> np.ndarray:
+    """
+    Preprocess a single seismic array with downsampling and normalization.
+    
+    Args:
+        arr: Input seismic array
         
-    # Try loading weights
+    Returns:
+        np.ndarray: Preprocessed array
+    """
     try:
+        # Validate Nyquist criterion
+        if not validate_nyquist(arr):
+            logger.warning("Data may violate Nyquist criterion after downsampling")
         
-        state_dict = torch.load(weights_path, map_location='cpu')
-        logging.info(f"Successfully loaded OpenFWI weights with {len(state_dict)} layers")
+        # Decimate time axis with anti-aliasing filter
+        arr = decimate(arr, DT_DECIMATE, axis=1, ftype='fir')
         
-        # Verify model can use these weights
-        from src.core.model import get_model
-        model = get_model()
-        try:
-            model.backbone.load_state_dict(state_dict, strict=False)
-            logging.info("Successfully loaded weights into model backbone")
-            return True
-        except Exception as e:
-            logging.error(f"Failed to load weights into model: {e}")
-            return False
+        # Convert to float16
+        arr = arr.astype('float16')
+        
+        # Robust normalization per trace
+        μ = np.median(arr, keepdims=True)
+        σ = np.percentile(arr, 95, keepdims=True) - np.percentile(arr, 5, keepdims=True)
+        arr = (arr - μ) / (σ + 1e-8)  # Add small epsilon to avoid division by zero
+        
+        return arr
     except Exception as e:
-        logging.error(f"Failed to verify OpenFWI weights: {e}")
-        return False
+        logger.error(f"Error preprocessing array: {str(e)}")
+        raise
+
+def process_family(family: str, input_dir: Path, output_dir: Path) -> List[str]:
+    """
+    Process all files in a family and return paths to processed files.
+    
+    Args:
+        family: Name of the geological family
+        input_dir: Input directory containing raw data
+        output_dir: Output directory for processed data
+        
+    Returns:
+        List[str]: Paths to processed files
+    """
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    files = sorted(input_dir.glob('*.npy'))
+    processed_paths = []
+    
+    for f in tqdm(files, desc=f"Processing {family}"):
+        try:
+            arr = np.load(f, mmap_mode='r')
+            if arr.ndim == 4:
+                n_samples = arr.shape[0]
+                for i in range(n_samples):
+                    sample = arr[i]
+                    processed = preprocess_one(sample)
+                    out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
+                    np.save(out_path, processed)
+                    processed_paths.append(str(out_path))
+            elif arr.ndim == 3:
+                processed = preprocess_one(arr)
+                out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
+                np.save(out_path, processed)
+                processed_paths.append(str(out_path))
+            else:
+                logger.warning(f"Unexpected shape {arr.shape} in {f}")
+        except Exception as e:
+            logger.error(f"Error processing file {f}: {str(e)}")
+            continue
+    
+    return processed_paths
+
+def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_size: Tuple[int, ...]) -> None:
+    """
+    Create a zarr dataset from processed files.
+    
+    Args:
+        processed_paths: List of paths to processed files
+        output_path: Path to save zarr dataset
+        chunk_size: Chunk size for zarr array
+    """
+    try:
+        # Create lazy Dask arrays
+        lazy_arrays = []
+        for path in processed_paths:
+            x = da.from_delayed(
+                dask.delayed(np.load)(path),
+                shape=(32, 256, 64),  # Example dims after decimation
+                dtype='float16'
+            )
+            lazy_arrays.append(x)
+        
+        # Stack arrays
+        stack = da.stack(lazy_arrays, axis=0)
+        
+        # Save to zarr with compression
+        stack.to_zarr(
+            output_path,
+            component='seis',
+            compressor=zarr.Blosc(cname='zstd', clevel=3),
+            chunks=chunk_size
+        )
+    except Exception as e:
+        logger.error(f"Error creating zarr dataset: {str(e)}")
+        raise
+
+def split_for_gpus(processed_paths: List[str], output_base: Path) -> None:
+    """
+    Split processed files into two datasets for the two T4 GPUs.
+    
+    Args:
+        processed_paths: List of paths to processed files
+        output_base: Base directory for output
+    """
+    try:
+        n_samples = len(processed_paths)
+        mid_point = n_samples // 2
+        
+        # Create GPU-specific directories
+        gpu0_dir = output_base / 'gpu0'
+        gpu1_dir = output_base / 'gpu1'
+        gpu0_dir.mkdir(parents=True, exist_ok=True)
+        gpu1_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Split paths
+        gpu0_paths = processed_paths[:mid_point]
+        gpu1_paths = processed_paths[mid_point:]
+        
+        # Create zarr datasets for each GPU
+        create_zarr_dataset(
+            gpu0_paths,
+            gpu0_dir / 'seismic.zarr',
+            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC)
+        )
+        create_zarr_dataset(
+            gpu1_paths,
+            gpu1_dir / 'seismic.zarr',
+            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC)
+        )
+        
+        logger.info(f"Created GPU datasets with {len(gpu0_paths)} and {len(gpu1_paths)} samples")
+    except Exception as e:
+        logger.error(f"Error splitting data for GPUs: {str(e)}")
+        raise
+
+def main():
+    parser = argparse.ArgumentParser(description="Preprocess seismic data for distributed training on T4 GPUs")
+    parser.add_argument('--input_root', type=str, default=str(CFG.paths.train), help='Input train_samples root directory')
+    parser.add_argument('--output_root', type=str, default='/kaggle/working/preprocessed', help='Output directory for processed files')
+    args = parser.parse_args()
+
+    try:
+        input_root = Path(args.input_root)
+        output_root = Path(args.output_root)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        # Process each family
+        families = list(CFG.paths.families.keys())
+        all_processed_paths = []
+        
+        for family in families:
+            logger.info(f"\nProcessing family: {family}")
+            input_dir = input_root / family
+            temp_dir = output_root / 'temp' / family
+            processed_paths = process_family(family, input_dir, temp_dir)
+            all_processed_paths.extend(processed_paths)
+            logger.info(f"Family {family}: {len(processed_paths)} samples processed")
+
+        # Split and create zarr datasets for GPUs
+        logger.info("\nCreating GPU-specific datasets...")
+        split_for_gpus(all_processed_paths, output_root)
+        
+        # Clean up temporary files
+        temp_dir = output_root / 'temp'
+        if temp_dir.exists():
+            subprocess.run(['rm', '-rf', str(temp_dir)])
+        
+        logger.info("\nPreprocessing complete!")
+        logger.info(f"GPU 0 dataset: {output_root}/gpu0/seismic.zarr")
+        logger.info(f"GPU 1 dataset: {output_root}/gpu1/seismic.zarr")
+    except Exception as e:
+        logger.error(f"Error in main preprocessing: {str(e)}")
+        raise
 
 if __name__ == "__main__":
-    setup_environment('kaggle') 
+    main() 
 
 
 # %%
-# Source: data_manager.py
+# Source: src/core/registry.py
+import os
+from pathlib import Path
+import json
+import logging
+from typing import Dict, Any, Optional, List
+import torch
+import torch.nn as nn
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+class ModelRegistry:
+    """
+    Registry for managing model versions with geometric metadata.
+    Tracks model versions, preserves equivariance properties, and handles initialization.
+    """
+    
+    def __init__(self, registry_dir: str = "models"):
+        """
+        Initialize the model registry.
+        
+        Args:
+            registry_dir: Directory to store model registry data
+        """
+        self.registry_dir = Path(registry_dir)
+        self.registry_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_file = self.registry_dir / "metadata.json"
+        self.metadata = self._load_metadata()
+        
+    def _load_metadata(self) -> Dict[str, Any]:
+        """Load existing metadata or create new metadata file."""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        return {"models": {}}
+    
+    def _save_metadata(self):
+        """Save current metadata to file."""
+        with open(self.metadata_file, 'w') as f:
+            json.dump(self.metadata, f, indent=2)
+    
+    def register_model(self, 
+                      model: nn.Module,
+                      model_id: str,
+                      family: str,
+                      equivariance: List[str],
+                      metadata: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Register a new model version with geometric metadata.
+        
+        Args:
+            model: PyTorch model to register
+            model_id: Unique identifier for the model
+            family: Geological family the model is trained on
+            equivariance: List of geometric transformations the model is equivariant to
+            metadata: Additional metadata to store
+            
+        Returns:
+            str: Version ID of the registered model
+        """
+        # Generate version ID
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        version_id = f"{model_id}_v{timestamp}"
+        
+        # Create model directory
+        model_dir = self.registry_dir / version_id
+        model_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save model state
+        torch.save(model.state_dict(), model_dir / "model.pt")
+        
+        # Prepare metadata
+        model_metadata = {
+            "model_id": model_id,
+            "version": version_id,
+            "family": family,
+            "equivariance": equivariance,
+            "timestamp": timestamp,
+            "architecture": str(model),
+            "state_dict_keys": list(model.state_dict().keys()),
+            **(metadata or {})
+        }
+        
+        # Update registry
+        self.metadata["models"][version_id] = model_metadata
+        self._save_metadata()
+        
+        logger.info(f"Registered model {version_id} with {len(equivariance)} equivariance properties")
+        return version_id
+    
+    def load_model(self, version_id: str, model_class: type) -> nn.Module:
+        """
+        Load a registered model version.
+        
+        Args:
+            version_id: Version ID of the model to load
+            model_class: PyTorch model class to instantiate
+            
+        Returns:
+            nn.Module: Loaded model
+        """
+        if version_id not in self.metadata["models"]:
+            raise ValueError(f"Model version {version_id} not found in registry")
+        
+        model_dir = self.registry_dir / version_id
+        state_dict = torch.load(model_dir / "model.pt")
+        
+        # Instantiate model and load state
+        model = model_class()
+        model.load_state_dict(state_dict)
+        
+        logger.info(f"Loaded model {version_id} with {len(self.metadata['models'][version_id]['equivariance'])} equivariance properties")
+        return model
+    
+    def list_models(self, family: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        List registered models, optionally filtered by family.
+        
+        Args:
+            family: Optional family to filter by
+            
+        Returns:
+            List[Dict[str, Any]]: List of model metadata
+        """
+        models = self.metadata["models"]
+        if family:
+            return [m for m in models.values() if m["family"] == family]
+        return list(models.values())
+    
+    def get_model_info(self, version_id: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific model version.
+        
+        Args:
+            version_id: Version ID of the model
+            
+        Returns:
+            Dict[str, Any]: Model metadata
+        """
+        if version_id not in self.metadata["models"]:
+            raise ValueError(f"Model version {version_id} not found in registry")
+        return self.metadata["models"][version_id]
+    
+    def update_metadata(self, version_id: str, metadata: Dict[str, Any]):
+        """
+        Update metadata for a specific model version.
+        
+        Args:
+            version_id: Version ID of the model
+            metadata: New metadata to add/update
+        """
+        if version_id not in self.metadata["models"]:
+            raise ValueError(f"Model version {version_id} not found in registry")
+        
+        self.metadata["models"][version_id].update(metadata)
+        self._save_metadata()
+        logger.info(f"Updated metadata for model {version_id}")
+    
+    def delete_model(self, version_id: str):
+        """
+        Delete a model version from the registry.
+        
+        Args:
+            version_id: Version ID of the model to delete
+        """
+        if version_id not in self.metadata["models"]:
+            raise ValueError(f"Model version {version_id} not found in registry")
+        
+        # Remove model files
+        model_dir = self.registry_dir / version_id
+        if model_dir.exists():
+            for file in model_dir.glob("*"):
+                file.unlink()
+            model_dir.rmdir()
+        
+        # Remove from metadata
+        del self.metadata["models"][version_id]
+        self._save_metadata()
+        logger.info(f"Deleted model {version_id}") 
+
+
+# %%
+# Source: src/core/checkpoint.py
+import os
+from pathlib import Path
+import json
+import logging
+from typing import Dict, Any, Optional, List, Tuple
+import torch
+import torch.nn as nn
+from datetime import datetime
+import shutil
+
+logger = logging.getLogger(__name__)
+
+class CheckpointManager:
+    """
+    Manager for saving and loading model checkpoints with geometric metadata.
+    Handles checkpoint versioning, geometric properties, and coordinate transformations.
+    """
+    
+    def __init__(self, checkpoint_dir: str = "checkpoints"):
+        """
+        Initialize the checkpoint manager.
+        
+        Args:
+            checkpoint_dir: Directory to store checkpoints
+        """
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_file = self.checkpoint_dir / "checkpoint_metadata.json"
+        self.metadata = self._load_metadata()
+        
+    def _load_metadata(self) -> Dict[str, Any]:
+        """Load existing metadata or create new metadata file."""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        return {"checkpoints": {}}
+    
+    def _save_metadata(self):
+        """Save current metadata to file."""
+        with open(self.metadata_file, 'w') as f:
+            json.dump(self.metadata, f, indent=2)
+    
+    def save_checkpoint(self,
+                       model: nn.Module,
+                       optimizer: torch.optim.Optimizer,
+                       epoch: int,
+                       model_id: str,
+                       family: str,
+                       equivariance: List[str],
+                       metrics: Dict[str, float],
+                       metadata: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Save a model checkpoint with geometric metadata.
+        
+        Args:
+            model: PyTorch model to save
+            optimizer: Optimizer state to save
+            epoch: Current training epoch
+            model_id: Unique identifier for the model
+            family: Geological family being trained
+            equivariance: List of geometric transformations the model is equivariant to
+            metrics: Dictionary of training metrics
+            metadata: Additional metadata to store
+            
+        Returns:
+            str: Checkpoint ID
+        """
+        # Generate checkpoint ID
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_id = f"{model_id}_epoch{epoch}_{timestamp}"
+        
+        # Create checkpoint directory
+        checkpoint_path = self.checkpoint_dir / checkpoint_id
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save model and optimizer state
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'metrics': metrics
+        }, checkpoint_path / "checkpoint.pt")
+        
+        # Prepare metadata
+        checkpoint_metadata = {
+            "checkpoint_id": checkpoint_id,
+            "model_id": model_id,
+            "family": family,
+            "epoch": epoch,
+            "equivariance": equivariance,
+            "timestamp": timestamp,
+            "metrics": metrics,
+            **(metadata or {})
+        }
+        
+        # Update registry
+        self.metadata["checkpoints"][checkpoint_id] = checkpoint_metadata
+        self._save_metadata()
+        
+        logger.info(f"Saved checkpoint {checkpoint_id} at epoch {epoch}")
+        return checkpoint_id
+    
+    def load_checkpoint(self,
+                       checkpoint_id: str,
+                       model: nn.Module,
+                       optimizer: Optional[torch.optim.Optimizer] = None) -> Tuple[int, Dict[str, float]]:
+        """
+        Load a model checkpoint.
+        
+        Args:
+            checkpoint_id: ID of the checkpoint to load
+            model: PyTorch model to load state into
+            optimizer: Optional optimizer to load state into
+            
+        Returns:
+            Tuple[int, Dict[str, float]]: (epoch, metrics)
+        """
+        if checkpoint_id not in self.metadata["checkpoints"]:
+            raise ValueError(f"Checkpoint {checkpoint_id} not found")
+        
+        checkpoint_path = self.checkpoint_dir / checkpoint_id / "checkpoint.pt"
+        checkpoint = torch.load(checkpoint_path)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Load optimizer state if provided
+        if optimizer is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        logger.info(f"Loaded checkpoint {checkpoint_id} from epoch {checkpoint['epoch']}")
+        return checkpoint['epoch'], checkpoint['metrics']
+    
+    def list_checkpoints(self,
+                        model_id: Optional[str] = None,
+                        family: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        List available checkpoints, optionally filtered by model or family.
+        
+        Args:
+            model_id: Optional model ID to filter by
+            family: Optional family to filter by
+            
+        Returns:
+            List[Dict[str, Any]]: List of checkpoint metadata
+        """
+        checkpoints = self.metadata["checkpoints"]
+        filtered = checkpoints.values()
+        
+        if model_id:
+            filtered = [c for c in filtered if c["model_id"] == model_id]
+        if family:
+            filtered = [c for c in filtered if c["family"] == family]
+            
+        return sorted(filtered, key=lambda x: x["epoch"])
+    
+    def get_checkpoint_info(self, checkpoint_id: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific checkpoint.
+        
+        Args:
+            checkpoint_id: ID of the checkpoint
+            
+        Returns:
+            Dict[str, Any]: Checkpoint metadata
+        """
+        if checkpoint_id not in self.metadata["checkpoints"]:
+            raise ValueError(f"Checkpoint {checkpoint_id} not found")
+        return self.metadata["checkpoints"][checkpoint_id]
+    
+    def update_metadata(self, checkpoint_id: str, metadata: Dict[str, Any]):
+        """
+        Update metadata for a specific checkpoint.
+        
+        Args:
+            checkpoint_id: ID of the checkpoint
+            metadata: New metadata to add/update
+        """
+        if checkpoint_id not in self.metadata["checkpoints"]:
+            raise ValueError(f"Checkpoint {checkpoint_id} not found")
+        
+        self.metadata["checkpoints"][checkpoint_id].update(metadata)
+        self._save_metadata()
+        logger.info(f"Updated metadata for checkpoint {checkpoint_id}")
+    
+    def delete_checkpoint(self, checkpoint_id: str):
+        """
+        Delete a checkpoint.
+        
+        Args:
+            checkpoint_id: ID of the checkpoint to delete
+        """
+        if checkpoint_id not in self.metadata["checkpoints"]:
+            raise ValueError(f"Checkpoint {checkpoint_id} not found")
+        
+        # Remove checkpoint files
+        checkpoint_path = self.checkpoint_dir / checkpoint_id
+        if checkpoint_path.exists():
+            shutil.rmtree(checkpoint_path)
+        
+        # Remove from metadata
+        del self.metadata["checkpoints"][checkpoint_id]
+        self._save_metadata()
+        logger.info(f"Deleted checkpoint {checkpoint_id}")
+    
+    def get_best_checkpoint(self,
+                          model_id: str,
+                          metric: str = "val_loss",
+                          family: Optional[str] = None) -> Optional[str]:
+        """
+        Get the best checkpoint based on a metric.
+        
+        Args:
+            model_id: Model ID to search for
+            metric: Metric to optimize (default: val_loss)
+            family: Optional family to filter by
+            
+        Returns:
+            Optional[str]: ID of the best checkpoint, or None if no checkpoints found
+        """
+        checkpoints = self.list_checkpoints(model_id, family)
+        if not checkpoints:
+            return None
+            
+        # Sort by metric (lower is better for loss metrics)
+        is_loss = "loss" in metric.lower()
+        sorted_checkpoints = sorted(
+            checkpoints,
+            key=lambda x: x["metrics"].get(metric, float('inf') if is_loss else float('-inf')),
+            reverse=not is_loss
+        )
+        
+        return sorted_checkpoints[0]["checkpoint_id"] 
+
+
+# %%
+# Source: src/core/geometric_loader.py
+import os
+from pathlib import Path
+import logging
+from typing import Dict, Any, List, Optional, Tuple
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+import zarr
+from scipy.ndimage import gaussian_filter
+from skimage.feature import canny
+from skimage.metrics import structural_similarity as ssim
+
+logger = logging.getLogger(__name__)
+
+class GeometricDataset(Dataset):
+    """
+    Dataset class for handling seismic data with geometric features.
+    Extracts and manages geometric features for different geological families.
+    """
+    
+    def __init__(self,
+                 data_path: str,
+                 family: str,
+                 transform: Optional[Any] = None,
+                 extract_features: bool = True):
+        """
+        Initialize the dataset.
+        
+        Args:
+            data_path: Path to the zarr dataset
+            family: Geological family name
+            transform: Optional data transformations
+            extract_features: Whether to extract geometric features
+        """
+        self.data_path = Path(data_path)
+        self.family = family
+        self.transform = transform
+        self.extract_features = extract_features
+        
+        # Load zarr array
+        self.data = zarr.open(self.data_path / 'seis', mode='r')
+        
+        # Load family metadata if exists
+        metadata_path = self.data_path / 'metadata.json'
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                self.metadata = json.load(f)
+        else:
+            self.metadata = {}
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def extract_geometric_features(self, data: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Extract geometric features from seismic data.
+        
+        Args:
+            data: Seismic data array
+            
+        Returns:
+            Dict[str, np.ndarray]: Dictionary of geometric features
+        """
+        features = {}
+        
+        # Extract structural features
+        features['gradient_magnitude'] = np.gradient(data)[0]  # Time gradient
+        features['gradient_direction'] = np.arctan2(np.gradient(data)[1], np.gradient(data)[0])
+        
+        # Extract boundary features using Canny edge detection
+        features['edges'] = canny(data, sigma=2.0)
+        
+        # Extract spectral features
+        fft_data = np.fft.rfft(data, axis=0)
+        features['spectral_energy'] = np.abs(fft_data)
+        features['spectral_phase'] = np.angle(fft_data)
+        
+        # Extract multi-scale features using Gaussian blur
+        features['gaussian_1'] = gaussian_filter(data, sigma=1.0)
+        features['gaussian_2'] = gaussian_filter(data, sigma=2.0)
+        features['gaussian_4'] = gaussian_filter(data, sigma=4.0)
+        
+        return features
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Get a data sample with geometric features.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing data and features
+        """
+        # Load seismic data
+        data = self.data[idx]
+        
+        # Convert to torch tensor
+        data_tensor = torch.from_numpy(data).float()
+        
+        # Extract geometric features if requested
+        if self.extract_features:
+            features = self.extract_geometric_features(data)
+            feature_tensors = {
+                k: torch.from_numpy(v).float()
+                for k, v in features.items()
+            }
+        else:
+            feature_tensors = {}
+        
+        # Apply transformations if any
+        if self.transform is not None:
+            data_tensor = self.transform(data_tensor)
+            if self.extract_features:
+                feature_tensors = {
+                    k: self.transform(v)
+                    for k, v in feature_tensors.items()
+                }
+        
+        return {
+            'data': data_tensor,
+            'features': feature_tensors,
+            'family': self.family,
+            'index': idx
+        }
+
+class FamilyDataLoader:
+    """
+    Data loader for handling family-specific data loading with geometric features.
+    Manages data loading for different geological families with proper batching.
+    """
+    
+    def __init__(self,
+                 data_root: str,
+                 batch_size: int = 32,
+                 num_workers: int = 4,
+                 transform: Optional[Any] = None,
+                 extract_features: bool = True):
+        """
+        Initialize the data loader.
+        
+        Args:
+            data_root: Root directory containing family datasets
+            batch_size: Batch size for loading
+            num_workers: Number of worker processes
+            transform: Optional data transformations
+            extract_features: Whether to extract geometric features
+        """
+        self.data_root = Path(data_root)
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.transform = transform
+        self.extract_features = extract_features
+        
+        # Initialize datasets for each family
+        self.datasets = {}
+        self.loaders = {}
+        
+        # Find all family directories
+        family_dirs = [d for d in self.data_root.iterdir() if d.is_dir()]
+        
+        for family_dir in family_dirs:
+            family = family_dir.name
+            dataset = GeometricDataset(
+                family_dir,
+                family,
+                transform=transform,
+                extract_features=extract_features
+            )
+            self.datasets[family] = dataset
+            
+            # Create data loader
+            self.loaders[family] = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True
+            )
+    
+    def get_loader(self, family: str) -> DataLoader:
+        """
+        Get data loader for a specific family.
+        
+        Args:
+            family: Family name
+            
+        Returns:
+            DataLoader: Data loader for the family
+        """
+        if family not in self.loaders:
+            raise ValueError(f"Family {family} not found")
+        return self.loaders[family]
+    
+    def get_dataset(self, family: str) -> GeometricDataset:
+        """
+        Get dataset for a specific family.
+        
+        Args:
+            family: Family name
+            
+        Returns:
+            GeometricDataset: Dataset for the family
+        """
+        if family not in self.datasets:
+            raise ValueError(f"Family {family} not found")
+        return self.datasets[family]
+    
+    def get_all_loaders(self) -> Dict[str, DataLoader]:
+        """
+        Get all data loaders.
+        
+        Returns:
+            Dict[str, DataLoader]: Dictionary of all data loaders
+        """
+        return self.loaders
+    
+    def get_all_datasets(self) -> Dict[str, GeometricDataset]:
+        """
+        Get all datasets.
+        
+        Returns:
+            Dict[str, GeometricDataset]: Dictionary of all datasets
+        """
+        return self.datasets
+    
+    def get_family_stats(self, family: str) -> Dict[str, float]:
+        """
+        Get statistics for a specific family.
+        
+        Args:
+            family: Family name
+            
+        Returns:
+            Dict[str, float]: Dictionary of statistics
+        """
+        dataset = self.get_dataset(family)
+        data = dataset.data
+        
+        stats = {
+            'mean': float(data.mean()),
+            'std': float(data.std()),
+            'min': float(data.min()),
+            'max': float(data.max()),
+            'samples': len(dataset)
+        }
+        
+        return stats
+    
+    def get_all_stats(self) -> Dict[str, Dict[str, float]]:
+        """
+        Get statistics for all families.
+        
+        Returns:
+            Dict[str, Dict[str, float]]: Dictionary of statistics for each family
+        """
+        return {
+            family: self.get_family_stats(family)
+            for family in self.datasets.keys()
+        } 
+
+
+# %%
+# Source: src/core/geometric_cv.py
+import os
+from pathlib import Path
+import logging
+from typing import Dict, Any, List, Optional, Tuple, Union
+import numpy as np
+import torch
+from torch.utils.data import Dataset, Subset
+from sklearn.model_selection import KFold, StratifiedKFold
+from skimage.metrics import structural_similarity as ssim
+import json
+
+logger = logging.getLogger(__name__)
+
+class GeometricCrossValidator:
+    """
+    Cross-validation framework with geometric awareness.
+    Implements stratified sampling based on geological families and geometric features.
+    """
+    
+    def __init__(self,
+                 n_splits: int = 5,
+                 shuffle: bool = True,
+                 random_state: Optional[int] = None):
+        """
+        Initialize the cross-validator.
+        
+        Args:
+            n_splits: Number of folds
+            shuffle: Whether to shuffle data
+            random_state: Random seed for reproducibility
+        """
+        self.n_splits = n_splits
+        self.shuffle = shuffle
+        self.random_state = random_state
+        self.kfold = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
+        self.stratified_kfold = StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
+    
+    def compute_geometric_metrics(self,
+                                y_true: np.ndarray,
+                                y_pred: np.ndarray) -> Dict[str, float]:
+        """
+        Compute geometric metrics between true and predicted values.
+        
+        Args:
+            y_true: True values
+            y_pred: Predicted values
+            
+        Returns:
+            Dict[str, float]: Dictionary of geometric metrics
+        """
+        metrics = {}
+        
+        # Compute SSIM
+        metrics['ssim'] = ssim(y_true, y_pred, data_range=y_true.max() - y_true.min())
+        
+        # Compute gradient magnitude similarity
+        grad_true = np.gradient(y_true)[0]
+        grad_pred = np.gradient(y_pred)[0]
+        metrics['gradient_similarity'] = ssim(grad_true, grad_pred, data_range=grad_true.max() - grad_true.min())
+        
+        # Compute boundary preservation
+        edges_true = canny(y_true, sigma=2.0)
+        edges_pred = canny(y_pred, sigma=2.0)
+        metrics['boundary_iou'] = np.logical_and(edges_true, edges_pred).sum() / np.logical_or(edges_true, edges_pred).sum()
+        
+        return metrics
+    
+    def split_by_family(self,
+                       dataset: Dataset,
+                       family_labels: List[str]) -> List[Tuple[Subset, Subset]]:
+        """
+        Split dataset by geological family.
+        
+        Args:
+            dataset: PyTorch dataset
+            family_labels: List of family labels for each sample
+            
+        Returns:
+            List[Tuple[Subset, Subset]]: List of (train, val) splits
+        """
+        splits = []
+        
+        # Get unique families
+        families = np.unique(family_labels)
+        
+        for family in families:
+            # Get indices for this family
+            family_indices = np.where(np.array(family_labels) == family)[0]
+            
+            # Split indices
+            for train_idx, val_idx in self.kfold.split(family_indices):
+                train_subset = Subset(dataset, family_indices[train_idx])
+                val_subset = Subset(dataset, family_indices[val_idx])
+                splits.append((train_subset, val_subset))
+        
+        return splits
+    
+    def split_by_geometry(self,
+                         dataset: Dataset,
+                         geometric_features: Dict[str, np.ndarray]) -> List[Tuple[Subset, Subset]]:
+        """
+        Split dataset by geometric features.
+        
+        Args:
+            dataset: PyTorch dataset
+            geometric_features: Dictionary of geometric features
+            
+        Returns:
+            List[Tuple[Subset, Subset]]: List of (train, val) splits
+        """
+        splits = []
+        
+        # Combine geometric features into a single feature vector
+        feature_matrix = np.column_stack([
+            features.reshape(len(dataset), -1)
+            for features in geometric_features.values()
+        ])
+        
+        # Use stratified k-fold on geometric features
+        for train_idx, val_idx in self.stratified_kfold.split(feature_matrix, np.zeros(len(dataset))):
+            train_subset = Subset(dataset, train_idx)
+            val_subset = Subset(dataset, val_idx)
+            splits.append((train_subset, val_subset))
+        
+        return splits
+    
+    def evaluate_fold(self,
+                     model: torch.nn.Module,
+                     train_loader: torch.utils.data.DataLoader,
+                     val_loader: torch.utils.data.DataLoader,
+                     device: torch.device) -> Dict[str, float]:
+        """
+        Evaluate a single fold.
+        
+        Args:
+            model: PyTorch model
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            device: Device to run evaluation on
+            
+        Returns:
+            Dict[str, float]: Dictionary of evaluation metrics
+        """
+        model.eval()
+        metrics = {
+            'train_loss': 0.0,
+            'val_loss': 0.0,
+            'train_ssim': 0.0,
+            'val_ssim': 0.0,
+            'train_boundary_iou': 0.0,
+            'val_boundary_iou': 0.0
+        }
+        
+        # Evaluate training set
+        with torch.no_grad():
+            for batch in train_loader:
+                data = batch['data'].to(device)
+                target = batch['target'].to(device)
+                output = model(data)
+                
+                # Compute geometric metrics
+                geom_metrics = self.compute_geometric_metrics(
+                    target.cpu().numpy(),
+                    output.cpu().numpy()
+                )
+                
+                metrics['train_ssim'] += geom_metrics['ssim']
+                metrics['train_boundary_iou'] += geom_metrics['boundary_iou']
+        
+        # Evaluate validation set
+        with torch.no_grad():
+            for batch in val_loader:
+                data = batch['data'].to(device)
+                target = batch['target'].to(device)
+                output = model(data)
+                
+                # Compute geometric metrics
+                geom_metrics = self.compute_geometric_metrics(
+                    target.cpu().numpy(),
+                    output.cpu().numpy()
+                )
+                
+                metrics['val_ssim'] += geom_metrics['ssim']
+                metrics['val_boundary_iou'] += geom_metrics['boundary_iou']
+        
+        # Average metrics
+        n_train = len(train_loader)
+        n_val = len(val_loader)
+        
+        metrics['train_ssim'] /= n_train
+        metrics['train_boundary_iou'] /= n_train
+        metrics['val_ssim'] /= n_val
+        metrics['val_boundary_iou'] /= n_val
+        
+        return metrics
+    
+    def cross_validate(self,
+                      model: torch.nn.Module,
+                      dataset: Dataset,
+                      family_labels: List[str],
+                      geometric_features: Dict[str, np.ndarray],
+                      batch_size: int = 32,
+                      device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')) -> Dict[str, List[float]]:
+        """
+        Perform cross-validation with both family and geometric stratification.
+        
+        Args:
+            model: PyTorch model
+            dataset: PyTorch dataset
+            family_labels: List of family labels
+            geometric_features: Dictionary of geometric features
+            batch_size: Batch size for data loaders
+            device: Device to run evaluation on
+            
+        Returns:
+            Dict[str, List[float]]: Dictionary of metrics for each fold
+        """
+        # Get splits
+        family_splits = self.split_by_family(dataset, family_labels)
+        geometry_splits = self.split_by_geometry(dataset, geometric_features)
+        
+        # Combine splits
+        splits = []
+        for (train_fam, val_fam), (train_geom, val_geom) in zip(family_splits, geometry_splits):
+            # Combine train and val sets
+            train_indices = list(set(train_fam.indices) & set(train_geom.indices))
+            val_indices = list(set(val_fam.indices) & set(val_geom.indices))
+            
+            train_subset = Subset(dataset, train_indices)
+            val_subset = Subset(dataset, val_indices)
+            splits.append((train_subset, val_subset))
+        
+        # Evaluate each fold
+        fold_metrics = []
+        for i, (train_subset, val_subset) in enumerate(splits):
+            logger.info(f"Evaluating fold {i+1}/{len(splits)}")
+            
+            # Create data loaders
+            train_loader = torch.utils.data.DataLoader(
+                train_subset,
+                batch_size=batch_size,
+                shuffle=True
+            )
+            val_loader = torch.utils.data.DataLoader(
+                val_subset,
+                batch_size=batch_size,
+                shuffle=False
+            )
+            
+            # Evaluate fold
+            metrics = self.evaluate_fold(model, train_loader, val_loader, device)
+            fold_metrics.append(metrics)
+        
+        # Aggregate results
+        results = {
+            'train_ssim': [m['train_ssim'] for m in fold_metrics],
+            'val_ssim': [m['val_ssim'] for m in fold_metrics],
+            'train_boundary_iou': [m['train_boundary_iou'] for m in fold_metrics],
+            'val_boundary_iou': [m['val_boundary_iou'] for m in fold_metrics]
+        }
+        
+        # Add mean and std
+        for metric in results:
+            values = results[metric]
+            results[f'{metric}_mean'] = np.mean(values)
+            results[f'{metric}_std'] = np.std(values)
+        
+        return results
+    
+    def save_results(self,
+                    results: Dict[str, List[float]],
+                    output_path: str):
+        """
+        Save cross-validation results to file.
+        
+        Args:
+            results: Dictionary of results
+            output_path: Path to save results
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        logger.info(f"Saved cross-validation results to {output_path}") 
+
+
+# %%
+# Source: src/core/data_manager.py
 """
 DataManager is the single source of truth for all data IO in this project.
 All data loading, streaming, and batching must go through DataManager.
@@ -843,384 +1793,7 @@ class TestDataset(Dataset):
 
 
 # %%
-# Source: eda.py
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-# from data_manager import DataManager
-# from config import CFG
-from pathlib import Path
-from typing import Dict, List, Tuple
-# from src.core.setup import setup_environment  # Ensure correct paths
-setup_environment()  # Set up paths before any EDA code
-
-def summarize_array(arr):
-    # Convert to float32 for statistics to avoid overflow
-    arr_float32 = arr.astype(np.float32)
-    stats = {
-        'min': np.nanmin(arr_float32),
-        'max': np.nanmax(arr_float32),
-        'mean': np.nanmean(arr_float32),
-        'std': np.nanstd(arr_float32),
-        'nan_count': np.isnan(arr).sum(),
-        'inf_count': np.isinf(arr).sum(),
-        'shape': arr.shape
-    }
-    return stats
-
-def eda_on_family(family, n_shape_samples=3):
-    dm = DataManager()
-    seis_files, vel_files, family_type = dm.list_family_files(family)
-    seis_stats = []
-    vel_stats = []
-    seis_shapes = []
-    vel_shapes = []
-    for idx, (sfile, vfile) in enumerate(zip(seis_files, vel_files)):
-        if idx >= 3:  # Only process first 3 files per family
-            break
-        sdata = np.load(sfile, mmap_mode='r')
-        vdata = np.load(vfile, mmap_mode='r')
-        # Handle both batched and per-sample files
-        if sdata.ndim == 3:  # (sources, receivers, timesteps)
-            seis_stats.append(summarize_array(sdata))
-            vel_stats.append(summarize_array(vdata))
-            seis_shapes.append(sdata.shape)
-            vel_shapes.append(vdata.shape)
-        elif sdata.ndim == 4:  # (batch, sources, receivers, timesteps)
-            n_samples = sdata.shape[0]
-            n_pick = min(10, n_samples)
-            if n_samples > 1:
-                pick_indices = np.linspace(0, n_samples - 1, n_pick, dtype=int)
-            else:
-                pick_indices = [0]
-            for i in pick_indices:
-                seis_stats.append(summarize_array(sdata[i]))
-                vel_stats.append(summarize_array(vdata[i]))
-                seis_shapes.append(sdata[i].shape)
-                vel_shapes.append(vdata[i].shape)
-        else:
-            print(f"Unexpected shape for {sfile}: {sdata.shape}")
-        # Print a few sample shapes for validation
-        if idx < n_shape_samples:
-            print(f"Sample {idx} - Seis shape: {sdata.shape}, Vel shape: {vdata.shape}")
-    # Shape validation
-    expected_seis_shapes = [(5, 72, 72), (500, 5, 72, 72)]  # Updated to match actual shapes
-    expected_vel_shapes = [(1, 70, 70), (500, 1, 70, 70)]  # Updated to match actual shapes
-    for shape in seis_shapes[:n_shape_samples]:
-        if shape not in expected_seis_shapes:
-            print(f"[!] Unexpected seis shape: {shape} in family {family}")
-    for shape in vel_shapes[:n_shape_samples]:
-        if shape not in expected_vel_shapes:
-            print(f"[!] Unexpected vel shape: {shape} in family {family}")
-    return seis_stats, vel_stats
-
-def print_summary(stats, name):
-    print(f"Summary for {name}:")
-    for k in ['min', 'max', 'mean', 'std', 'nan_count', 'inf_count']:
-        vals = [s[k] for s in stats]
-        if k in ['nan_count', 'inf_count']:
-            print(f"  {k}: min={np.min(vals)}, max={np.max(vals)}, mean={np.mean(vals)}, sum={np.sum(vals)}")
-        else:
-            # Use float32 for numerical stability
-            vals = np.array(vals, dtype=np.float32)
-            print(f"  {k}: min={vals.min()}, max={vals.max()}, mean={vals.mean()}, sum={vals.sum()}")
-    print(f"  Total samples: {len(stats)}")
-
-def plot_family_distributions(family_stats: Dict[str, Tuple[List, List]]):
-    """Plot distributions of key statistics across families."""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('Distribution of Key Statistics Across Families')
-    
-    # Velocity ranges
-    vel_ranges = []
-    family_names = []
-    for family, (_, vel_stats) in family_stats.items():
-        vel_mins = [s['min'] for s in vel_stats]
-        vel_maxs = [s['max'] for s in vel_stats]
-        vel_ranges.append((np.mean(vel_mins), np.mean(vel_maxs)))
-        family_names.append(family)
-    
-    # Plot velocity ranges
-    vel_mins, vel_maxs = zip(*vel_ranges)
-    axes[0,0].bar(family_names, vel_mins, label='Min Velocity')
-    axes[0,0].bar(family_names, vel_maxs, bottom=vel_mins, label='Max Velocity')
-    axes[0,0].set_title('Velocity Ranges by Family')
-    axes[0,0].set_ylabel('Velocity (m/s)')
-    axes[0,0].legend()
-    plt.setp(axes[0,0].xaxis.get_majorticklabels(), rotation=45)
-    
-    # Seismic amplitude ranges
-    seis_ranges = []
-    for family, (seis_stats, _) in family_stats.items():
-        seis_mins = [s['min'] for s in seis_stats]
-        seis_maxs = [s['max'] for s in seis_stats]
-        seis_ranges.append((np.mean(seis_mins), np.mean(seis_maxs)))
-    
-    # Plot seismic ranges
-    seis_mins, seis_maxs = zip(*seis_ranges)
-    axes[0,1].bar(family_names, seis_mins, label='Min Amplitude')
-    axes[0,1].bar(family_names, seis_maxs, bottom=seis_mins, label='Max Amplitude')
-    axes[0,1].set_title('Seismic Amplitude Ranges by Family')
-    axes[0,1].set_ylabel('Amplitude')
-    axes[0,1].legend()
-    plt.setp(axes[0,1].xaxis.get_majorticklabels(), rotation=45)
-    
-    # Velocity standard deviations
-    vel_stds = []
-    for family, (_, vel_stats) in family_stats.items():
-        stds = [s['std'] for s in vel_stats]
-        vel_stds.append(np.mean(stds))
-    
-    axes[1,0].bar(family_names, vel_stds)
-    axes[1,0].set_title('Average Velocity Standard Deviation by Family')
-    axes[1,0].set_ylabel('Standard Deviation (m/s)')
-    plt.setp(axes[1,0].xaxis.get_majorticklabels(), rotation=45)
-    
-    # Sample counts
-    sample_counts = []
-    for family, (seis_stats, _) in family_stats.items():
-        sample_counts.append(len(seis_stats))
-    
-    axes[1,1].bar(family_names, sample_counts)
-    axes[1,1].set_title('Number of Samples by Family')
-    axes[1,1].set_ylabel('Sample Count')
-    plt.setp(axes[1,1].xaxis.get_majorticklabels(), rotation=45)
-    
-    plt.tight_layout()
-    plt.show()
-    plt.close()
-    return fig
-
-def analyze_family_correlations(family_stats: Dict[str, Tuple[List, List]]):
-    """Analyze correlations between seismic and velocity statistics."""
-    correlations = {}
-    for family, (seis_stats, vel_stats) in family_stats.items():
-        # Extract statistics
-        seis_means = [s['mean'] for s in seis_stats]
-        seis_stds = [s['std'] for s in seis_stats]
-        vel_means = [v['mean'] for v in vel_stats]
-        vel_stds = [v['std'] for v in vel_stats]
-        
-        # Calculate correlations
-        correlations[family] = {
-            'mean_corr': np.corrcoef(seis_means, vel_means)[0,1],
-            'std_corr': np.corrcoef(seis_stds, vel_stds)[0,1]
-        }
-    
-    return correlations
-
-def extract_and_plot_geometry(family_stats: Dict[str, Tuple[List, List]]):
-    """
-    Attempt to extract and plot receiver/source geometry for a few representative families only.
-    Assumes seismic data shape is (sources, receivers, timesteps) or (sources, timesteps, receivers).
-    """
-    print("\nReceiver/Source Geometry per Family:")
-    # Only plot for the first 2 families
-    max_plots = 2
-    plotted = 0
-    for family, (seis_stats, _) in family_stats.items():
-        if plotted >= max_plots:
-            print(f"(Skipping plots for remaining families...)")
-            break
-        if len(seis_stats) == 0:
-            print(f"{family}: No samples found.")
-            continue
-        shape = seis_stats[0]['shape']
-        if len(shape) == 3:
-            n_sources, n_receivers, n_timesteps = shape
-            print(f"{family}: sources={n_sources}, receivers={n_receivers}, timesteps={n_timesteps}")
-            plt.figure()
-            plt.title(f"{family} - Receiver/Source Geometry")
-            plt.scatter(range(n_receivers), [0]*n_receivers, label='Receivers', marker='x')
-            plt.scatter([0]*n_sources, range(n_sources), label='Sources', marker='o')
-            plt.xlabel('Receiver Index')
-            plt.ylabel('Source Index')
-            plt.legend()
-            plt.show()
-            plt.close()
-            plotted += 1
-        elif len(shape) == 2:
-            n1, n2 = shape
-            print(f"{family}: 2D seismic shape: {shape}")
-        else:
-            print(f"{family}: Unexpected seismic shape: {shape}")
-
-
-def summarize_array_shapes(family_stats: Dict[str, Tuple[List, List]]):
-    """
-    Summarize array shapes for seismic and velocity data per family.
-    """
-    print("\nArray Shape Summary per Family:")
-    for family, (seis_stats, vel_stats) in family_stats.items():
-        seis_shapes = [tuple(s['shape']) for s in seis_stats]
-        vel_shapes = [tuple(s['shape']) for s in vel_stats]
-        unique_seis_shapes = set(seis_shapes)
-        unique_vel_shapes = set(vel_shapes)
-        print(f"{family}: Seismic shapes: {unique_seis_shapes}")
-        print(f"{family}: Velocity shapes: {unique_vel_shapes}")
-        if len(unique_seis_shapes) > 1 or len(unique_vel_shapes) > 1:
-            print(f"  [!] Shape inconsistency detected in {family}")
-
-
-def summarize_family_sizes(family_stats: Dict[str, Tuple[List, List]]):
-    """
-    Print a summary of family sizes and highlight imbalances, using the true number of samples per family.
-    """
-    print("\nFamily Size Summary:")
-    from config import CFG
-    base_path = CFG.paths.train
-    sizes = {family: count_samples_base(base_path, family) for family in family_stats.keys()}
-    for family, size in sizes.items():
-        print(f"{family}: {size} samples")
-    min_size = min(sizes.values())
-    max_size = max(sizes.values())
-    print(f"\nSmallest family: {min_size} samples, Largest family: {max_size} samples")
-    print("Families with < 10 samples:")
-    for family, size in sizes.items():
-        if size < 10:
-            print(f"  [!] {family}: {size} samples (very small)")
-
-# --- New: Supplement/Downsample Check ---
-def check_balancing_requirements(target_count=1000):
-    """
-    For each family, print base and OpenFWI sample counts, and how many to supplement or downsample.
-    """
-    print("\n=== Data Balancing Requirements ===")
-    # from config import CFG
-    import os
-    # Detect OpenFWI path
-    openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-    base_families = list(CFG.paths.families.keys())
-    # If OpenFWI is not available, skip
-    if not openfwi_path.exists():
-        print("OpenFWI dataset not found. Skipping balancing check.")
-        return
-    print(f"Target samples per family: {target_count}")
-    print(f"{'Family':<15} {'Base':>6} {'OpenFWI':>8} {'To Add':>8} {'To Down':>8}")
-    print("-"*50)
-    for family in base_families:
-        # Count base samples
-        base_count = count_samples_base(CFG.paths.train, family)
-        # Count OpenFWI samples
-        openfwi_count = count_samples_openfwi(openfwi_path, family)
-        # Compute how many to add or downsample
-        to_add = max(0, target_count - base_count)
-        to_down = max(0, (base_count + openfwi_count) - target_count) if (base_count + openfwi_count) > target_count else 0
-        print(f"{family:<15} {base_count:>6} {openfwi_count:>8} {to_add:>8} {to_down:>8}")
-    print("-"*50)
-
-def count_samples_base(base_path, family):
-    fam_dir = base_path / family
-    # Vel/Style: data/ subfolder with data*.npy files (batched)
-    if (fam_dir / 'data').exists():
-        data_dir = fam_dir / 'data'
-        files = sorted(data_dir.glob('*.npy'))
-        total_samples = 0
-        for f in files:
-            arr = np.load(f, mmap_mode='r')
-            total_samples += arr.shape[0]  # Each file: (500, ...)
-        return total_samples
-    else:
-        # Fault: seis*.npy files in family folder (not batched)
-        seis_files = sorted(fam_dir.glob('seis*.npy'))
-        return len(seis_files)
-
-def count_samples_openfwi(openfwi_path, family):
-    fam_dir = openfwi_path / family
-    # Look for both seis*.npy and data*.npy files
-    files = list(fam_dir.glob('seis*.npy')) + list(fam_dir.glob('data*.npy'))
-    total_samples = 0
-    for f in files:
-        arr = np.load(f, mmap_mode='r')
-        # If batched, count first dimension; else count as 1
-        n = arr.shape[0] if arr.ndim > 2 else 1
-        total_samples += n
-    return total_samples
-
-def print_samples_per_file(base_path, family):
-    """
-    For each .npy file in the family directory, print the filename, shape, and number of samples (first dimension if batched, else 1).
-    """
-    fam_dir = base_path / family
-    files = list(fam_dir.glob('seis*.npy')) + list(fam_dir.glob('vel*.npy'))
-    print(f"\nSamples per file for family: {family}")
-    for f in files:
-        arr = np.load(f, mmap_mode='r')
-        shape = arr.shape
-        if len(shape) > 1:
-            n_samples = shape[0]
-        else:
-            n_samples = 1
-        print(f"  {f.name}: shape = {shape}, samples in file = {n_samples}")
-
-def main():
-    # from config import CFG
-    families = list(CFG.paths.families.keys())
-    family_stats = {}
-    
-    for family in families:
-        print(f"\n--- EDA for family: {family} ---")
-        seis_stats, vel_stats = eda_on_family(family)
-        family_stats[family] = (seis_stats, vel_stats)
-        print_summary(seis_stats, f"{family} seis")
-        print_summary(vel_stats, f"{family} vel")
-    
-    # Generate distribution plots
-    fig = plot_family_distributions(family_stats)
-    plt.show()
-    
-    # Analyze correlations
-    correlations = analyze_family_correlations(family_stats)
-    print("\nCorrelations between seismic and velocity statistics:")
-    for family, corrs in correlations.items():
-        print(f"{family}:")
-        print(f"  Mean correlation: {corrs['mean_corr']:.3f}")
-        print(f"  Std correlation: {corrs['std_corr']:.3f}")
-
-    # New EDA: Geometry, shape, and size summaries
-    extract_and_plot_geometry(family_stats)
-    summarize_array_shapes(family_stats)
-    summarize_family_sizes(family_stats)
-
-    # --- Print explicit sample counts for each family ---
-    print("\nSample counts per family (Base and OpenFWI):")
-    base_path = CFG.paths.train  # This should point to 'train_samples'
-    openfwi_path = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-    print(f"{'Family':<15} {'Base':>6} {'OpenFWI':>8}")
-    print("-"*32)
-    for fam in families:
-        base_count = count_samples_base(base_path, fam)
-        openfwi_count = count_samples_openfwi(openfwi_path, fam)
-        print(f"{fam:<15} {base_count:>6} {openfwi_count:>8}")
-    print("-"*32)
-
-    # Check samples per file for large Fault/Curve families
-    for fam in ['FlatFault_A', 'FlatFault_B', 'CurveFault_A', 'CurveFault_B']:
-        print_samples_per_file(base_path, fam)
-
-    # Check balancing requirements
-    check_balancing_requirements()
-
-    # Check OpenFWI file shapes
-    families = ['FlatVel_A', 'FlatFault_A', 'CurveVel_A']
-    openfwi_root = Path('/kaggle/input/openfwi-preprocessed-72x72/openfwi_72x72')
-
-    for fam in families:
-        fam_dir = openfwi_root / fam
-        # This needs to be updated to check for both seis*.npy and data*.npy files 
-
-        files = sorted(fam_dir.glob('seis*.npy'))[:3] + sorted(fam_dir.glob('data*.npy'))[:3]
-        print(f"\nFamily: {fam}")
-        for f in files:
-            arr = np.load(f, mmap_mode='r')
-            print(f"  {f.name}: shape = {arr.shape}")
-
-if __name__ == "__main__":
-    main() 
-
-
-# %%
-# Source: model.py
+# Source: src/core/model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1641,431 +2214,7 @@ class SpecProjNet(nn.Module):
 
 
 # %%
-# Source: proj_mask.py
-# ## Model Architecture - Spectral Projector
-
-
-
-# %%
-# Source: proj_mask.py
-import torch, math
-from torch import nn
-from config import CFG
-from functools import lru_cache
-
-@lru_cache(maxsize=None)
-def _freq_grids(shape: tuple, device: torch.device):
-    # shape = (..., T, R) after rfftn  ⇒  last dim is R/2+1
-    T, R2 = shape[-2], shape[-1]
-    dt, dx = 1e-3, 10.           # hard-coded (could move to CFG)
-    freqs_t = torch.fft.rfftfreq(T, dt, device=device)          # (T//2+1,)
-    freqs_x = torch.fft.fftfreq(2*(R2-1), dx, device=device)    # (R,)
-    ω = freqs_t.view(-1, 1)                  # (T/2+1,1)
-    k = freqs_x.view(1, -1)                  # (1,R)
-    return ω, k
-
-class PhysMask(nn.Module):
-    """
-    Learns background slowness c and temperature τ.
-    Returns up-going and down-going wavefields.
-    """
-    def __init__(self,
-                 c_init=3000., c_min=1500., c_max=5500.):
-        super().__init__()
-        self.log_c   = nn.Parameter(torch.log(torch.tensor(c_init)))
-        self.log_tau = nn.Parameter(torch.zeros(()))  # τ ≈ 1
-
-        self.register_buffer('c_min', torch.tensor(c_min))
-        self.register_buffer('c_max', torch.tensor(c_max))
-
-    def forward(self, x: torch.Tensor):
-        # x  (B,S,T,R)  – real
-        B, S, T, R = x.shape
-        Xf = torch.fft.rfftn(x, dim=(-2,-1))
-        ω, k = _freq_grids(Xf.shape[-2:], Xf.device)
-
-        c  = torch.sigmoid(self.log_c) * (self.c_max-self.c_min) + self.c_min
-        τ  = torch.exp(self.log_tau).clamp(0.1, 10.)
-
-        ratio = ω / torch.sqrt(ω**2 + (c*k)**2 + 1e-9)
-        mask_up   = torch.sigmoid( ratio / τ)
-        mask_down = torch.sigmoid(-ratio / τ)
-
-        mask_up = mask_up.expand_as(Xf)
-        mask_down = mask_down.expand_as(Xf)
-
-        up   = torch.fft.irfftn(Xf*mask_up  , dim=(-2,-1), s=(T,R))
-        down = torch.fft.irfftn(Xf*mask_down, dim=(-2,-1), s=(T,R))
-        return up, down
-
-class SpectralAssembler(nn.Module):
-    """
-    Implements Π±† using small ε-regularized Moore-Penrose inverse.
-    Reconstructs wavefield from up-going and down-going components.
-    
-    Reference: §1 of ICLR25FWI paper for mathematical formulation.
-    """
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, up: torch.Tensor, down: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            up: Up-going wavefield (B,S,T,R)
-            down: Down-going wavefield (B,S,T,R)
-        Returns:
-            Reconstructed wavefield (B,S,T,R)
-        """
-        # Convert to frequency domain
-        Up_f = torch.fft.rfftn(up, dim=(-2,-1))
-        Down_f = torch.fft.rfftn(down, dim=(-2,-1))
-        
-        # Compute Moore-Penrose inverse with regularization
-        # Π† = (Π^T Π + εI)^(-1) Π^T
-        # where Π is the projection operator
-        Up_f_conj = Up_f.conj()
-        Down_f_conj = Down_f.conj()
-        
-        # Regularized inverse
-        denom = (Up_f_conj * Up_f + Down_f_conj * Down_f + self.eps)
-        inv = 1.0 / denom
-        
-        # Apply inverse to reconstruct
-        recon_f = inv * (Up_f_conj * Up_f + Down_f_conj * Down_f)
-        
-        # Convert back to time domain
-        return torch.fft.irfftn(recon_f, dim=(-2,-1), s=up.shape[-2:])
-
-def split_and_reassemble(x: torch.Tensor, mask: PhysMask, assembler: SpectralAssembler) -> torch.Tensor:
-    """
-    Helper function to split wavefield and reassemble it.
-    Useful for unit testing the projection operators.
-    
-    Args:
-        x: Input wavefield (B,S,T,R)
-        mask: PhysMask instance
-        assembler: SpectralAssembler instance
-    Returns:
-        Reconstructed wavefield (B,S,T,R)
-    """
-    up, down = mask(x)
-    return assembler(up, down) 
-
-
-# %%
-# Source: iunet.py
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from config import CFG
-
-class CouplingLayer(nn.Module):
-    """Coupling layer for invertible transformations."""
-    def __init__(self, in_channels, hidden_channels):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels//2, hidden_channels, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(hidden_channels, in_channels//2, 3, padding=1)
-        )
-        
-    def forward(self, x, reverse=False):
-        x1, x2 = torch.chunk(x, 2, dim=1)
-        if not reverse:
-            x2 = x2 + self.net(x1)
-        else:
-            x2 = x2 - self.net(x1)
-        return torch.cat([x1, x2], dim=1)
-
-class IUNet(nn.Module):
-    """
-    Invertible U-Net for latent space translation.
-    Approximately 24M parameters.
-    """
-    def __init__(self, in_channels=1, hidden_channels=64, num_layers=4):
-        super().__init__()
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        
-        # Initial projection
-        self.proj_in = nn.Conv2d(in_channels, hidden_channels, 1)
-        
-        # Coupling layers
-        self.couplings = nn.ModuleList([
-            CouplingLayer(hidden_channels, hidden_channels*2)
-            for _ in range(num_layers)
-        ])
-        
-        # Final projection
-        self.proj_out = nn.Conv2d(hidden_channels, in_channels, 1)
-        
-    def forward(self, z: torch.Tensor, direction: str) -> torch.Tensor:
-        """
-        Args:
-            z: Input tensor (B,C,H,W)
-            direction: Either "p→v" or "v→p"
-        Returns:
-            Translated tensor (B,C,H,W)
-        """
-        if direction not in ["p→v", "v→p"]:
-            raise ValueError("direction must be either 'p→v' or 'v→p'")
-            
-        x = self.proj_in(z)
-        
-        # Apply coupling layers
-        for coupling in self.couplings:
-            x = coupling(x, reverse=(direction == "v→p"))
-            
-        return self.proj_out(x)
-
-def create_iunet() -> IUNet:
-    """Factory function to create IU-Net with default config."""
-    return IUNet(
-        in_channels=1,
-        hidden_channels=64,
-        num_layers=4
-    ) 
-
-
-# %%
-# Source: specproj_hybrid.py
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from src.core.config import CFG
-from src.core.proj_mask import PhysMask, SpectralAssembler
-from src.core.iunet import create_iunet
-from .specproj_unet import SmallUNet
-import logging
-
-class WaveDecoder(nn.Module):
-    """Simple decoder for wavefield prediction."""
-    def __init__(self, in_channels=1, out_channels=1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(32, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(32, out_channels, 3, padding=1)
-        )
-        
-    def forward(self, x):
-        return self.net(x)
-
-class HybridSpecProj(nn.Module):
-    """
-    Hybrid model combining physics-guided splitting with IU-Net translation.
-    Memory-efficient implementation for Kaggle.
-    """
-    def __init__(self, chans=32, depth=4):
-        super().__init__()
-        self.mask = PhysMask()
-        self.assembler = SpectralAssembler()
-        
-        # IU-Net for latent translation (only if joint training)
-        self.iunet = create_iunet() if CFG.is_joint() else None
-        
-        # Decoders
-        self.vel_decoder = SpecProjNet(
-            backbone=CFG.backbone,
-            pretrained=False,
-            ema_decay=CFG.ema_decay
-        )
-        self.wave_decoder = WaveDecoder() if CFG.is_joint() else None
-        
-        # Enable gradient checkpointing if configured
-        if CFG.gradient_checkpointing:
-            self.vel_decoder.backbone.use_checkpoint = True
-            if self.iunet is not None:
-                self.iunet.use_checkpoint = True
-        
-    def forward(self, seis: torch.Tensor, mode: str = "inverse") -> tuple:
-        """
-        Args:
-            seis: Seismic data (B,S,T,R)
-            mode: Either "inverse" or "joint"
-        Returns:
-            If mode == "inverse":
-                (v_pred, None)
-            If mode == "joint":
-                (v_pred, p_pred)
-        """
-        # Split wavefield
-        up, down = self.mask(seis)
-        
-        if not CFG.is_joint() or mode == "inverse":
-            # Use original SpecProjNet path
-            B,S,T,R = up.shape
-            up = up.reshape(B*S, 1, T, R).repeat(1,5,1,1)
-            down = down.reshape(B*S, 1, T, R).repeat(1,5,1,1)
-            v_pred = self.vel_decoder(up)
-            return v_pred, None
-            
-        # Joint mode with IU-Net translation
-        # 1. Translate up/down to velocity space
-        v_up = self.iunet(up, "p→v")
-        v_down = self.iunet(down, "p→v")
-        
-        # 2. Decode velocity
-        v_pred = self.vel_decoder(torch.cat([v_up, v_down], dim=1))
-        
-        # 3. Translate back to wavefield space
-        p_up = self.iunet(v_up, "v→p")
-        p_down = self.iunet(v_down, "v→p")
-        
-        # 4. Reassemble and decode wavefield
-        p_recon = self.assembler(p_up, p_down)
-        p_pred = self.wave_decoder(p_recon)
-        
-        return v_pred, p_pred
-
-# For backwards compatibility
-SpecProjUNet = HybridSpecProj 
-
-
-# %%
-# Source: losses.py
-# ## Loss Functions
-
-
-
-# %%
-# Source: losses.py
-import torch
-import torch.nn.functional as F
-from src.core.config import CFG
-import torch.cuda.amp as amp
-from typing import Dict, Tuple, Optional
-
-def track_memory_usage():
-    """Track current GPU memory usage."""
-    if torch.cuda.is_available():
-        return torch.cuda.memory_allocated() / 1024**2  # MB
-    return 0.0
-
-def pde_residual(v_pred: torch.Tensor,
-                 seis: torch.Tensor,
-                 dt: float = 1e-3,
-                 dx: float = 10.,
-                 use_amp: bool = True) -> torch.Tensor:
-    """
-    Enhanced acoustic wave equation residual with mixed precision support.
-    
-    Args:
-        v_pred: Predicted velocity field
-        seis: Seismic data
-        dt: Time step
-        dx: Spatial step
-        use_amp: Whether to use automatic mixed precision
-        
-    Returns:
-        PDE residual loss
-    """
-    with amp.autocast(enabled=use_amp):
-        p = seis[:,0]  # (B,T,R)
-        
-        # Second-order time derivative
-        d2t = (p[:,2:] - 2*p[:,1:-1] + p[:,:-2]) / (dt*dt)
-        
-        # Laplacian in both dimensions
-        lap_x = (p[:,:,2:] - 2*p[:,:,1:-1] + p[:,:,:-2]) / (dx*dx)
-        lap_y = (p[:,2:,:] - 2*p[:,1:-1,:] + p[:,:-2,:]) / (dx*dx)
-        lap = lap_x + lap_y
-        
-        # Velocity squared
-        v2 = v_pred[...,1:-1,1:-1]**2
-        
-        # Full residual
-        res = d2t[...,1:-1] - v2*lap[:,1:-1]
-        
-        return res.abs()
-
-class JointLoss(torch.nn.Module):
-    """
-    Enhanced joint loss with memory tracking and mixed precision support.
-    """
-    def __init__(self,
-                 λ_inv: float = 1.0,
-                 λ_fwd: float = 1.0,
-                 λ_pde: float = 0.1,
-                 λ_reg: float = 0.01,
-                 use_amp: bool = True):
-        super().__init__()
-        self.λ_inv = λ_inv
-        self.λ_fwd = λ_fwd
-        self.λ_pde = λ_pde
-        self.λ_reg = λ_reg
-        self.use_amp = use_amp
-        
-    def forward(self,
-                v_pred: torch.Tensor,
-                v_true: torch.Tensor,
-                p_pred: Optional[torch.Tensor] = None,
-                p_true: Optional[torch.Tensor] = None,
-                seis_batch: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
-        
-        with amp.autocast(enabled=self.use_amp):
-            # Inverse loss (velocity)
-            l_inv = F.l1_loss(v_pred, v_true)
-            
-            # Forward loss (wavefield)
-            l_fwd = torch.tensor(0.0, device=v_pred.device)
-            if p_pred is not None and p_true is not None:
-                l_fwd = F.l1_loss(p_pred, p_true)
-                
-            # PDE residual
-            l_pde = torch.tensor(0.0, device=v_pred.device)
-            if seis_batch is not None:
-                l_pde = pde_residual(v_pred, seis_batch, use_amp=self.use_amp).mean()
-                
-            # Regularization loss (optional)
-            l_reg = torch.tensor(0.0, device=v_pred.device)
-            if hasattr(self, 'λ_reg') and self.λ_reg > 0:
-                l_reg = F.mse_loss(v_pred[:,:,1:] - v_pred[:,:,:-1], 
-                                 torch.zeros_like(v_pred[:,:,1:]))
-            
-            # Combine losses
-            total = (self.λ_inv * l_inv + 
-                    self.λ_fwd * l_fwd + 
-                    self.λ_pde * l_pde +
-                    self.λ_reg * l_reg)
-            
-            # Track memory usage
-            memory_used = track_memory_usage()
-                    
-            return total, {
-                'l_inv': l_inv.item(),
-                'l_fwd': l_fwd.item() if isinstance(l_fwd, torch.Tensor) else l_fwd,
-                'l_pde': l_pde.item() if isinstance(l_pde, torch.Tensor) else l_pde,
-                'l_reg': l_reg.item() if isinstance(l_reg, torch.Tensor) else l_reg,
-                'memory_mb': memory_used
-            }
-
-def get_loss_fn() -> torch.nn.Module:
-    """Get the appropriate loss function based on configuration."""
-    if CFG.is_joint():
-        return JointLoss(
-            λ_inv=CFG.lambda_inv,
-            λ_fwd=CFG.lambda_fwd,
-            λ_pde=CFG.lambda_pde,
-            λ_reg=CFG.lambda_reg if hasattr(CFG, 'lambda_reg') else 0.01,
-            use_amp=CFG.use_amp if hasattr(CFG, 'use_amp') else True
-        )
-    else:
-        return torch.nn.L1Loss()  # Default to L1 loss for non-joint training
-
-# For backwards compatibility
-HybridLoss = JointLoss 
-
-
-# %%
-# Source: train.py
+# Source: src/core/train.py
 """
 Training script that uses DataManager for all data IO.
 """
@@ -2357,92 +2506,4 @@ if __name__ == '__main__':
     # Set debug mode to True and update settings
     CFG.set_debug_mode(True)
     train() 
-
-
-# %%
-# Source: infer.py
-"""
-Inference script that uses DataManager for all data IO.
-All data IO in this file must go through DataManager (src/core/data_manager.py)
-Do NOT load data directly in this file.
-"""
-import torch
-from tqdm import tqdm
-from torch.amp import autocast
-from model import SpecProjNet
-from data_manager import DataManager
-from config import CFG
-import pandas as pd
-import os
-from pathlib import Path
-import csv
-
-def format_submission(vel_map, oid):
-    # vel_map: (70, 70) numpy array
-    # oid: string (file stem)
-    rows = []
-    for y in range(vel_map.shape[0]):
-        row = {'oid_ypos': f'{oid}_y_{y}'}
-        for i, x in enumerate(range(1, 70, 2)):
-            row[f'x_{x}'] = float(vel_map[y, x])
-        rows.append(row)
-    return rows
-
-def infer():
-    # Use weights path from config
-    weights = CFG.weight_path
-
-    # Model setup
-    model = SpecProjNet(
-        backbone=CFG.backbone,
-        pretrained=False,
-        ema_decay=0.99,
-    ).to(CFG.env.device)
-    print("Model created")
-    checkpoint = torch.load(weights, map_location=CFG.env.device, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.set_ema()
-    print("Weights loaded and EMA set")
-    model.eval()
-    print("Model set to eval")
-
-    # Data setup
-    data_manager = DataManager()
-    test_files = data_manager.get_test_files()
-    print("Number of test files:", len(test_files))
-    # test_files = test_files[:10]  # Uncomment for debugging only
-    test_dataset = data_manager.create_dataset(test_files, None, 'test')
-    test_loader = data_manager.create_loader(
-        test_files, None, 'test',
-        batch_size=2,  # or your preferred batch size
-        shuffle=False,
-        num_workers=0
-    )
-    print("Test loader created")
-
-    # Prepare CSV header
-    x_cols = [f'x_{x}' for x in range(1, 70, 2)]
-    fieldnames = ['oid_ypos'] + x_cols
-
-    print("Starting inference loop")
-    with open('submission.csv', 'w', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        with torch.no_grad():
-            for batch_idx, (seis, _) in enumerate(tqdm(test_loader, desc="Processing test files")):
-                seis = seis.to(CFG.env.device, non_blocking=True).float()
-                with autocast('cuda', enabled=CFG.use_amp):
-                    preds = model(seis)
-                preds = preds.cpu().numpy()
-                for i in range(preds.shape[0]):
-                    vel_map = preds[i]
-                    if vel_map.shape[0] == 1:
-                        vel_map = vel_map[0]
-                    oid = Path(test_files[batch_idx * test_loader.batch_size + i]).stem
-                    rows = format_submission(vel_map, oid)
-                    writer.writerows(rows)  # Write this batch's rows immediately
-    print("Inference complete and submission.csv saved.")
-
-if __name__ == "__main__":
-    infer() 
 

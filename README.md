@@ -7,6 +7,9 @@ A deep learning solution for seismic waveform inversion using a HGNet/ConvNeXt b
 - AMP (Automatic Mixed Precision) for faster training
 - Distributed Data Parallel (DDP) for multi-GPU training
 - Test Time Augmentation (TTA) for improved inference
+- Geometric-aware preprocessing and model management
+- Family-specific data loading with geometric features
+- Cross-validation with geometric metrics
 
 ### Data IO Policy (IMPORTANT)
 **All data loading, streaming, and batching must go through `DataManager` in `src/core/data_manager.py`.**
@@ -15,10 +18,21 @@ A deep learning solution for seismic waveform inversion using a HGNet/ConvNeXt b
 - All source files must import and use DataManager for any data access.
 
 ### Project Structure
-# TODO: This needs updating; it is incompleete 
-- `kaggle_notebook.py`: Main development file containing all code
-- `src/core/data_manager.py`: **Single source of truth for all data IO**
-- `requirements.txt`: Project dependencies
+```
+src/
+├── core/
+│   ├── preprocess.py      # Geometric-aware preprocessing
+│   ├── registry.py        # Model registry with geometric metadata
+│   ├── checkpoint.py      # Checkpoint management
+│   ├── geometric_loader.py # Family-specific data loading
+│   ├── geometric_cv.py    # Cross-validation framework
+│   ├── data_manager.py    # Data IO management
+│   ├── model.py          # Model architecture
+│   └── config.py         # Configuration
+├── utils/
+│   └── update_kaggle_notebook.py  # Notebook update script
+└── requirements.txt      # Project dependencies
+```
 
 ### Features
 - **Physics-Guided Architecture**: Uses spectral projectors to inject wave-equation priors
@@ -27,14 +41,25 @@ A deep learning solution for seismic waveform inversion using a HGNet/ConvNeXt b
 - **Family-Aware Training**: Stratified sampling by geological families
 - **Robust Training**: Includes gradient clipping, early stopping, and learning rate scheduling
 - **Comprehensive Checkpointing**: Saves full training state for easy resumption
+- **Geometric-Aware Processing**: Nyquist validation, geometric feature extraction
+- **Model Registry**: Version control with geometric metadata
+- **Cross-Validation**: Family-based stratification with geometric metrics
 
 ### Usage
+#### Preprocessing
+```python
+from src.core.preprocess import main as preprocess_main
+# Run preprocessing with default settings
+preprocess_main()  # This will create GPU-specific datasets
+```
+
 #### Training
 ```python
 from src.core.train import train
 # Start training with default settings
 train(fp16=True)  # Enable mixed precision training
 ```
+
 #### Inference
 ```python
 from src.core.model import get_model
@@ -69,26 +94,72 @@ This project supports the following environments:
    - Search for and add:
      1. 'Waveform Inversion' competition dataset
      2. 'openfwi-preprocessed-72x72' dataset (contains preprocessed data and pretrained models)
-3. Copy code chunks from `kaggle_notebook.py` into separate cells in your Kaggle notebook for testing
-4. For final submission, copy the entire contents of `kaggle_notebook.py` into a single cell
+3. Clone the repository:
+```python
+!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+%cd YaleGWI
+```
+4. Install dependencies:
+```python
+!pip install -r requirements.txt
+```
+5. Run preprocessing:
+```python
+from src.core.preprocess import main as preprocess_main
+preprocess_main()
+```
+6. Start training:
+```python
+from src.core.train import train
+train(fp16=True)
+```
+
+### Notebook Organization
+The project uses a notebook update script (`update_kaggle_notebook.py`) that automatically organizes code into cells in the correct order:
+1. Imports and setup
+2. Preprocessing
+3. Model registry and checkpoint management
+4. Data loading and geometric features
+5. Training configuration
+6. Training loop
+7. Inference and submission
 
 ---
 
 ## 4. Colab Instructions
 
-### Local Development Setup
+### Quick Start
 1. Clone the repository:
-```bash
-git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
-cd YaleGWI
+```python
+!git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+%cd YaleGWI
 ```
 2. Install dependencies:
-```bash
-pip install -r requirements.txt
+```python
+!pip install -r requirements.txt
 ```
-3. Develop and test your code locally in `kaggle_notebook.py`
-4. Copy relevant code chunks to Colab notebook cells as needed
-5. Test functionality in Colab environment
+3. Run preprocessing:
+```python
+from src.core.preprocess import main as preprocess_main
+preprocess_main()
+```
+4. Start training:
+```python
+from src.core.train import train
+train(fp16=True)
+```
+
+### Data Management
+- For large datasets, use the provided preprocessing script to create GPU-specific datasets
+- The preprocessing includes Nyquist validation and geometric feature extraction
+- Processed data is saved in zarr format for efficient loading
+- Use the geometric-aware data loader for family-specific training
+
+### Model Management
+- Use the model registry to track different model versions
+- Checkpoints include geometric metadata for reproducibility
+- Cross-validation uses family-based stratification
+- Monitor geometric metrics during training
 
 ---
 
