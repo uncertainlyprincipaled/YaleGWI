@@ -93,12 +93,12 @@ class DataManager:
                 }
             
             self.s3 = boto3.client('s3', **credentials)
-            self.s3_bucket = credentials.get('s3_bucket')
+            self.s3_bucket = credentials.get('s3_bucket') or os.environ.get('AWS_S3_BUCKET')
             self.cache_dir = Path(tempfile.gettempdir()) / 'gwi_cache'
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             
             if not self.s3_bucket:
-                raise ValueError("S3 bucket not specified in credentials")
+                raise ValueError("S3 bucket not specified in credentials or environment variable AWS_S3_BUCKET")
                 
         except Exception as e:
             logging.error(f"Failed to set up S3: {e}")

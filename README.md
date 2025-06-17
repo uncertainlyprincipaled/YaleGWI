@@ -287,29 +287,53 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
    cd YaleGWI
    ```
 
-3. **Install Dependencies and Set Up Environment**:
+3. **Import All Core Libraries in Your Notebook**:
    ```python
    import os
    import sys
+   import json
+   import boto3
+   from botocore.exceptions import ClientError
 
-   # Set environment variable for config
+   # 1. Set environment variable for config
    os.environ['GWI_ENV'] = 'sagemaker'
 
-   # Change to project root and add src to sys.path
+   # 2. Set up project path
    os.chdir('/home/sagemaker-user/YaleGWI')  # Adjust as needed
    sys.path.append(os.path.abspath('./src'))
 
-   from src.core.imports import setup_environment
-   deps = setup_environment('sagemaker')
-   np = deps['np']
-   torch = deps['torch']
-   CFG = deps['CFG']
-   DataManager = deps['DataManager']
-   ```
+   # 2. Retrieve secret from AWS Secrets Manager
+   def get_secret():
+       secret_name = "sagemaker-access"  # Use your actual secret name
+       region_name = "us-east-1"              # Use your region
 
-   **Note:**
-   - You do NOT need to install or import `kagglehub` on SageMaker.
-   - Only install `kagglehub` if you are running on Kaggle or Colab.
+       session = boto3.session.Session()
+       client = session.client(
+           service_name='secretsmanager',
+           region_name=region_name
+       )
+
+       try:
+           get_secret_value_response = client.get_secret_value(
+               SecretId=secret_name
+           )
+       except ClientError as e:
+           raise e
+
+       return json.loads(get_secret_value_response['SecretString'])
+
+   secret = get_secret()
+
+   # 3. Set environment variables for DataManager and boto3
+   os.environ['AWS_ACCESS_KEY_ID'] = secret['aws_access_key_id']
+   os.environ['AWS_SECRET_ACCESS_KEY'] = secret['aws_secret_access_key']
+   os.environ['AWS_REGION'] = secret['region_name']
+   os.environ['AWS_S3_BUCKET'] = secret['s3_bucket']
+
+   # 4. Import all core libraries
+   from src.core.imports import *
+   # Now you have np, torch, CFG, DataManager, etc. available
+   ```
 
 ### Running Preprocessing
 
