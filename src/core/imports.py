@@ -34,8 +34,7 @@ CORE_DEPS = [
     'dask>=2021.9.0',
     'boto3>=1.18.0',
     'botocore>=1.21.0',
-    'timm>=0.6.0',
-    'kagglehub>=0.2.0',  # Optional
+    'timm>=0.6.0'
 ]
 
 # Optional dependencies for specific environments
@@ -106,7 +105,7 @@ def setup_environment(env: str = None):
     import boto3
     from botocore.exceptions import ClientError
     import timm
-    import kagglehub  # Optional
+    # kagglehub is imported optionally at the top level
     
     # Import project modules
     project_root = Path(__file__).parent.parent.parent
@@ -158,9 +157,12 @@ import boto3
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 import timm
-import kagglehub  # Optional import
+try:
+    import kagglehub
+except ImportError:
+    kagglehub = None
 
 if __name__ == "__main__":
     # Example usage
-    deps = setup_environment('kaggle')  # or 'colab' or 'sagemaker'
+    deps = setup_environment('sagemaker')  # or 'colab' or 'sagemaker'
     print("Environment setup complete!")
