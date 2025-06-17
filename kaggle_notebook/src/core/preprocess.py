@@ -1,9 +1,27 @@
+"""
+Seismic Data Preprocessing Pipeline
+
+This module implements a comprehensive preprocessing pipeline for seismic data, focusing on:
+1. Data downsampling while preserving signal integrity (Nyquist-Shannon theorem)
+2. Memory-efficient processing using memory mapping and chunked operations
+3. Distributed storage using Zarr and S3
+4. GPU-optimized data splitting
+
+Key Concepts:
+- Nyquist-Shannon Theorem: Ensures we don't lose information during downsampling
+- Memory Mapping: Allows processing large files without loading them entirely into memory
+- Chunked Processing: Enables parallel processing and efficient memory usage
+- Zarr Storage: Provides efficient compression and chunked storage for large datasets
+"""
+
 import os
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import argparse
 import subprocess
+# For Kaggle/Colab, install zarr
+# !pip install zarr
 import zarr
 import dask.array as da
 from dask.diagnostics import ProgressBar
@@ -14,22 +32,27 @@ import warnings
 import boto3
 from botocore.exceptions import ClientError
 import json
-from src.core.config import CFG
+from src.core.config import CFG, FAMILY_FILE_MAP
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants for preprocessing
-CHUNK_TIME = 256  # After decimating by 4
-CHUNK_SRC_REC = 8
-DT_DECIMATE = 4  # 1 kHz → 250 Hz
-NYQUIST_FREQ = 500  # Hz (half of original sampling rate)
+CHUNK_TIME = 256  # After decimating by 4 - optimized for GPU memory
+CHUNK_SRC_REC = 8  # Chunk size for source-receiver dimensions
+DT_DECIMATE = 4  # 1 kHz → 250 Hz - reduces data size while preserving signal
+NYQUIST_FREQ = 500  # Hz (half of original sampling rate) - critical for downsampling
 
 def get_aws_credentials() -> dict:
     """
     Get AWS credentials from Kaggle secrets or environment variables.
     Prioritizes Kaggle secrets for security in Kaggle environment.
+    
+    Intuition:
+    - Security: Never hardcode credentials
+    - Flexibility: Support multiple environments (Kaggle, local, AWS)
+    - Fallback: Multiple credential sources for robustness
     """
     credentials = {}
     
@@ -42,7 +65,7 @@ def get_aws_credentials() -> dict:
         credentials = {
             'aws_access_key_id': secrets.get_secret('aws_access_key_id'),
             'aws_secret_access_key': secrets.get_secret('aws_secret_access_key'),
-            'region_name': secrets.get_secret('aws_region', default='us-east-1'),
+            'region_name': secrets.get_secret('aws_region') or 'us-east-1',  # Fallback to us-east-1 if not set
             's3_bucket': secrets.get_secret('aws_s3_bucket')  # Add S3 bucket from secrets
         }
         
@@ -73,10 +96,10 @@ def upload_to_s3(local_path: Path, s3_bucket: str, s3_key: str) -> None:
     """
     Upload a file to S3 with progress tracking.
     
-    Args:
-        local_path: Local file path
-        s3_bucket: S3 bucket name
-        s3_key: S3 object key
+    Intuition:
+    - Progress tracking: Important for large file uploads
+    - Error handling: Robust error reporting
+    - Memory efficiency: Streams file directly to S3
     """
     try:
         credentials = get_aws_credentials()
@@ -103,6 +126,11 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
     """
     Validate that the data satisfies Nyquist criterion after downsampling.
     
+    Intuition:
+    - Nyquist-Shannon Theorem: Sampling rate must be > 2x highest frequency
+    - Energy Analysis: Check if significant energy exists above Nyquist frequency
+    - Safety Margin: Warn if >1% of energy is above Nyquist (potential aliasing)
+    
     Args:
         data: Input seismic data array
         original_fs: Original sampling frequency in Hz
@@ -128,6 +156,18 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
 def preprocess_one(arr: np.ndarray) -> np.ndarray:
     """
     Preprocess a single seismic array with downsampling and normalization.
+    
+    Intuition:
+    - Downsampling: Reduce data size while preserving signal integrity
+    - Anti-aliasing: Prevent frequency folding during downsampling
+    - Memory Efficiency: Use float16 for reduced memory footprint
+    - Robust Normalization: Handle outliers using percentiles
+    
+    Processing Steps:
+    1. Validate Nyquist criterion
+    2. Apply anti-aliasing filter and downsample
+    3. Convert to float16
+    4. Normalize using robust statistics
     
     Args:
         arr: Input seismic array
@@ -159,6 +199,12 @@ def preprocess_one(arr: np.ndarray) -> np.ndarray:
 def process_family(family: str, input_dir: Path, output_dir: Path) -> List[str]:
     """
     Process all files in a family and return paths to processed files.
+    
+    Intuition:
+    - Batch Processing: Handle multiple files efficiently
+    - Memory Mapping: Process large files without loading entirely into memory
+    - Error Handling: Continue processing even if individual files fail
+    - Progress Tracking: Show progress for long-running operations
     
     Args:
         family: Name of the geological family
@@ -203,6 +249,12 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
     """
     Create a zarr dataset from processed files and optionally upload to S3.
     
+    Intuition:
+    - Lazy Loading: Use Dask for out-of-memory computations
+    - Chunked Storage: Enable parallel access and efficient compression
+    - Cloud Storage: Optional S3 upload for distributed access
+    - Memory Management: Clean up local files after successful upload
+    
     Args:
         processed_paths: List of paths to processed files
         output_path: Path to save zarr dataset
@@ -210,16 +262,36 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         s3_bucket: Optional S3 bucket for offloading
     """
     try:
+        # Dynamically determine shape from first file
+        if not processed_paths:
+            raise ValueError("No processed paths provided.")
+            
+        first_arr = np.load(processed_paths[0], mmap_mode='r')
+        arr_shape = first_arr.shape
+        arr_dtype = first_arr.dtype
+        
+        # Validate expected dimensions
+        if len(arr_shape) == 4:  # Seismic data
+            expected_shape = (500, 5, 1000, 70)
+            if arr_shape != expected_shape:
+                logger.warning(f"Unexpected seismic data shape: {arr_shape}, expected {expected_shape}")
+        elif len(arr_shape) == 4 and arr_shape[1] == 1:  # Velocity model
+            expected_shape = (500, 1, 70, 70)
+            if arr_shape != expected_shape:
+                logger.warning(f"Unexpected velocity model shape: {arr_shape}, expected {expected_shape}")
+        else:
+            raise ValueError(f"Unexpected array shape: {arr_shape}")
+            
         # Create lazy Dask arrays
         lazy_arrays = []
         for path in processed_paths:
             x = da.from_delayed(
                 dask.delayed(np.load)(path),
-                shape=(32, 256, 64),  # Example dims after decimation
-                dtype='float16'
+                shape=arr_shape,
+                dtype=arr_dtype
             )
             lazy_arrays.append(x)
-        
+            
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
         
@@ -235,38 +307,45 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         if s3_bucket:
             s3_key = f"preprocessed/{output_path.name}"
             upload_to_s3(output_path, s3_bucket, s3_key)
-            
             # Clean up local file after successful upload
             if output_path.exists():
                 output_path.unlink()
                 logger.info(f"Cleaned up local file {output_path}")
+                
     except Exception as e:
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
         raise
 
-def split_for_gpus(processed_paths: List[str], output_base: Path, s3_bucket: Optional[str] = None) -> None:
+def split_for_gpus(processed_paths: List[str], output_base: Path, s3_bucket: Optional[str] = None, by_family: bool = True) -> None:
     """
     Split processed files into two datasets for the two T4 GPUs and optionally upload to S3.
-    
-    Args:
-        processed_paths: List of paths to processed files
-        output_base: Base directory for output
-        s3_bucket: Optional S3 bucket for offloading
+    If by_family is True, split by family (half families to each GPU), else split within families.
+    Ensure all data is downsampled to float16.
     """
     try:
-        n_samples = len(processed_paths)
-        mid_point = n_samples // 2
-        
+        if by_family:
+            # Group processed_paths by family
+            family_groups = {}
+            for path in processed_paths:
+                # Assume path contains family name as a parent directory
+                family = Path(path).parent.parent.name if Path(path).parent.name in ['data', 'model'] else Path(path).parent.name
+                family_groups.setdefault(family, []).append(path)
+            families = sorted(family_groups.keys())
+            mid = len(families) // 2
+            gpu0_fams = families[:mid]
+            gpu1_fams = families[mid:]
+            gpu0_paths = [p for fam in gpu0_fams for p in family_groups[fam]]
+            gpu1_paths = [p for fam in gpu1_fams for p in family_groups[fam]]
+        else:
+            n_samples = len(processed_paths)
+            mid_point = n_samples // 2
+            gpu0_paths = processed_paths[:mid_point]
+            gpu1_paths = processed_paths[mid_point:]
         # Create GPU-specific directories
         gpu0_dir = output_base / 'gpu0'
         gpu1_dir = output_base / 'gpu1'
         gpu0_dir.mkdir(parents=True, exist_ok=True)
         gpu1_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Split paths
-        gpu0_paths = processed_paths[:mid_point]
-        gpu1_paths = processed_paths[mid_point:]
-        
         # Create zarr datasets for each GPU
         create_zarr_dataset(
             gpu0_paths,
@@ -280,13 +359,22 @@ def split_for_gpus(processed_paths: List[str], output_base: Path, s3_bucket: Opt
             (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC),
             s3_bucket
         )
-        
         logger.info(f"Created GPU datasets with {len(gpu0_paths)} and {len(gpu1_paths)} samples")
     except Exception as e:
         logger.error(f"Error splitting data for GPUs: {str(e)}")
         raise
 
 def main():
+    """
+    Main preprocessing pipeline.
+    
+    Intuition:
+    - Command Line Interface: Flexible configuration
+    - Family Processing: Handle different geological families
+    - GPU Optimization: Split data for parallel processing
+    - Cloud Integration: Optional S3 upload
+    - Error Handling: Robust error reporting and logging
+    """
     # Filter out Jupyter/Colab specific arguments
     import sys
     filtered_args = [arg for arg in sys.argv if not arg.startswith('-f') and not arg.endswith('.json')]

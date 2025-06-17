@@ -1,41 +1,15 @@
-f# %%
-# Source: header
-# SpecProj-UNet for Seismic Waveform Inversion
-# This notebook implements a physics-guided neural network for seismic waveform inversion
-# using spectral projectors and UNet architecture.
+"""
+# Seismic Waveform Inversion - Preprocessing Pipeline
 
+This notebook implements the preprocessing pipeline for seismic waveform inversion, including:
+- Geometric-aware preprocessing with Nyquist validation
+- Family-specific data loading
+- Cross-validation framework
+- Model registry and checkpoint management
+"""
 
-# %%
-# Source: imports
-
-# Standard library imports
-from __future__ import annotations
-import os
-import sys
-import json
-import time
-import signal
-import logging
-import subprocess
-import shutil
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Tuple, Optional, Any, Literal, NamedTuple
-
-# Third-party imports
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import boto3
-from botocore.exceptions import ClientError
-from tqdm import tqdm
-import timm
-import kagglehub  # Optional import
-
-# Local imports
-from src.core.config import CFG
-    
+# Install dependencies
+# !pip install -r requirements.txt
 
 
 # %%
@@ -67,7 +41,7 @@ class _KagglePaths:
         self.root: Path = Path('/kaggle/input/waveform-inversion')
         self.train: Path = self.root / 'train_samples'
         self.test: Path = self.root / 'test'
-        # folders visible in the screenshot
+        # Geological families
         self.families = {
             'FlatVel_A'   : self.train/'FlatVel_A',
             'FlatVel_B'   : self.train/'FlatVel_B',
@@ -125,7 +99,7 @@ class Config:
 
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
-            cls._inst.ema_decay = 0.99
+            cls._inst.ema_decay = 0.99 # Is this the correct value?
             cls._inst.pretrained = True
 
             # Inference weight path (default for Kaggle dataset)
@@ -246,51 +220,133 @@ class SeismicDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx):
+        # Get the file paths and indices for this sample
         sfile, vfile, i, _ = self.index[idx]
-        # Load all sources for this sample
-        seis = np.load(sfile, mmap_mode='r')[i]  # shape: (sources, receivers, timesteps)
-        vel = np.load(vfile, mmap_mode='r')[i]   # shape: (1, 70, 70)
-        seis = seis.astype(np.float16)           # shape: (5, receivers, timesteps)
+        
+        # Load the seismic data for this sample using memory mapping
+        # This loads all sources for the given sample index
+        # Shape: (sources, receivers, timesteps)
+        seis = np.load(sfile, mmap_mode='r')[i]
+        
+        # Load the corresponding velocity model
+        # Shape: (1, 70, 70) - represents the subsurface velocity structure
+        vel = np.load(vfile, mmap_mode='r')[i]
+        
+        # Convert both arrays to float16 to reduce memory usage
+        # This is important for large datasets and GPU memory efficiency
+        seis = seis.astype(np.float16)
         vel = vel.astype(np.float16)
-        # Normalize per source
+        
+        # Normalize the seismic data per source
+        # This helps with training stability and convergence
+        # 1. Calculate mean across receivers and timesteps for each source
         mu = seis.mean(axis=(1,2), keepdims=True)
+        # 2. Calculate standard deviation with small epsilon to avoid division by zero
         std = seis.std(axis=(1,2), keepdims=True) + 1e-6
+        # 3. Apply normalization
         seis = (seis - mu) / std
+        
+        # Update memory tracking if enabled
         if self.memory_tracker:
             self.memory_tracker.update(seis.nbytes + vel.nbytes)
-        return torch.from_numpy(seis), torch.from_numpy(vel) 
+            
+        # Convert numpy arrays to PyTorch tensors and return
+        # This is required for PyTorch's DataLoader
+        return torch.from_numpy(seis), torch.from_numpy(vel)
+
+# Temporary mapping for family data structure
+FAMILY_FILE_MAP = {
+    'CurveFault_A': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'CurveFault_B': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'CurveVel_A': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'CurveVel_B': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'FlatFault_A': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'FlatFault_B': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'FlatVel_A': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'FlatVel_B': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'Style_A': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'Style_B': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+} 
 
 
 # %%
 # Source: src/core/preprocess.py
+"""
+Seismic Data Preprocessing Pipeline
+
+This module implements a comprehensive preprocessing pipeline for seismic data, focusing on:
+1. Data downsampling while preserving signal integrity (Nyquist-Shannon theorem)
+2. Memory-efficient processing using memory mapping and chunked operations
+3. Distributed storage using Zarr and S3
+4. GPU-optimized data splitting
+
+Key Concepts:
+- Nyquist-Shannon Theorem: Ensures we don't lose information during downsampling
+- Memory Mapping: Allows processing large files without loading them entirely into memory
+- Chunked Processing: Enables parallel processing and efficient memory usage
+- Zarr Storage: Provides efficient compression and chunked storage for large datasets
+"""
+
 import os
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import argparse
 import subprocess
+# For Kaggle/Colab, install zarr
+# !pip install zarr
 import zarr
 import dask.array as da
 from dask.diagnostics import ProgressBar
 from scipy.signal import decimate
 import logging
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 import warnings
-from src.core.config import CFG
+import boto3
+from botocore.exceptions import ClientError
+import json
+from src.core.config import CFG, FAMILY_FILE_MAP
+import tempfile
+from src.core.data_manager import DataManager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants for preprocessing
-CHUNK_TIME = 256  # After decimating by 4
-CHUNK_SRC_REC = 8
-DT_DECIMATE = 4  # 1 kHz → 250 Hz
-NYQUIST_FREQ = 500  # Hz (half of original sampling rate)
+CHUNK_TIME = 256  # After decimating by 4 - optimized for GPU memory
+CHUNK_SRC_REC = 8  # Chunk size for source-receiver dimensions
+DT_DECIMATE = 4  # 1 kHz → 250 Hz - reduces data size while preserving signal
+NYQUIST_FREQ = 500  # Hz (half of original sampling rate) - critical for downsampling
 
 def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
     """
     Validate that the data satisfies Nyquist criterion after downsampling.
+    
+    Intuition:
+    - Nyquist-Shannon Theorem: Sampling rate must be > 2x highest frequency
+    - Energy Analysis: Check if significant energy exists above Nyquist frequency
+    - Safety Margin: Warn if >1% of energy is above Nyquist (potential aliasing)
     
     Args:
         data: Input seismic data array
@@ -317,6 +373,18 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
 def preprocess_one(arr: np.ndarray) -> np.ndarray:
     """
     Preprocess a single seismic array with downsampling and normalization.
+    
+    Intuition:
+    - Downsampling: Reduce data size while preserving signal integrity
+    - Anti-aliasing: Prevent frequency folding during downsampling
+    - Memory Efficiency: Use float16 for reduced memory footprint
+    - Robust Normalization: Handle outliers using percentiles
+    
+    Processing Steps:
+    1. Validate Nyquist criterion
+    2. Apply anti-aliasing filter and downsample
+    3. Convert to float16
+    4. Normalize using robust statistics
     
     Args:
         arr: Input seismic array
@@ -345,7 +413,7 @@ def preprocess_one(arr: np.ndarray) -> np.ndarray:
         logger.error(f"Error preprocessing array: {str(e)}")
         raise
 
-def process_family(family: str, input_dir: Path, output_dir: Path) -> List[str]:
+def process_family(family: str, input_dir: Path, output_dir: Path, data_manager: Optional[DataManager] = None) -> List[str]:
     """
     Process all files in a family and return paths to processed files.
     
@@ -353,6 +421,7 @@ def process_family(family: str, input_dir: Path, output_dir: Path) -> List[str]:
         family: Name of the geological family
         input_dir: Input directory containing raw data
         output_dir: Output directory for processed data
+        data_manager: Optional DataManager for S3 operations
         
     Returns:
         List[str]: Paths to processed files
@@ -361,53 +430,118 @@ def process_family(family: str, input_dir: Path, output_dir: Path) -> List[str]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    files = sorted(input_dir.glob('*.npy'))
     processed_paths = []
     
-    for f in tqdm(files, desc=f"Processing {family}"):
-        try:
-            arr = np.load(f, mmap_mode='r')
-            if arr.ndim == 4:
-                n_samples = arr.shape[0]
-                for i in range(n_samples):
-                    sample = arr[i]
-                    processed = preprocess_one(sample)
+    if data_manager and data_manager.use_s3:
+        # Process files from S3
+        s3_prefix = f"raw/{family}/"
+        s3_files = data_manager.list_s3_files(s3_prefix)
+        
+        for s3_key in tqdm(s3_files, desc=f"Processing {family} from S3"):
+            try:
+                arr = data_manager.stream_from_s3(s3_key)
+                if arr is not None:
+                    if arr.ndim == 4:
+                        n_samples = arr.shape[0]
+                        for i in range(n_samples):
+                            sample = arr[i]
+                            processed = preprocess_one(sample)
+                            out_key = f"preprocessed/{family}/sample_{len(processed_paths):06d}.npy"
+                            if data_manager.upload_to_s3(processed, out_key):
+                                processed_paths.append(out_key)
+                    elif arr.ndim == 3:
+                        processed = preprocess_one(arr)
+                        out_key = f"preprocessed/{family}/sample_{len(processed_paths):06d}.npy"
+                        if data_manager.upload_to_s3(processed, out_key):
+                            processed_paths.append(out_key)
+            except Exception as e:
+                logger.error(f"Error processing S3 file {s3_key}: {str(e)}")
+                continue
+    else:
+        # Process local files
+        files = sorted(input_dir.glob('*.npy'))
+        for f in tqdm(files, desc=f"Processing {family}"):
+            try:
+                arr = np.load(f, mmap_mode='r')
+                if arr.ndim == 4:
+                    n_samples = arr.shape[0]
+                    for i in range(n_samples):
+                        sample = arr[i]
+                        processed = preprocess_one(sample)
+                        out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
+                        np.save(out_path, processed)
+                        processed_paths.append(str(out_path))
+                elif arr.ndim == 3:
+                    processed = preprocess_one(arr)
                     out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
                     np.save(out_path, processed)
                     processed_paths.append(str(out_path))
-            elif arr.ndim == 3:
-                processed = preprocess_one(arr)
-                out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
-                np.save(out_path, processed)
-                processed_paths.append(str(out_path))
-            else:
-                logger.warning(f"Unexpected shape {arr.shape} in {f}")
-        except Exception as e:
-            logger.error(f"Error processing file {f}: {str(e)}")
-            continue
+                else:
+                    logger.warning(f"Unexpected shape {arr.shape} in {f}")
+            except Exception as e:
+                logger.error(f"Error processing file {f}: {str(e)}")
+                continue
     
     return processed_paths
 
-def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_size: Tuple[int, ...]) -> None:
+def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_size: Tuple[int, ...], data_manager: Optional[DataManager] = None) -> None:
     """
-    Create a zarr dataset from processed files.
+    Create a zarr dataset from processed files and optionally upload to S3.
+    
+    Intuition:
+    - Lazy Loading: Use Dask for out-of-memory computations
+    - Chunked Storage: Enable parallel access and efficient compression
+    - Cloud Storage: Optional S3 upload for distributed access
+    - Memory Management: Clean up local files after successful upload
     
     Args:
         processed_paths: List of paths to processed files
         output_path: Path to save zarr dataset
         chunk_size: Chunk size for zarr array
+        data_manager: Optional DataManager for S3 operations
     """
     try:
+        # Dynamically determine shape from first file
+        if not processed_paths:
+            raise ValueError("No processed paths provided.")
+            
+        if data_manager and data_manager.use_s3:
+            first_arr = data_manager.stream_from_s3(processed_paths[0])
+        else:
+            first_arr = np.load(processed_paths[0], mmap_mode='r')
+            
+        arr_shape = first_arr.shape
+        arr_dtype = first_arr.dtype
+        
+        # Validate expected dimensions
+        if len(arr_shape) == 4:  # Seismic data
+            expected_shape = (500, 5, 1000, 70)
+            if arr_shape != expected_shape:
+                logger.warning(f"Unexpected seismic data shape: {arr_shape}, expected {expected_shape}")
+        elif len(arr_shape) == 4 and arr_shape[1] == 1:  # Velocity model
+            expected_shape = (500, 1, 70, 70)
+            if arr_shape != expected_shape:
+                logger.warning(f"Unexpected velocity model shape: {arr_shape}, expected {expected_shape}")
+        else:
+            raise ValueError(f"Unexpected array shape: {arr_shape}")
+            
         # Create lazy Dask arrays
         lazy_arrays = []
         for path in processed_paths:
-            x = da.from_delayed(
-                dask.delayed(np.load)(path),
-                shape=(32, 256, 64),  # Example dims after decimation
-                dtype='float16'
-            )
+            if data_manager and data_manager.use_s3:
+                x = da.from_delayed(
+                    dask.delayed(data_manager.stream_from_s3)(path),
+                    shape=arr_shape,
+                    dtype=arr_dtype
+                )
+            else:
+                x = da.from_delayed(
+                    dask.delayed(np.load)(path),
+                    shape=arr_shape,
+                    dtype=arr_dtype
+                )
             lazy_arrays.append(x)
-        
+            
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
         
@@ -418,59 +552,102 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             compressor=zarr.Blosc(cname='zstd', clevel=3),
             chunks=chunk_size
         )
+        
+        # Upload to S3 if using S3
+        if data_manager and data_manager.use_s3:
+            s3_key = f"preprocessed/{output_path.name}"
+            if data_manager.upload_to_s3(np.load(output_path), s3_key):
+                # Clean up local file after successful upload
+                if output_path.exists():
+                    output_path.unlink()
+                    logger.info(f"Cleaned up local file {output_path}")
+                
     except Exception as e:
-        logger.error(f"Error creating zarr dataset: {str(e)}")
+        logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
         raise
 
-def split_for_gpus(processed_paths: List[str], output_base: Path) -> None:
+def split_for_gpus(processed_paths: List[str], output_base: Path, data_manager: Optional[DataManager] = None, by_family: bool = True) -> None:
     """
-    Split processed files into two datasets for the two T4 GPUs.
-    
-    Args:
-        processed_paths: List of paths to processed files
-        output_base: Base directory for output
+    Split processed files into two datasets for the two T4 GPUs and optionally upload to S3.
+    If by_family is True, split by family (half families to each GPU), else split within families.
+    Ensure all data is downsampled to float16.
     """
     try:
-        n_samples = len(processed_paths)
-        mid_point = n_samples // 2
-        
+        if by_family:
+            # Group processed_paths by family
+            family_groups = {}
+            for path in processed_paths:
+                # Assume path contains family name as a parent directory
+                family = Path(path).parent.parent.name if Path(path).parent.name in ['data', 'model'] else Path(path).parent.name
+                family_groups.setdefault(family, []).append(path)
+            families = sorted(family_groups.keys())
+            mid = len(families) // 2
+            gpu0_fams = families[:mid]
+            gpu1_fams = families[mid:]
+            gpu0_paths = [p for fam in gpu0_fams for p in family_groups[fam]]
+            gpu1_paths = [p for fam in gpu1_fams for p in family_groups[fam]]
+        else:
+            n_samples = len(processed_paths)
+            mid_point = n_samples // 2
+            gpu0_paths = processed_paths[:mid_point]
+            gpu1_paths = processed_paths[mid_point:]
+            
         # Create GPU-specific directories
         gpu0_dir = output_base / 'gpu0'
         gpu1_dir = output_base / 'gpu1'
         gpu0_dir.mkdir(parents=True, exist_ok=True)
         gpu1_dir.mkdir(parents=True, exist_ok=True)
         
-        # Split paths
-        gpu0_paths = processed_paths[:mid_point]
-        gpu1_paths = processed_paths[mid_point:]
-        
         # Create zarr datasets for each GPU
         create_zarr_dataset(
             gpu0_paths,
             gpu0_dir / 'seismic.zarr',
-            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC)
+            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC),
+            data_manager
         )
         create_zarr_dataset(
             gpu1_paths,
             gpu1_dir / 'seismic.zarr',
-            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC)
+            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC),
+            data_manager
         )
-        
         logger.info(f"Created GPU datasets with {len(gpu0_paths)} and {len(gpu1_paths)} samples")
     except Exception as e:
         logger.error(f"Error splitting data for GPUs: {str(e)}")
         raise
 
 def main():
+    """
+    Main preprocessing pipeline.
+    
+    Intuition:
+    - Command Line Interface: Flexible configuration
+    - Family Processing: Handle different geological families
+    - GPU Optimization: Split data for parallel processing
+    - Cloud Integration: Optional S3 upload
+    - Error Handling: Robust error reporting and logging
+    """
+    # Enable debug mode for testing
+    os.environ['DEBUG_MODE'] = '1'
+    
+    # Filter out Jupyter/Colab specific arguments
+    import sys
+    filtered_args = [arg for arg in sys.argv if not arg.startswith('-f') and not arg.endswith('.json')]
+    sys.argv = filtered_args
+
     parser = argparse.ArgumentParser(description="Preprocess seismic data for distributed training on T4 GPUs")
     parser.add_argument('--input_root', type=str, default=str(CFG.paths.train), help='Input train_samples root directory')
     parser.add_argument('--output_root', type=str, default='/kaggle/working/preprocessed', help='Output directory for processed files')
+    parser.add_argument('--use_s3', action='store_true', help='Use S3 for data processing')
     args = parser.parse_args()
 
     try:
         input_root = Path(args.input_root)
         output_root = Path(args.output_root)
         output_root.mkdir(parents=True, exist_ok=True)
+
+        # Initialize DataManager with S3 support if requested
+        data_manager = DataManager(use_s3=args.use_s3) if args.use_s3 else None
 
         # Process each family
         families = list(CFG.paths.families.keys())
@@ -480,13 +657,13 @@ def main():
             logger.info(f"\nProcessing family: {family}")
             input_dir = input_root / family
             temp_dir = output_root / 'temp' / family
-            processed_paths = process_family(family, input_dir, temp_dir)
+            processed_paths = process_family(family, input_dir, temp_dir, data_manager)
             all_processed_paths.extend(processed_paths)
             logger.info(f"Family {family}: {len(processed_paths)} samples processed")
 
         # Split and create zarr datasets for GPUs
         logger.info("\nCreating GPU-specific datasets...")
-        split_for_gpus(all_processed_paths, output_root)
+        split_for_gpus(all_processed_paths, output_root, data_manager)
         
         # Clean up temporary files
         temp_dir = output_root / 'temp'
@@ -494,8 +671,8 @@ def main():
             subprocess.run(['rm', '-rf', str(temp_dir)])
         
         logger.info("\nPreprocessing complete!")
-        logger.info(f"GPU 0 dataset: {output_root}/gpu0/seismic.zarr")
-        logger.info(f"GPU 1 dataset: {output_root}/gpu1/seismic.zarr")
+        if data_manager and data_manager.use_s3:
+            logger.info(f"Data uploaded to s3://{data_manager.s3_bucket}/preprocessed/")
     except Exception as e:
         logger.error(f"Error in main preprocessing: {str(e)}")
         raise
@@ -519,21 +696,32 @@ logger = logging.getLogger(__name__)
 
 class ModelRegistry:
     """
-    Registry for managing model versions with geometric metadata.
-    Tracks model versions, preserves equivariance properties, and handles initialization.
+    Singleton class for managing model versions with geometric metadata.
+    Ensures only one registry instance exists across the application.
     """
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
     def __init__(self, registry_dir: str = "models"):
         """
-        Initialize the model registry.
+        Initialize the registry if not already initialized.
         
         Args:
-            registry_dir: Directory to store model registry data
+            registry_dir: Directory to store model versions
         """
+        if self._initialized:
+            return
+            
         self.registry_dir = Path(registry_dir)
         self.registry_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_file = self.registry_dir / "metadata.json"
         self.metadata = self._load_metadata()
+        self._initialized = True
         
     def _load_metadata(self) -> Dict[str, Any]:
         """Load existing metadata or create new metadata file."""
@@ -703,21 +891,32 @@ logger = logging.getLogger(__name__)
 
 class CheckpointManager:
     """
-    Manager for saving and loading model checkpoints with geometric metadata.
-    Handles checkpoint versioning, geometric properties, and coordinate transformations.
+    Singleton class for managing model checkpoints with geometric metadata.
+    Ensures only one checkpoint manager exists across the application.
     """
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
     def __init__(self, checkpoint_dir: str = "checkpoints"):
         """
-        Initialize the checkpoint manager.
+        Initialize the checkpoint manager if not already initialized.
         
         Args:
             checkpoint_dir: Directory to store checkpoints
         """
+        if self._initialized:
+            return
+            
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_file = self.checkpoint_dir / "checkpoint_metadata.json"
         self.metadata = self._load_metadata()
+        self._initialized = True
         
     def _load_metadata(self) -> Dict[str, Any]:
         """Load existing metadata or create new metadata file."""
@@ -929,7 +1128,7 @@ class CheckpointManager:
 import os
 from pathlib import Path
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -1054,36 +1253,57 @@ class GeometricDataset(Dataset):
 
 class FamilyDataLoader:
     """
-    Data loader for handling family-specific data loading with geometric features.
-    Manages data loading for different geological families with proper batching.
+    Singleton class for managing family-specific data loading with geometric features.
+    Ensures consistent data loading patterns and prevents memory issues.
     """
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
     def __init__(self,
                  data_root: str,
                  batch_size: int = 32,
                  num_workers: int = 4,
-                 transform: Optional[Any] = None,
+                 transform: Optional[Callable] = None,
                  extract_features: bool = True):
         """
-        Initialize the data loader.
+        Initialize the family data loader if not already initialized.
         
         Args:
-            data_root: Root directory containing family datasets
-            batch_size: Batch size for loading
+            data_root: Root directory containing family data
+            batch_size: Batch size for data loading
             num_workers: Number of worker processes
-            transform: Optional data transformations
+            transform: Optional transform to apply
             extract_features: Whether to extract geometric features
         """
+        if self._initialized:
+            return
+            
         self.data_root = Path(data_root)
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.transform = transform
         self.extract_features = extract_features
         
-        # Initialize datasets for each family
+        # Initialize datasets and loaders
         self.datasets = {}
         self.loaders = {}
+        self._initialized = True
         
+    def set_parameters(self, batch_size: int = None, num_workers: int = None):
+        """Update parameters if needed after initialization"""
+        if batch_size is not None:
+            self.batch_size = batch_size
+        if num_workers is not None:
+            self.num_workers = num_workers
+        # Reinitialize loaders with new parameters
+        self._initialize_loaders()
+    
+    def _initialize_loaders(self):
         # Find all family directories
         family_dirs = [d for d in self.data_root.iterdir() if d.is_dir()]
         
@@ -1092,17 +1312,17 @@ class FamilyDataLoader:
             dataset = GeometricDataset(
                 family_dir,
                 family,
-                transform=transform,
-                extract_features=extract_features
+                transform=self.transform,
+                extract_features=self.extract_features
             )
             self.datasets[family] = dataset
             
             # Create data loader
             self.loaders[family] = DataLoader(
                 dataset,
-                batch_size=batch_size,
+                batch_size=self.batch_size,
                 shuffle=True,
-                num_workers=num_workers,
+                num_workers=self.num_workers,
                 pin_memory=True
             )
     
@@ -1205,27 +1425,50 @@ logger = logging.getLogger(__name__)
 
 class GeometricCrossValidator:
     """
-    Cross-validation framework with geometric awareness.
-    Implements stratified sampling based on geological families and geometric features.
+    Singleton class for implementing geometric-aware cross-validation.
+    Ensures consistent validation strategy across training.
     """
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
     def __init__(self,
                  n_splits: int = 5,
                  shuffle: bool = True,
                  random_state: Optional[int] = None):
         """
-        Initialize the cross-validator.
+        Initialize the cross-validator if not already initialized.
         
         Args:
             n_splits: Number of folds
             shuffle: Whether to shuffle data
             random_state: Random seed for reproducibility
         """
+        if self._initialized:
+            return
+            
         self.n_splits = n_splits
         self.shuffle = shuffle
         self.random_state = random_state
         self.kfold = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
         self.stratified_kfold = StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
+        self._initialized = True
+    
+    def set_parameters(self, n_splits: int = None, shuffle: bool = None, random_state: int = None):
+        """Update parameters if needed after initialization"""
+        if n_splits is not None:
+            self.n_splits = n_splits
+        if shuffle is not None:
+            self.shuffle = shuffle
+        if random_state is not None:
+            self.random_state = random_state
+        # Reinitialize kfold objects with new parameters
+        self.kfold = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
+        self.stratified_kfold = StratifiedKFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
     
     def compute_geometric_metrics(self,
                                 y_true: np.ndarray,
@@ -1486,13 +1729,14 @@ All data loading, streaming, and batching must go through DataManager.
 """
 # Standard library imports
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 import os
 import socket
 import tempfile
 import shutil
 import mmap
 import logging
+import json
 
 # Third-party imports
 import numpy as np
@@ -1500,10 +1744,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 import boto3
 from botocore.exceptions import ClientError
+from tqdm import tqdm
 
 # Local imports
-# from src.core.config import CFG
-# from src.core.setup import push_to_kaggle
+from src.core.config import CFG
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -1521,101 +1765,242 @@ class MemoryTracker:
             'max_memory_gb': self.max_memory / 1e9
         }
 
-class S3DataLoader:
-    """Handles efficient data loading from S3 with local caching."""
-    def __init__(self, bucket: str, region: str):
-        self.s3 = boto3.client('s3', region_name=region)
-        self.bucket = bucket
-        self.cache_dir = Path(tempfile.gettempdir()) / 'gwi_cache'
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
-    def download_file(self, s3_key: str, local_path: Path) -> Path:
-        """Download a file from S3 with caching."""
-        cache_path = self.cache_dir / s3_key.replace('/', '_')
-        
-        if not cache_path.exists():
-            try:
-                self.s3.download_file(self.bucket, s3_key, str(cache_path))
-            except ClientError as e:
-                logging.error(f"Failed to download {s3_key} from S3: {e}")
-                raise
-                
-        # Create a hard link to avoid copying
-        if not local_path.exists():
-            os.link(cache_path, local_path)
-            
-        return local_path
-
 class DataManager:
     """
-    DataManager is the single source of truth for all data IO in this project.
-    Handles memory-efficient, sample-wise access for all dataset families.
-    Uses float16 for memory efficiency.
+    Singleton class for managing all data IO operations.
+    Ensures consistent data access and prevents memory leaks in Kaggle notebook environment.
+    Handles both local and S3 data operations.
     """
-    def __init__(self, use_mmap: bool = True):
-        self.use_mmap = use_mmap
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self, data_root: str = None, use_s3: bool = False):
+        """
+        Initialize the data manager if not already initialized.
+        
+        Args:
+            data_root: Root directory for data
+            use_s3: Whether to use S3 for data operations
+        """
+        if self._initialized:
+            return
+            
+        self.data_root = Path(data_root) if data_root else None
+        self._cache = {}
+        self.use_s3 = use_s3
+        self.use_mmap = True
         self.memory_tracker = MemoryTracker()
         
-        # Initialize S3 loader if in AWS environment
-        if CFG.env.kind == 'aws':
-            self.s3_loader = S3DataLoader(CFG.env.s3_bucket, CFG.env.aws_region)
-        else:
-            self.s3_loader = None
+        if use_s3:
+            self._setup_s3()
             
-        if CFG.debug_mode:
-            logging.info("DataManager initialized in debug mode")
-            logging.info(f"Using only family: {list(CFG.paths.families.keys())[0]}")
-            logging.info(f"Batch size: {CFG.batch}")
-            logging.info(f"Number of workers: {CFG.num_workers}")
-
-    def list_family_files(self, family: str):
-        """Return (seis_files, vel_files, family_type) for a given family (base dataset only)."""
+        self._initialized = True
+    
+    def _setup_s3(self):
+        """Set up S3 client and configuration."""
+        try:
+            # Try to load credentials from .env/aws/credentials.json
+            creds_path = Path('.env/aws/credentials.json')
+            if creds_path.exists():
+                with open(creds_path, 'r') as f:
+                    credentials = json.load(f)
+            else:
+                # Fall back to environment variables
+                credentials = {
+                    'aws_access_key_id': os.environ.get('AWS_ACCESS_KEY_ID'),
+                    'aws_secret_access_key': os.environ.get('AWS_SECRET_ACCESS_KEY'),
+                    'region_name': os.environ.get('AWS_REGION', 'us-east-1')
+                }
+            
+            self.s3 = boto3.client('s3', **credentials)
+            self.s3_bucket = credentials.get('s3_bucket')
+            self.cache_dir = Path(tempfile.gettempdir()) / 'gwi_cache'
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            if not self.s3_bucket:
+                raise ValueError("S3 bucket not specified in credentials")
+                
+        except Exception as e:
+            logging.error(f"Failed to set up S3: {e}")
+            self.use_s3 = False
+            raise
+    
+    def stream_from_s3(self, s3_key: str, chunk_size: int = 1024*1024) -> np.ndarray:
+        """
+        Stream a file from S3 in chunks with memory mapping.
+        
+        Args:
+            s3_key: S3 object key
+            chunk_size: Size of chunks to download
+            
+        Returns:
+            np.ndarray: Memory-mapped array of the data
+        """
+        if not self.use_s3:
+            raise RuntimeError("S3 streaming not enabled")
+            
+        try:
+            # Get object size
+            response = self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
+            file_size = response['ContentLength']
+            
+            # Create memory-mapped array
+            temp_file = self.cache_dir / s3_key.replace('/', '_')
+            if not temp_file.exists():
+                with open(temp_file, 'wb') as f:
+                    for i in range(0, file_size, chunk_size):
+                        end = min(i + chunk_size, file_size)
+                        response = self.s3.get_object(
+                            Bucket=self.s3_bucket,
+                            Key=s3_key,
+                            Range=f'bytes={i}-{end-1}'
+                        )
+                        f.write(response['Body'].read())
+            
+            return np.load(temp_file, mmap_mode='r')
+            
+        except ClientError as e:
+            logging.error(f"Error streaming file {s3_key}: {e}")
+            raise
+    
+    def upload_to_s3(self, data: np.ndarray, s3_key: str) -> bool:
+        """
+        Upload processed data to S3.
+        
+        Args:
+            data: Data to upload
+            s3_key: S3 object key
+            
+        Returns:
+            bool: True if upload successful
+        """
+        if not self.use_s3:
+            raise RuntimeError("S3 upload not enabled")
+            
+        try:
+            # Save to temporary file
+            temp_file = self.cache_dir / f"temp_{s3_key.replace('/', '_')}"
+            np.save(temp_file, data)
+            
+            # Upload to S3
+            self.s3.upload_file(
+                str(temp_file),
+                self.s3_bucket,
+                s3_key
+            )
+            
+            # Clean up
+            temp_file.unlink()
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error uploading to S3: {e}")
+            return False
+    
+    def list_s3_files(self, prefix: str) -> List[str]:
+        """
+        List files in S3 bucket with given prefix.
+        
+        Args:
+            prefix: S3 key prefix
+            
+        Returns:
+            List[str]: List of S3 keys
+        """
+        if not self.use_s3:
+            raise RuntimeError("S3 operations not enabled")
+            
+        try:
+            response = self.s3.list_objects_v2(
+                Bucket=self.s3_bucket,
+                Prefix=prefix,
+                MaxKeys=1000
+            )
+            return [obj['Key'] for obj in response.get('Contents', [])]
+        except ClientError as e:
+            logging.error(f"Error listing S3 objects: {e}")
+            return []
+    
+    def list_family_files(self, family: str) -> Tuple[List[Path], List[Path], str]:
+        """
+        Return (seis_files, vel_files, family_type) for a given family.
+        Handles both local and S3 data sources.
+        """
         if CFG.debug_mode and family in CFG.families_to_exclude:
             logging.info(f"Skipping excluded family in debug mode: {family}")
             return None, None, None
             
-        root = CFG.paths.families[family]
-        if not root.exists():
-            raise ValueError(f"Family directory not found: {root}")
+        if self.use_s3:
+            # List files from S3
+            seis_prefix = f"raw/{family}/data/"
+            vel_prefix = f"raw/{family}/model/"
             
-        # Vel/Style: data/model subfolders (batched)
-        if (root / 'data').exists() and (root / 'model').exists():
-            seis_files = sorted((root/'data').glob('*.npy'))
-            vel_files = sorted((root/'model').glob('*.npy'))
+            seis_files = self.list_s3_files(seis_prefix)
+            vel_files = self.list_s3_files(vel_prefix)
+            
             if seis_files and vel_files:
                 if CFG.debug_mode:
-                    # In debug mode, limit to first file only
                     seis_files = seis_files[:1]
                     vel_files = vel_files[:1]
-                    logging.info(f"Debug mode: Using only first file from {family}")
-                family_type = 'VelStyle'
-                return seis_files, vel_files, family_type
+                return seis_files, vel_files, 'VelStyle'
                 
-        # Fault: seis*.npy and vel*.npy directly in folder (not batched)
-        seis_files = sorted(root.glob('seis*.npy'))
-        vel_files = sorted(root.glob('vel*.npy'))
-        if seis_files and vel_files:
-            if CFG.debug_mode:
-                # In debug mode, limit to first file only
-                seis_files = seis_files[:1]
-                vel_files = vel_files[:1]
-                logging.info(f"Debug mode: Using only first file from {family}")
-            family_type = 'Fault'
-            return seis_files, vel_files, family_type
+            # Try fault structure
+            seis_prefix = f"raw/{family}/"
+            seis_files = [f for f in self.list_s3_files(seis_prefix) if f.startswith('seis')]
+            vel_files = [f for f in self.list_s3_files(seis_prefix) if f.startswith('vel')]
             
-        raise ValueError(f"Could not find valid data structure for family {family} at {root}")
+            if seis_files and vel_files:
+                if CFG.debug_mode:
+                    seis_files = seis_files[:1]
+                    vel_files = vel_files[:1]
+                return seis_files, vel_files, 'Fault'
+        else:
+            # Original local file handling
+            root = CFG.paths.families[family]
+            if not root.exists():
+                raise ValueError(f"Family directory not found: {root}")
+                
+            # Vel/Style: data/model subfolders (batched)
+            if (root / 'data').exists() and (root / 'model').exists():
+                seis_files = sorted((root/'data').glob('*.npy'))
+                vel_files = sorted((root/'model').glob('*.npy'))
+                if seis_files and vel_files:
+                    if CFG.debug_mode:
+                        seis_files = seis_files[:1]
+                        vel_files = vel_files[:1]
+                    return seis_files, vel_files, 'VelStyle'
+                    
+            # Fault: seis*.npy and vel*.npy directly in folder
+            seis_files = sorted(root.glob('seis*.npy'))
+            vel_files = sorted(root.glob('vel*.npy'))
+            if seis_files and vel_files:
+                if CFG.debug_mode:
+                    seis_files = seis_files[:1]
+                    vel_files = vel_files[:1]
+                return seis_files, vel_files, 'Fault'
+                
+        raise ValueError(f"Could not find valid data structure for family {family}")
 
-    def create_dataset(self, seis_files, vel_files, family_type, augment=False):
+    def create_dataset(self, seis_files: Union[List[Path], List[str]], 
+                      vel_files: Union[List[Path], List[str]], 
+                      family_type: str, 
+                      augment: bool = False) -> Dataset:
         """Create a dataset for the given files."""
         if family_type == 'test':
-            return TestDataset(seis_files)
+            return TestDataset(seis_files, self)
         return SeismicDataset(
             seis_files,
             vel_files,
             family_type,
             augment,
             use_mmap=self.use_mmap,
-            memory_tracker=self.memory_tracker
+            memory_tracker=self.memory_tracker,
+            data_manager=self
         )
 
     def create_loader(self, seis_files: List[Path], vel_files: List[Path],
@@ -1682,45 +2067,60 @@ class DataManager:
 class SeismicDataset(Dataset):
     """
     Memory-efficient dataset for all families.
-    Handles both batched (500 samples) and single-sample files.
-    Data shapes:
-    - Seismic: (batch, sources=5, receivers=1000, timesteps=70)
-    - Velocity: (batch, channels=1, height=70, width=70)
-    Uses float16 for memory efficiency.
+    Handles both local and S3 data sources.
     """
-    def __init__(self, seis_files: List[Path], vel_files: Optional[List[Path]], family_type: str, 
-                 augment: bool = False, use_mmap: bool = True, memory_tracker: MemoryTracker = None):
+    def __init__(self, seis_files: Union[List[Path], List[str]], 
+                 vel_files: Optional[Union[List[Path], List[str]]], 
+                 family_type: str, 
+                 augment: bool = False, 
+                 use_mmap: bool = True, 
+                 memory_tracker: MemoryTracker = None,
+                 data_manager: DataManager = None):
         self.family_type = family_type
         self.augment = augment
         self.index = []
         self.use_mmap = use_mmap
         self.memory_tracker = memory_tracker
         self.vel_files = vel_files
+        self.data_manager = data_manager
+        
         # Build index of (file, sample_idx) pairs
         if vel_files is None:
             for sfile in seis_files:
-                if self.use_mmap:
-                    f = np.load(sfile, mmap_mode='r')
-                    shape = f.shape
-                    n_samples = shape[0] if len(shape) == 4 else 1
-                    del f
+                if self.data_manager and self.data_manager.use_s3:
+                    # For S3 files, we need to get the shape without loading
+                    response = self.data_manager.s3.head_object(
+                        Bucket=self.data_manager.s3_bucket,
+                        Key=sfile
+                    )
+                    # Assuming the first dimension is batch size
+                    n_samples = 500  # Default for batched files
                 else:
-                    data = np.load(sfile)
-                    shape = data.shape
-                    n_samples = shape[0] if len(shape) == 4 else 1
+                    if self.use_mmap:
+                        f = np.load(sfile, mmap_mode='r')
+                        shape = f.shape
+                        n_samples = shape[0] if len(shape) == 4 else 1
+                        del f
+                    else:
+                        data = np.load(sfile)
+                        shape = data.shape
+                        n_samples = shape[0] if len(shape) == 4 else 1
                 for i in range(n_samples):
                     self.index.append((sfile, None, i))
         else:
             for sfile, vfile in zip(seis_files, vel_files):
-                if self.use_mmap:
-                    f = np.load(sfile, mmap_mode='r')
-                    shape = f.shape
-                    n_samples = shape[0] if len(shape) == 4 else 1
-                    del f
+                if self.data_manager and self.data_manager.use_s3:
+                    n_samples = 500  # Default for batched files
                 else:
-                    data = np.load(sfile)
-                    shape = data.shape
-                    n_samples = shape[0] if len(shape) == 4 else 1
+                    if self.use_mmap:
+                        f = np.load(sfile, mmap_mode='r')
+                        shape = f.shape
+                        n_samples = shape[0] if len(shape) == 4 else 1
+                        del f
+                    else:
+                        data = np.load(sfile)
+                        shape = data.shape
+                        n_samples = shape[0] if len(shape) == 4 else 1
                 for i in range(n_samples):
                     self.index.append((sfile, vfile, i))
 
@@ -1729,67 +2129,75 @@ class SeismicDataset(Dataset):
 
     def __getitem__(self, idx):
         sfile, vfile, i = self.index[idx]
-        # Load x
-        if self.use_mmap:
-            x = np.load(sfile, mmap_mode='r')
+        
+        # Load seismic data
+        if self.data_manager and self.data_manager.use_s3:
+            x = self.data_manager.stream_from_s3(sfile)
         else:
-            x = np.load(sfile)
-        # x shape: (batch_size, num_sources, time_steps, num_receivers)
+            if self.use_mmap:
+                x = np.load(sfile, mmap_mode='r')
+            else:
+                x = np.load(sfile)
+                
+        # Handle data shapes
         if len(x.shape) == 4:
-            x = x[i]  # shape: (num_sources, time_steps, num_receivers)
-        # Rearrange to (num_sources, num_receivers, time_steps)
+            x = x[i]
         if x.shape[1] == 70 and x.shape[2] == 1000:
-            # Already (num_sources, time_steps, num_receivers), need (num_sources, num_receivers, time_steps)
-            x = x.transpose(0, 2, 1)  # (num_sources, num_receivers, time_steps)
-        elif x.shape[1] == 1000 and x.shape[2] == 70:
-            # Already correct
-            pass
-        else:
-            raise ValueError(f"Unexpected seismic data shape: {x.shape}")
-        # For test mode, create dummy y
+            x = x.transpose(0, 2, 1)
+            
+        # Load velocity data
         if self.vel_files is None:
             y = np.zeros((1, 70, 70), np.float16)
         else:
-            if self.use_mmap:
-                y = np.load(vfile, mmap_mode='r')
+            if self.data_manager and self.data_manager.use_s3:
+                y = self.data_manager.stream_from_s3(vfile)
             else:
-                y = np.load(vfile)
+                if self.use_mmap:
+                    y = np.load(vfile, mmap_mode='r')
+                else:
+                    y = np.load(vfile)
             if len(y.shape) == 4:
                 y = y[i]
             elif len(y.shape) == 3:
                 y = y[i]
-            else:
-                raise ValueError(f"Unexpected velocity data shape: {y.shape}")
-        # Convert to float16
+                
+        # Convert to float16 and normalize
         x = x.astype(np.float16)
         y = y.astype(np.float16)
-        # Normalize per-receiver
         mu = x.mean(axis=(1,2), keepdims=True)
         std = x.std(axis=(1,2), keepdims=True) + 1e-6
         x = (x - mu) / std
-        # No need to add extra dimension; DataLoader will batch
+        
         # Track memory usage
         if self.memory_tracker:
             self.memory_tracker.update(x.nbytes + y.nbytes)
+            
         return torch.from_numpy(x), torch.from_numpy(y)
 
 class TestDataset(Dataset):
     """Dataset for test files that returns the test data and its identifier."""
-    def __init__(self, files: List[Path]):
+    def __init__(self, files: Union[List[Path], List[str]], data_manager: DataManager = None):
         self.files = files
+        self.data_manager = data_manager
 
     def __len__(self):
         return len(self.files)
 
     def __getitem__(self, idx: int):
         file_path = self.files[idx]
-        data = np.load(file_path)
-        # Convert to float16 and normalize per-receiver
+        
+        if self.data_manager and self.data_manager.use_s3:
+            data = self.data_manager.stream_from_s3(file_path)
+        else:
+            data = np.load(file_path)
+            
+        # Convert to float16 and normalize
         data = data.astype(np.float16)
         mu = data.mean(axis=(1,2), keepdims=True)
         std = data.std(axis=(1,2), keepdims=True) + 1e-6
         data = (data - mu) / std
-        return torch.from_numpy(data), file_path.stem 
+        
+        return torch.from_numpy(data), Path(file_path).stem 
 
 
 # %%
@@ -2214,296 +2622,123 @@ class SpecProjNet(nn.Module):
 
 
 # %%
-# Source: src/core/train.py
-"""
-Training script that uses DataManager for all data IO.
-"""
-import torch
-import random
-import numpy as np
-import gc  # Add this import for garbage collection
+# Source: src/utils/update_kaggle_notebook.py
+import os
+import shutil
 from pathlib import Path
-from tqdm import tqdm
-import torch.cuda.amp as amp
+import re
+from typing import List
 import logging
 import sys
-from torch.optim.lr_scheduler import OneCycleLR
-from torch.cuda.amp import autocast, GradScaler
-from datetime import datetime
-import json
-import boto3
-from botocore.exceptions import ClientError
-import signal
-import time
-import torch.nn as nn
-import shutil
 
-# Local imports - ensure these are at the top level
+# Add project root to Python path
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root))
+
 from src.core.config import CFG
-from src.core.data_manager import DataManager
-from src.core.model import get_model
-from src.core.losses import get_loss_fn
-from src.core.setup import push_to_kaggle
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Files to include in the Kaggle notebook
+FILES_TO_INCLUDE = [
+    'src/core/config.py',
+    'src/core/preprocess.py',
+    'src/core/registry.py',
+    'src/core/checkpoint.py',
+    'src/core/geometric_loader.py',
+    'src/core/geometric_cv.py',
+    'src/core/data_manager.py',
+    'src/core/model.py',
+    'src/utils/update_kaggle_notebook.py',
+    'requirements.txt'
+]
 
-def set_seed(seed:int):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-def convert_to_serializable(obj):
-    if isinstance(obj, torch.Tensor):
-        return obj.item() if obj.numel() == 1 else obj.tolist()
-    elif isinstance(obj, dict):
-        return {k: convert_to_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [convert_to_serializable(x) for x in obj]
-    return obj
-
-class SpotInstanceHandler:
-    """Handles spot instance interruptions gracefully and manages S3 uploads/cleanup."""
-    def __init__(self, checkpoint_dir: Path, s3_upload_interval: int):
-        self.checkpoint_dir = checkpoint_dir
-        self.s3_upload_interval = s3_upload_interval
-        self.last_checkpoint = 0
-        self.interrupted = False
-        signal.signal(signal.SIGTERM, self.handle_interruption)
-        signal.signal(signal.SIGINT, self.handle_interruption)
-
-    def handle_interruption(self, signum, frame):
-        logging.info(f"Received signal {signum}, preparing for interruption...")
-        self.interrupted = True
-
-    def should_upload_s3(self, epoch: int, is_last_epoch: bool) -> bool:
-        return self.interrupted or (epoch % self.s3_upload_interval == 0) or is_last_epoch
-
-    def save_checkpoint(self, model, optimizer, scheduler, scaler, epoch, metrics, upload_s3=False):
-        try:
-            checkpoint = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
-                'epoch': epoch,
-                'metrics': metrics
-            }
-            ckpt_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
-            torch.save(checkpoint, ckpt_path)
-            local_checkpoints = sorted(self.checkpoint_dir.glob('checkpoint_epoch_*.pt'))
-            if len(local_checkpoints) > 3:
-                for old_ckpt in local_checkpoints[:-3]:
-                    old_ckpt.unlink()
-                    logging.info(f"Removed old local checkpoint: {old_ckpt}")
-            meta_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}_metadata.json'
-            with open(meta_path, 'w') as f:
-                json.dump({
-                    'epoch': epoch,
-                    'optimizer_state_dict': convert_to_serializable(optimizer.state_dict()),
-                    'scheduler_state_dict': convert_to_serializable(scheduler.state_dict()),
-                    'scaler_state_dict': convert_to_serializable(scaler.state_dict()),
-                    'metrics': metrics,
-                    'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
-                }, f, indent=2)
-            if upload_s3 and CFG.env.kind == 'aws':
-                s3 = boto3.client('s3', region_name=CFG.env.aws_region)
-                s3_key = f"checkpoints/checkpoint_epoch_{epoch}.pt"
-                s3.upload_file(str(ckpt_path), CFG.env.s3_bucket, s3_key)
-                response = s3.list_objects_v2(Bucket=CFG.env.s3_bucket, Prefix='checkpoints/checkpoint_epoch_')
-                if 'Contents' in response:
-                    checkpoints = sorted(response['Contents'], key=lambda x: x['LastModified'])
-                    if len(checkpoints) > 5:
-                        for old_ckpt in checkpoints[:-5]:
-                            s3.delete_object(Bucket=CFG.env.s3_bucket, Key=old_ckpt['Key'])
-                            logging.info(f"Removed old S3 checkpoint: {old_ckpt['Key']}")
-            self.last_checkpoint = time.time()
-            logging.info(f"Checkpoint saved for epoch {epoch}")
-        except Exception as e:
-            logging.error(f"Failed to save checkpoint: {e}")
-            raise
-
-def save_checkpoint(model, optimizer, scheduler, epoch, loss, data_manager):
-    logging.info(f"Starting save_checkpoint for epoch {epoch} with loss {loss}")
-    out_dir = Path('outputs')
-    out_dir.mkdir(exist_ok=True)
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'loss': loss,
-    }
-    try:
-        torch.save(checkpoint, out_dir / 'checkpoint.pth')
-        logging.info(f"Checkpoint saved at outputs/checkpoint.pth for epoch {epoch}")
-        best_path = out_dir / 'best.pth'
-        is_best = False
-        if not best_path.exists():
-            is_best = True
+def extract_code_blocks(content: str, source_path: str = None) -> List[tuple[str, str]]:
+    """Extract code blocks from Python file."""
+    blocks = []
+    current_block = []
+    
+    for line in content.split('\n'):
+        if line.startswith('# %%'):
+            if current_block:
+                blocks.append(('\n'.join(current_block), source_path))
+                current_block = []
         else:
-            try:
-                prev_checkpoint = torch.load(best_path)
-                prev_loss = prev_checkpoint.get('loss', float('inf'))
-                is_best = loss < prev_loss
-            except Exception as e:
-                logging.warning(f"Could not load previous checkpoint: {e}")
-                is_best = True
-        if is_best:
-            torch.save(checkpoint, best_path)
-            logging.info(f"New best model saved at outputs/best.pth with loss: {loss:.4f}")
-            metadata = {
-                'epoch': epoch,
-                'loss': float(loss),
-                'timestamp': datetime.now().isoformat(),
-                'config': {
-                    'batch_size': CFG.batch,
-                    'learning_rate': CFG.lr,
-                    'weight_decay': CFG.weight_decay,
-                    'backbone': CFG.backbone,
-                }
-            }
-            with open(out_dir / 'best_metadata.json', 'w') as f:
-                json.dump(metadata, f, indent=2)
-            logging.info(f"Best model metadata saved at outputs/best_metadata.json")
-            print("Uploading best model and metadata to S3")
-            data_manager.upload_best_model_and_metadata(
-                out_dir,
-                f"Update best model - loss: {loss:.4f} at epoch {epoch}"
-            )
-        logging.info(f"save_checkpoint completed for epoch {epoch}")
-    except Exception as e:
-        logging.error(f"Exception in save_checkpoint: {e}")
-    print(f"Checkpoint saved at epoch {epoch} with loss {loss:.4f}")
+            current_block.append(line)
+    
+    if current_block:
+        blocks.append(('\n'.join(current_block), source_path))
+    
+    return blocks
 
-def train(dryrun: bool = False, fp16: bool = False):
-    """Main training loop."""
-    # Initialize data manager
-    data_manager = DataManager()
+def create_notebook_block(content: str, source_path: str = None) -> str:
+    """Create a notebook code block."""
+    if source_path:
+        return f'# %%\n# Source: {source_path}\n{content}\n\n'
+    return f'# %%\n{content}\n\n'
+
+def create_notebook():
+    """Create/update the Kaggle notebook Python file."""
+    # Create the main notebook file
+    notebook_content = []
     
-    # Create loaders for each family
-    train_loaders = []
-    for family in CFG.paths.families:
-        if CFG.debug_mode and family in CFG.families_to_exclude:
-            continue
-            
-        seis_files, vel_files, family_type = data_manager.list_family_files(family)
-        if seis_files is None:  # Skip excluded families
-            continue
-            
-        print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
-        
-        loader = data_manager.create_loader(
-            seis_files, vel_files, family_type,
-            batch_size=CFG.batch,
-            shuffle=True,
-            num_workers=CFG.num_workers
-        )
-        if loader is not None:
-            train_loaders.append(loader)
-            
-    if not train_loaders:
-        raise ValueError("No valid data loaders created!")
-        
-    # Initialize model and move to device
-    model = get_model()
-    model.train()
+    # Add header
+    notebook_content.append('''"""
+# Seismic Waveform Inversion - Preprocessing Pipeline
+
+This notebook implements the preprocessing pipeline for seismic waveform inversion, including:
+- Geometric-aware preprocessing with Nyquist validation
+- Family-specific data loading
+- Cross-validation framework
+- Model registry and checkpoint management
+"""
+
+# Install dependencies
+# !pip install -r requirements.txt
+
+''')
     
-    # Initialize optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=CFG.lr,
-        weight_decay=CFG.weight_decay
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=CFG.epochs,
-        eta_min=CFG.lr/100
-    )
-    
-    # Initialize loss function
-    loss_fn = nn.MSELoss()
-    
-    # Training loop
-    for epoch in range(CFG.epochs):
-        total_loss = 0
-        total_batches = 0
-        
-        for loader in train_loaders:
-            for batch_idx, (x, y) in enumerate(loader):
-                try:
-                    # Move data to device and convert to float32
-                    x = x.to(CFG.env.device).float()
-                    y = y.to(CFG.env.device).float()
-                    
-                    # Forward pass
-                    pred = model(x)
-                    loss = loss_fn(pred, y)
-                    
-                    # Backward pass
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-                    
-                    # Update statistics
-                    total_loss += loss.item()
-                    total_batches += 1
-                    
-                    # Print progress
-                    if batch_idx % 10 == 0:
-                        print(f"Epoch {epoch+1}/{CFG.epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}")
-                        
-                except RuntimeError as e:
-                    if "out of memory" in str(e):
-                        if hasattr(torch.cuda, 'empty_cache'):
-                            torch.cuda.empty_cache()
-                        print(f"WARNING: out of memory in batch {batch_idx}. Skipping batch.")
-                        continue
-                    else:
-                        raise e
-                        
-        # Update learning rate
-        scheduler.step()
-        
-        # Print epoch statistics
-        avg_loss = total_loss / total_batches
-        print(f"Epoch {epoch+1}/{CFG.epochs} completed. Average loss: {avg_loss:.4f}")
-        
-        # Save checkpoint
-        if (epoch + 1) % CFG.debug_upload_interval == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch, avg_loss, data_manager)
-            
-    # After all epochs:
-    # Save best.pth and best_metadata.json to /kaggle/working for persistence
-    kaggle_working = Path('/kaggle/working')
-    kaggle_working.mkdir(parents=True, exist_ok=True)
-    out_dir = Path('outputs')
-    for fname in ['best.pth', 'best_metadata.json']:
-        src = out_dir / fname
-        dst = kaggle_working / fname
-        if src.exists():
-            shutil.copy(src, dst)
-            print(f"Copied {src} to {dst}")
+    # Process each file
+    for file_path in FILES_TO_INCLUDE:
+        src_path = Path(file_path)
+        if src_path.exists():
+            with open(src_path, 'r') as f:
+                content = f.read()
+                blocks = extract_code_blocks(content, str(src_path))
+                for block, source in blocks:
+                    notebook_content.append(create_notebook_block(block, source))
         else:
-            print(f"File {src} does not exist, skipping copy.")
-    print("Uploading model to Kaggle dataset (final upload)...")
-    push_to_kaggle(out_dir, "Final upload after training")
-    print("Upload complete.")
+            print(f"Warning: {file_path} not found")
+    
+    # Write to the root kaggle_notebook.py
+    with open(project_root / 'kaggle_notebook.py', 'w') as f:
+        f.write('\n'.join(notebook_content))
+    
+    print("Notebook updated successfully!")
 
-    return model
+if __name__ == "__main__":
+    create_notebook() 
 
-if __name__ == '__main__':
-    # Set debug mode to True and update settings
-    CFG.set_debug_mode(True)
-    train() 
+
+# %%
+# Source: requirements.txt
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+pandas>=1.3.0
+matplotlib>=3.4.0
+tqdm>=4.62.0
+kagglehub>=0.2.0
+watchdog>=2.1.0  # For development
+einops
+omegaconf
+polars>=0.20.0
+google-auth-oauthlib>=0.4.6
+google-auth-httplib2>=0.1.0
+google-api-python-client>=2.0.0
+psutil>=5.9.0  # For memory monitoring
+timm>=0.9.0
+monai>=1.2.0
+pytest
+awscli
+boto3
+botocore 
 

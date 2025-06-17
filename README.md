@@ -270,10 +270,170 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
 
 ## 6. SageMaker Instructions
 
-1. Launch a SageMaker instance with appropriate permissions and storage.
-2. Clone the repository and install dependencies as above.
-3. Use the provided setup scripts and ensure S3 access is configured.
-4. Follow the same data and training steps as for EC2, but use SageMaker-specific paths if needed.
+### 1. Environment Setup
+
+1. **Create SageMaker Notebook Instance**:
+   - Go to AWS SageMaker Console
+   - Create new notebook instance
+   - Choose `ml.c5.2xlarge` (CPU-only instance)
+   - Set volume size to 100GB
+   - Create new IAM role with S3 access
+   - Launch instance
+
+2. **Clone Repository**:
+   ```bash
+   # Open terminal in JupyterLab and run:
+   git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+   cd YaleGWI
+   ```
+
+3. **Install Dependencies and Set Up Environment**:
+   ```python
+   import os
+   import sys
+
+   # Set environment variable for config
+   os.environ['GWI_ENV'] = 'sagemaker'
+
+   # Change to project root and add src to sys.path
+   os.chdir('/home/sagemaker-user/YaleGWI')  # Adjust as needed
+   sys.path.append(os.path.abspath('./src'))
+
+   from src.core.imports import setup_environment
+   deps = setup_environment('sagemaker')
+   np = deps['np']
+   torch = deps['torch']
+   CFG = deps['CFG']
+   DataManager = deps['DataManager']
+   ```
+
+   **Note:**
+   - You do NOT need to install or import `kagglehub` on SageMaker.
+   - Only install `kagglehub` if you are running on Kaggle or Colab.
+
+### Running Preprocessing
+
+1. **Copy Data from Kaggle to S3**:
+   ```python
+   # Initialize DataManager with S3 support
+   data_manager = DataManager(use_s3=True)
+   
+   # Copy data from Kaggle to S3
+   data_manager.copy_kaggle_to_s3()
+   ```
+
+2. **Run Preprocessing Pipeline**:
+   ```python
+   # Run preprocessing with S3 support
+   !python src/core/preprocess.py --input_root /path/to/input --output_root /path/to/output --use_s3
+   ```
+
+3. **Monitor Progress**:
+   - Check S3 bucket for processed files
+   - Monitor instance metrics in SageMaker console
+   - View logs in CloudWatch
+
+### Cost Optimization
+
+1. **Instance Management**:
+   - Stop instance when not in use
+   - Use spot instances for cost savings
+   - Monitor instance metrics
+
+2. **Storage Optimization**:
+   - Clean up temporary files
+   - Use S3 lifecycle policies
+   - Compress data when possible
+
+3. **Performance Tips**:
+   - Use appropriate instance type
+   - Monitor memory usage
+   - Use chunked processing
+
+### Troubleshooting
+
+1. **Common Issues**:
+   - Memory errors: Reduce batch size
+   - S3 timeouts: Increase timeout settings
+   - Permission errors: Check IAM roles
+
+2. **Debug Mode**:
+   ```python
+   # Enable debug mode
+   os.environ['DEBUG_MODE'] = '1'
+   ```
+
+3. **Logging**:
+   - Check CloudWatch logs
+   - Use debug mode for verbose output
+   - Monitor instance metrics
+
+## Google Colab Setup
+
+1. **Clone Repository**:
+   ```python
+   # In a notebook cell:
+   !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+   %cd YaleGWI
+   ```
+
+2. **Setup Environment**:
+   ```python
+   import os
+   import sys
+   os.chdir('/content/YaleGWI')  # Adjust as needed
+   sys.path.append(os.path.abspath('./src'))
+   from src.core.imports import setup_environment
+   deps = setup_environment('colab')
+   np = deps['np']
+   torch = deps['torch']
+   CFG = deps['CFG']
+   DataManager = deps['DataManager']
+   ```
+
+3. **Mount Google Drive** (if needed):
+   ```python
+   # This is handled automatically by setup_environment('colab')
+   # But you can also do it manually:
+   from google.colab import drive
+   drive.mount('/content/drive')
+   ```
+
+## Kaggle Setup
+
+1. **Clone Repository**:
+   ```python
+   # In a notebook cell:
+   !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+   %cd YaleGWI
+   ```
+
+2. **Setup Environment**:
+   ```python
+   import os
+   import sys
+   !pip install kagglehub
+   import kagglehub
+
+   os.environ['GWI_ENV'] = 'sagemaker'
+   os.chdir('/kaggle/working/YaleGWI')  # Adjust as needed
+   sys.path.append(os.path.abspath('./src'))
+   from src.core.imports import setup_environment
+   deps = setup_environment('kaggle')
+   np = deps['np']
+   torch = deps['torch']
+   CFG = deps['CFG']
+   DataManager = deps['DataManager']
+   ```
+
+3. **Configure Kaggle API**:
+   ```python
+   # This is handled automatically by setup_environment('kaggle')
+   # But you can also do it manually:
+   import os
+   os.environ['KAGGLE_CONFIG_DIR'] = '/kaggle/input'
+   ```
+
 
 ---
 

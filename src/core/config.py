@@ -23,7 +23,7 @@ class _KagglePaths:
         self.root: Path = Path('/kaggle/input/waveform-inversion')
         self.train: Path = self.root / 'train_samples'
         self.test: Path = self.root / 'test'
-        # folders visible in the screenshot
+        # Geological families
         self.families = {
             'FlatVel_A'   : self.train/'FlatVel_A',
             'FlatVel_B'   : self.train/'FlatVel_B',
@@ -81,7 +81,7 @@ class Config:
 
             # Model parameters
             cls._inst.backbone = "hgnetv2_b2.ssld_stage2_ft_in1k"
-            cls._inst.ema_decay = 0.99
+            cls._inst.ema_decay = 0.99 # Is this the correct value?
             cls._inst.pretrained = True
 
             # Inference weight path (default for Kaggle dataset)
@@ -202,16 +202,70 @@ class SeismicDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx):
+        # Get the file paths and indices for this sample
         sfile, vfile, i, _ = self.index[idx]
-        # Load all sources for this sample
-        seis = np.load(sfile, mmap_mode='r')[i]  # shape: (sources, receivers, timesteps)
-        vel = np.load(vfile, mmap_mode='r')[i]   # shape: (1, 70, 70)
-        seis = seis.astype(np.float16)           # shape: (5, receivers, timesteps)
+        
+        # Load the seismic data for this sample using memory mapping
+        # This loads all sources for the given sample index
+        # Shape: (sources, receivers, timesteps)
+        seis = np.load(sfile, mmap_mode='r')[i]
+        
+        # Load the corresponding velocity model
+        # Shape: (1, 70, 70) - represents the subsurface velocity structure
+        vel = np.load(vfile, mmap_mode='r')[i]
+        
+        # Convert both arrays to float16 to reduce memory usage
+        # This is important for large datasets and GPU memory efficiency
+        seis = seis.astype(np.float16)
         vel = vel.astype(np.float16)
-        # Normalize per source
+        
+        # Normalize the seismic data per source
+        # This helps with training stability and convergence
+        # 1. Calculate mean across receivers and timesteps for each source
         mu = seis.mean(axis=(1,2), keepdims=True)
+        # 2. Calculate standard deviation with small epsilon to avoid division by zero
         std = seis.std(axis=(1,2), keepdims=True) + 1e-6
+        # 3. Apply normalization
         seis = (seis - mu) / std
+        
+        # Update memory tracking if enabled
         if self.memory_tracker:
             self.memory_tracker.update(seis.nbytes + vel.nbytes)
-        return torch.from_numpy(seis), torch.from_numpy(vel) 
+            
+        # Convert numpy arrays to PyTorch tensors and return
+        # This is required for PyTorch's DataLoader
+        return torch.from_numpy(seis), torch.from_numpy(vel)
+
+# Temporary mapping for family data structure
+FAMILY_FILE_MAP = {
+    'CurveFault_A': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'CurveFault_B': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'CurveVel_A': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'CurveVel_B': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'FlatFault_A': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'FlatFault_B': {
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': ''
+    },
+    'FlatVel_A': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'FlatVel_B': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'Style_A': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+    'Style_B': {
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
+    },
+} 
