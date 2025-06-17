@@ -1,5 +1,19 @@
 # SpecProj-UNet for Seismic Waveform Inversion
 
+## Table of Contents
+1. [Overview of Functionality and Structure](#1-overview-of-functionality-and-structure)
+2. [Environments Availability](#2-environments-availability)
+3. [Kaggle Instructions](#3-kaggle-instructions)
+    - [Quick Start: Full Pipeline](#kaggle-quick-start-full-pipeline)
+4. [Colab Instructions](#4-colab-instructions)
+    - [Quick Start: Full Pipeline](#colab-quick-start-full-pipeline)
+5. [AWS EC2 Multi-GPU Instructions](#5-aws-ec2-multi-gpu-g4dn12xlarge-instructions)
+    - [Quick Start: Full Pipeline](#ec2-quick-start-full-pipeline)
+6. [SageMaker Instructions](#6-sagemaker-instructions)
+    - [Quick Start: Full Pipeline](#sagemaker-quick-start-full-pipeline)
+7. [MLflow Model Tracking & Geometric Metadata (All Environments)](#mlflow-model-tracking--geometric-metadata-all-environments)
+8. [Usage Examples](#usage)
+
 ## 1. Overview of Functionality and Structure
 
 A deep learning solution for seismic waveform inversion using a HGNet/ConvNeXt backbone with:
@@ -86,6 +100,28 @@ This project supports the following environments:
 
 ## 3. Kaggle Instructions
 
+### Quick Start: Full Pipeline {#kaggle-quick-start-full-pipeline}
+1. **Preprocessing**
+   ```python
+   from src.core.preprocess import load_data
+   load_data('/kaggle/input/waveform-inversion/train_samples', '/kaggle/working/preprocessed', use_s3=False)
+   ```
+2. **Training**
+   ```python
+   from src.core.train import train
+   train(fp16=True)
+   ```
+3. **Inference**
+   ```python
+   from src.core.model import get_model
+   import torch
+   model = get_model()
+   model.load_state_dict(torch.load('outputs/best.pth'))
+   predictions = model(input_data)
+   ```
+4. **Model Tracking**
+   - MLflow tracking is handled automatically via the pipeline utility class. No manual MLflow code is needed in most workflows.
+
 ### Setting up AWS Credentials in Kaggle
 1. Go to your Kaggle account settings
 2. Click on "Add-ons" tab
@@ -137,6 +173,28 @@ The project uses a notebook update script (`update_kaggle_notebook.py`) that aut
 ---
 
 ## 4. Colab Instructions
+
+### Quick Start: Full Pipeline {#colab-quick-start-full-pipeline}
+1. **Preprocessing**
+   ```python
+   from src.core.preprocess import load_data
+   load_data('/content/YaleGWI/train_samples', '/content/YaleGWI/preprocessed', use_s3=False)
+   ```
+2. **Training**
+   ```python
+   from src.core.train import train
+   train(fp16=True)
+   ```
+3. **Inference**
+   ```python
+   from src.core.model import get_model
+   import torch
+   model = get_model()
+   model.load_state_dict(torch.load('outputs/best.pth'))
+   predictions = model(input_data)
+   ```
+4. **Model Tracking**
+   - MLflow tracking is handled automatically via the pipeline utility class. No manual MLflow code is needed in most workflows.
 
 ### Quick Start
 1. Clone the repository:
@@ -204,6 +262,28 @@ with open('.env/aws/credentials.json', 'w') as f:
 
 ## 5. AWS EC2 Multi-GPU (g4dn.12xlarge) Instructions
 
+### Quick Start: Full Pipeline {#ec2-quick-start-full-pipeline}
+1. **Preprocessing**
+   ```python
+   from src.core.preprocess import load_data
+   load_data('/mnt/waveform-inversion/train_samples', '/mnt/output/preprocessed', use_s3=True)
+   ```
+2. **Training**
+   ```python
+   from src.core.train_ec2 import main as train_ec2_main
+   train_ec2_main()
+   ```
+3. **Inference**
+   ```python
+   from src.core.model import get_model
+   import torch
+   model = get_model()
+   model.load_state_dict(torch.load('outputs/best.pth'))
+   predictions = model(input_data)
+   ```
+4. **Model Tracking**
+   - MLflow tracking is abstracted via a utility class. Users do not need to interact with MLflow directly; all logging and artifact management is handled by the pipeline.
+
 ### Quick Start: Multi-GPU Training on AWS EC2 (g4dn.12xlarge)
 
 #### 1. Launch a New EC2 Instance
@@ -269,6 +349,28 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
 ---
 
 ## 6. SageMaker Instructions
+
+### Quick Start: Full Pipeline {#sagemaker-quick-start-full-pipeline}
+1. **Preprocessing**
+   ```python
+   from src.core.preprocess import load_data
+   load_data('/home/sagemaker-user/YaleGWI/train_samples', '/home/sagemaker-user/YaleGWI/preprocessed', use_s3=True)
+   ```
+2. **Training**
+   ```python
+   from src.core.train import train
+   train(fp16=True)
+   ```
+3. **Inference**
+   ```python
+   from src.core.model import get_model
+   import torch
+   model = get_model()
+   model.load_state_dict(torch.load('outputs/best.pth'))
+   predictions = model(input_data)
+   ```
+4. **Model Tracking**
+   - MLflow tracking is abstracted via a utility class. Users do not need to interact with MLflow directly; all logging and artifact management is handled by the pipeline.
 
 ### 1. Environment Setup
 
@@ -457,31 +559,9 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
    os.environ['KAGGLE_CONFIG_DIR'] = '/kaggle/input'
    ```
 
+## MLflow Model Tracking & Geometric Metadata (All Environments)
 
----
+> **Note:** MLflow tracking and logging is abstracted away into a utility class. In most workflows (including EC2 and cloud), users do not need to write MLflow code directly. All model versioning, metric logging, and artifact management is handled automatically by the pipeline.
 
-# (All other original content, such as features, development workflow, contributing, license, etc., remains unchanged and follows these sections.)
-
-def load_data(input_root, output_root, use_s3=False):
-    from src.core.data_manager import DataManager
-    input_root = Path(input_root)
-    output_root = Path(output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
-    data_manager = DataManager(use_s3=use_s3) if use_s3 else None
-
-    families = list(CFG.paths.families.keys())
-    all_processed_paths = []
-    for family in families:
-        input_dir = input_root / family
-        temp_dir = output_root / 'temp' / family
-        processed_paths = process_family(family, input_dir, temp_dir, data_manager)
-        all_processed_paths.extend(processed_paths)
-    split_for_gpus(all_processed_paths, output_root, data_manager)
-    # Optionally clean up temp files, etc.
-    return all_processed_paths
-
-from src.core.preprocess import load_data
-load_data('/path/to/input', '/path/to/output', use_s3=True)
-
-
-
+### Enabling MLflow Tracking
+- Install MLflow: `

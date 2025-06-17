@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, Subset
 from sklearn.model_selection import KFold, StratifiedKFold
 from skimage.metrics import structural_similarity as ssim
 import json
+import mlflow
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,14 @@ class GeometricCrossValidator:
         
         return splits
     
+    def log_geometric_metrics_mlflow(self, metrics: dict, prefix: str = ""):
+        """Utility to log geometric metrics to MLflow if available."""
+        try:
+            for k, v in metrics.items():
+                mlflow.log_metric(f"{prefix}{k}", v)
+        except Exception:
+            pass
+    
     def evaluate_fold(self,
                      model: torch.nn.Module,
                      train_loader: torch.utils.data.DataLoader,
@@ -215,6 +224,9 @@ class GeometricCrossValidator:
         metrics['val_ssim'] /= n_val
         metrics['val_boundary_iou'] /= n_val
         
+        # Log to MLflow
+        self.log_geometric_metrics_mlflow(metrics, prefix="fold_")
+        
         return metrics
     
     def cross_validate(self,
@@ -272,6 +284,8 @@ class GeometricCrossValidator:
             
             # Evaluate fold
             metrics = self.evaluate_fold(model, train_loader, val_loader, device)
+            # Log fold metrics to MLflow
+            self.log_geometric_metrics_mlflow(metrics, prefix=f"fold{i+1}_")
             fold_metrics.append(metrics)
         
         # Aggregate results
