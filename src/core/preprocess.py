@@ -141,7 +141,7 @@ def process_family(family: str, input_dir: Path, output_dir: Path, data_manager:
     
     if data_manager and data_manager.use_s3:
         # Process files from S3
-        s3_prefix = f"raw/{family}/"
+        s3_prefix = f"raw/train_samples/{family}/"
         s3_files = data_manager.list_s3_files(s3_prefix)
         
         for s3_key in tqdm(s3_files, desc=f"Processing {family} from S3"):
