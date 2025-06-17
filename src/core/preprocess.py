@@ -384,5 +384,44 @@ def main():
         logger.error(f"Error in main preprocessing: {str(e)}")
         raise
 
+def load_data(input_root, output_root, use_s3=False):
+    """
+    High-level entry point for preprocessing pipeline. Sets up DataManager, processes all families, and splits for GPUs.
+    Args:
+        input_root (str or Path): Root directory for input data
+        output_root (str or Path): Directory to write processed data
+        use_s3 (bool): Whether to use S3 for IO
+    Returns:
+        List[str]: All processed file paths
+    """
+    from pathlib import Path
+    import subprocess
+    from src.core.data_manager import DataManager
+    input_root = Path(input_root)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    data_manager = DataManager(use_s3=use_s3) if use_s3 else None
+
+    from src.core.config import CFG
+    families = list(CFG.paths.families.keys())
+    all_processed_paths = []
+    for family in families:
+        print(f"Processing family: {family}")
+        input_dir = input_root / family
+        temp_dir = output_root / 'temp' / family
+        processed_paths = process_family(family, input_dir, temp_dir, data_manager)
+        all_processed_paths.extend(processed_paths)
+        print(f"Family {family}: {len(processed_paths)} samples processed")
+    print("\nCreating GPU-specific datasets...")
+    split_for_gpus(all_processed_paths, output_root, data_manager)
+    # Clean up temporary files
+    temp_dir = output_root / 'temp'
+    if temp_dir.exists():
+        subprocess.run(['rm', '-rf', str(temp_dir)])
+    print("\nPreprocessing complete!")
+    if data_manager and data_manager.use_s3:
+        print(f"Data uploaded to s3://{data_manager.s3_bucket}/preprocessed/")
+    return all_processed_paths
+
 if __name__ == "__main__":
     main() 

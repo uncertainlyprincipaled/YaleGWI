@@ -283,7 +283,7 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
 2. **Clone Repository**:
    ```bash
    # Open terminal in JupyterLab and run:
-   git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
+   git clone -b dev https://github.com/uncertainlyprincipaled/YaleGWI.git
    cd YaleGWI
    ```
 
@@ -337,25 +337,24 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
 
 ### Running Preprocessing
 
-1. **Copy Data from Kaggle to S3**:
-   ```python
-   # Initialize DataManager with S3 support
-   data_manager = DataManager(use_s3=True)
+1. **Run Preprocessing with One Command**:
+   Set your input and output paths, and whether to use S3. The pipeline will process all families and upload the processed datasets to your S3 bucket automatically.
    
-   # Copy data from Kaggle to S3
-   data_manager.copy_kaggle_to_s3()
-   ```
-
-2. **Run Preprocessing Pipeline**:
+   **Example:**
    ```python
-   # Run preprocessing with S3 support
-   !python src/core/preprocess.py --input_root /path/to/input --output_root /path/to/output --use_s3
+   from src.core.preprocess import load_data
+   
+   # Set your parameters
+   input_root = '/path/to/input'  # e.g., '/home/sagemaker-user/input_data'
+   output_root = '/home/sagemaker-user/output_data'  # or any desired output path
+   use_s3 = True  # Set to True to use S3 for IO
+   
+   # Run the full preprocessing pipeline
+   load_data(input_root, output_root, use_s3=use_s3)
    ```
-
-3. **Monitor Progress**:
-   - Check S3 bucket for processed files
-   - Monitor instance metrics in SageMaker console
-   - View logs in CloudWatch
+   - All processed data will be uploaded to your S3 bucket if `use_s3=True`.
+   - Temporary files are cleaned up automatically.
+   - The function returns a list of processed file paths for further use.
 
 ### Cost Optimization
 
@@ -462,6 +461,27 @@ python -m torch.distributed.launch --nproc_per_node=4 src/core/train_ec2.py --ep
 ---
 
 # (All other original content, such as features, development workflow, contributing, license, etc., remains unchanged and follows these sections.)
+
+def load_data(input_root, output_root, use_s3=False):
+    from src.core.data_manager import DataManager
+    input_root = Path(input_root)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    data_manager = DataManager(use_s3=use_s3) if use_s3 else None
+
+    families = list(CFG.paths.families.keys())
+    all_processed_paths = []
+    for family in families:
+        input_dir = input_root / family
+        temp_dir = output_root / 'temp' / family
+        processed_paths = process_family(family, input_dir, temp_dir, data_manager)
+        all_processed_paths.extend(processed_paths)
+    split_for_gpus(all_processed_paths, output_root, data_manager)
+    # Optionally clean up temp files, etc.
+    return all_processed_paths
+
+from src.core.preprocess import load_data
+load_data('/path/to/input', '/path/to/output', use_s3=True)
 
 
 
