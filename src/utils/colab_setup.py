@@ -134,6 +134,7 @@ def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', 
         Dict containing verification results
     """
     if use_s3:
+        print("DEBUG: Entering S3 data verification block")
         print(f"🔍 Verifying data availability in S3 bucket...")
         
         import boto3
@@ -144,6 +145,7 @@ def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', 
         s3 = boto3.client('s3', region_name=region)
         found = []
         missing = []
+        print(f"DEBUG: FAMILY_FILE_MAP keys: {list(FAMILY_FILE_MAP.keys())}")
         for family, info in FAMILY_FILE_MAP.items():
             s3_family_prefix = CFG.s3_paths.families[family]
             # Check seis_dir
@@ -647,5 +649,5 @@ def verify_aws_setup() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     # Example usage
-    results = complete_colab_setup()
+    results = complete_colab_setup(use_s3=True)
     print("\nSetup completed with results:", results) 
