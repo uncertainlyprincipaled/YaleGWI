@@ -135,6 +135,7 @@ def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', 
     """
     if use_s3:
         print(f"🔍 Verifying data availability in S3 bucket...")
+        
         import boto3
         import os
         from src.core.config import CFG, FAMILY_FILE_MAP
@@ -151,14 +152,18 @@ def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', 
             found_seis = False
             found_vel = False
             try:
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=seis_prefix, MaxKeys=1)
-                if 'Contents' in resp and len(resp['Contents']) > 0:
+                resp = s3.list_objects_v2(Bucket=bucket, Prefix=seis_prefix, MaxKeys=5)
+                seis_keys = [obj['Key'] for obj in resp.get('Contents', [])]
+                print(f"DEBUG: {family} seis_prefix={seis_prefix} keys={seis_keys}")
+                if len(seis_keys) > 0:
                     found_seis = True
             except Exception as e:
                 print(f"❌ {family}: error checking seis S3 ({e})")
             try:
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=vel_prefix, MaxKeys=1)
-                if 'Contents' in resp and len(resp['Contents']) > 0:
+                resp = s3.list_objects_v2(Bucket=bucket, Prefix=vel_prefix, MaxKeys=5)
+                vel_keys = [obj['Key'] for obj in resp.get('Contents', [])]
+                print(f"DEBUG: {family} vel_prefix={vel_prefix} keys={vel_keys}")
+                if len(vel_keys) > 0:
                     found_vel = True
             except Exception as e:
                 print(f"❌ {family}: error checking vel S3 ({e})")
