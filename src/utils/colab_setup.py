@@ -137,27 +137,38 @@ def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', 
         print(f"🔍 Verifying data availability in S3 bucket...")
         import boto3
         import os
-        from src.core.config import CFG
+        from src.core.config import CFG, FAMILY_FILE_MAP
         bucket = os.environ.get('AWS_S3_BUCKET') or CFG.s3_paths.bucket
         region = os.environ.get('AWS_REGION', 'us-east-1')
         s3 = boto3.client('s3', region_name=region)
-        expected_families = list(CFG.s3_paths.families.keys())
-        prefix_families = {fam: CFG.s3_paths.families[fam] + '/' for fam in expected_families}
         found = []
         missing = []
-        for family, prefix in prefix_families.items():
+        for family, info in FAMILY_FILE_MAP.items():
+            s3_family_prefix = CFG.s3_paths.families[family]
+            # Check seis_dir
+            seis_prefix = f"{s3_family_prefix}/{info['seis_dir']}/" if info['seis_dir'] else f"{s3_family_prefix}/"
+            vel_prefix = f"{s3_family_prefix}/{info['vel_dir']}/" if info['vel_dir'] else f"{s3_family_prefix}/"
+            found_seis = False
+            found_vel = False
             try:
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+                resp = s3.list_objects_v2(Bucket=bucket, Prefix=seis_prefix, MaxKeys=1)
                 if 'Contents' in resp and len(resp['Contents']) > 0:
-                    found.append(family)
-                    print(f"✅ {family}: found in S3")
-                else:
-                    missing.append(family)
-                    print(f"❌ {family}: not found in S3")
+                    found_seis = True
             except Exception as e:
+                print(f"❌ {family}: error checking seis S3 ({e})")
+            try:
+                resp = s3.list_objects_v2(Bucket=bucket, Prefix=vel_prefix, MaxKeys=1)
+                if 'Contents' in resp and len(resp['Contents']) > 0:
+                    found_vel = True
+            except Exception as e:
+                print(f"❌ {family}: error checking vel S3 ({e})")
+            if found_seis and found_vel:
+                found.append(family)
+                print(f"✅ {family}: found in S3 (seis+vel)")
+            else:
                 missing.append(family)
-                print(f"❌ {family}: error checking S3 ({e})")
-        print(f"📊 S3 Summary: {len(found)}/{len(expected_families)} families found")
+                print(f"❌ {family}: not found in S3 (seis: {found_seis}, vel: {found_vel})")
+        print(f"📊 S3 Summary: {len(found)}/{len(FAMILY_FILE_MAP)} families found")
         structure_valid = len(found) > 0
         if not structure_valid:
             print("⚠️ WARNING: No data found in S3 for any family!")

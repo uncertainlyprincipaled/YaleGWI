@@ -1909,7 +1909,7 @@ from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 # Local imports
-from src.core.config import CFG
+from src.core.config import CFG, FAMILY_FILE_MAP
 
 class MemoryTracker:
     """Tracks memory usage during data loading."""
@@ -2098,35 +2098,29 @@ class DataManager:
             return None, None, None
         
         if self.use_s3:
-            # Use S3Paths config for all S3 prefixes
+            # Use S3Paths config and FAMILY_FILE_MAP for all S3 prefixes
             s3_family_prefix = CFG.s3_paths.families[family]
+            info = FAMILY_FILE_MAP[family]
             # Vel/Style: data/model subfolders (batched)
-            seis_prefix = f"{s3_family_prefix}/data/"
-            vel_prefix = f"{s3_family_prefix}/model/"
+            seis_prefix = f"{s3_family_prefix}/{info['seis_dir']}/" if info['seis_dir'] else f"{s3_family_prefix}/"
+            vel_prefix = f"{s3_family_prefix}/{info['vel_dir']}/" if info['vel_dir'] else f"{s3_family_prefix}/"
             seis_files = self.list_s3_files(seis_prefix)
             vel_files = self.list_s3_files(vel_prefix)
             if seis_files and vel_files:
                 if CFG.debug_mode:
                     seis_files = seis_files[:1]
                     vel_files = vel_files[:1]
-                return seis_files, vel_files, 'VelStyle'
-            # Try fault structure (seis*.npy and vel*.npy directly in folder)
-            seis_files = [f for f in self.list_s3_files(s3_family_prefix + '/') if f.split('/')[-1].startswith('seis')]
-            vel_files = [f for f in self.list_s3_files(s3_family_prefix + '/') if f.split('/')[-1].startswith('vel')]
-            if seis_files and vel_files:
-                if CFG.debug_mode:
-                    seis_files = seis_files[:1]
-                    vel_files = vel_files[:1]
-                return seis_files, vel_files, 'Fault'
+                return seis_files, vel_files, 'VelStyle' if info['seis_dir'] else 'Fault'
         else:
             # Original local file handling
             root = CFG.paths.families[family]
+            info = FAMILY_FILE_MAP[family]
             if not root.exists():
                 raise ValueError(f"Family directory not found: {root}")
             # Vel/Style: data/model subfolders (batched)
-            if (root / 'data').exists() and (root / 'model').exists():
-                seis_files = sorted((root/'data').glob('*.npy'))
-                vel_files = sorted((root/'model').glob('*.npy'))
+            if info['seis_dir'] and info['vel_dir']:
+                seis_files = sorted((root/info['seis_dir']).glob('*.npy'))
+                vel_files = sorted((root/info['vel_dir']).glob('*.npy'))
                 if seis_files and vel_files:
                     if CFG.debug_mode:
                         seis_files = seis_files[:1]
