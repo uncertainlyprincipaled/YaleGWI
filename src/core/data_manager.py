@@ -209,26 +209,23 @@ class DataManager:
         if CFG.debug_mode and family in CFG.families_to_exclude:
             logging.info(f"Skipping excluded family in debug mode: {family}")
             return None, None, None
-            
+        
         if self.use_s3:
-            # List files from S3
-            seis_prefix = f"raw/{family}/data/"
-            vel_prefix = f"raw/{family}/model/"
-            
+            # Use S3Paths config for all S3 prefixes
+            s3_family_prefix = CFG.s3_paths.families[family]
+            # Vel/Style: data/model subfolders (batched)
+            seis_prefix = f"{s3_family_prefix}/data/"
+            vel_prefix = f"{s3_family_prefix}/model/"
             seis_files = self.list_s3_files(seis_prefix)
             vel_files = self.list_s3_files(vel_prefix)
-            
             if seis_files and vel_files:
                 if CFG.debug_mode:
                     seis_files = seis_files[:1]
                     vel_files = vel_files[:1]
                 return seis_files, vel_files, 'VelStyle'
-                
-            # Try fault structure
-            seis_prefix = f"raw/{family}/"
-            seis_files = [f for f in self.list_s3_files(seis_prefix) if f.startswith('seis')]
-            vel_files = [f for f in self.list_s3_files(seis_prefix) if f.startswith('vel')]
-            
+            # Try fault structure (seis*.npy and vel*.npy directly in folder)
+            seis_files = [f for f in self.list_s3_files(s3_family_prefix + '/') if f.split('/')[-1].startswith('seis')]
+            vel_files = [f for f in self.list_s3_files(s3_family_prefix + '/') if f.split('/')[-1].startswith('vel')]
             if seis_files and vel_files:
                 if CFG.debug_mode:
                     seis_files = seis_files[:1]
@@ -239,7 +236,6 @@ class DataManager:
             root = CFG.paths.families[family]
             if not root.exists():
                 raise ValueError(f"Family directory not found: {root}")
-                
             # Vel/Style: data/model subfolders (batched)
             if (root / 'data').exists() and (root / 'model').exists():
                 seis_files = sorted((root/'data').glob('*.npy'))
@@ -249,7 +245,6 @@ class DataManager:
                         seis_files = seis_files[:1]
                         vel_files = vel_files[:1]
                     return seis_files, vel_files, 'VelStyle'
-                    
             # Fault: seis*.npy and vel*.npy directly in folder
             seis_files = sorted(root.glob('seis*.npy'))
             vel_files = sorted(root.glob('vel*.npy'))
@@ -258,7 +253,6 @@ class DataManager:
                     seis_files = seis_files[:1]
                     vel_files = vel_files[:1]
                 return seis_files, vel_files, 'Fault'
-                
         raise ValueError(f"Could not find valid data structure for family {family}")
 
     def create_dataset(self, seis_files: Union[List[Path], List[str]], 

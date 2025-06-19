@@ -42,6 +42,29 @@ class _KagglePaths:
         self.aws_test: Optional[Path] = None
         self.aws_output: Optional[Path] = None
 
+class _S3Paths:
+    def __init__(self):
+        self.bucket = os.environ.get('AWS_S3_BUCKET', 'yale-gwi')
+        self.raw_prefix = 'raw/train_samples'
+        self.preprocessed_prefix = 'preprocessed'
+        # Per-family S3 paths
+        self.families = {
+            'FlatVel_A'   : f'{self.raw_prefix}/FlatVel_A',
+            'FlatVel_B'   : f'{self.raw_prefix}/FlatVel_B',
+            'CurveVel_A'  : f'{self.raw_prefix}/CurveVel_A',
+            'CurveVel_B'  : f'{self.raw_prefix}/CurveVel_B',
+            'Style_A'     : f'{self.raw_prefix}/Style_A',
+            'Style_B'     : f'{self.raw_prefix}/Style_B',
+            'FlatFault_A' : f'{self.raw_prefix}/FlatFault_A',
+            'FlatFault_B' : f'{self.raw_prefix}/FlatFault_B',
+            'CurveFault_A': f'{self.raw_prefix}/CurveFault_A',
+            'CurveFault_B': f'{self.raw_prefix}/CurveFault_B',
+        }
+        # For preprocessed data
+        self.preprocessed_families = {
+            fam: f'{self.preprocessed_prefix}/{fam}' for fam in self.families
+        }
+
 class _Env:
     def __init__(self):
         if 'KAGGLE_URL_BASE' in os.environ:
@@ -65,6 +88,7 @@ class Config:
             cls._inst = super().__new__(cls)
             cls._inst.env   = _Env()
             cls._inst.paths = _KagglePaths()
+            cls._inst.s3_paths = _S3Paths()
             cls._inst.seed  = 42
 
             # Debug settings

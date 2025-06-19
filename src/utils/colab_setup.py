@@ -137,15 +137,12 @@ def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', 
         print(f"🔍 Verifying data availability in S3 bucket...")
         import boto3
         import os
-        bucket = os.environ.get('AWS_S3_BUCKET')
+        from src.core.config import CFG
+        bucket = os.environ.get('AWS_S3_BUCKET') or CFG.s3_paths.bucket
         region = os.environ.get('AWS_REGION', 'us-east-1')
         s3 = boto3.client('s3', region_name=region)
-        expected_families = [
-            'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
-            'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
-            'CurveFault_A', 'CurveFault_B'
-        ]
-        prefix_families = {fam: f"train_samples/{fam}/" for fam in expected_families}
+        expected_families = list(CFG.s3_paths.families.keys())
+        prefix_families = {fam: CFG.s3_paths.families[fam] + '/' for fam in expected_families}
         found = []
         missing = []
         for family, prefix in prefix_families.items():
