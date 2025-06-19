@@ -316,6 +316,7 @@ import subprocess
 # For Kaggle/Colab, install zarr
 # !pip install zarr
 import zarr
+import dask
 import dask.array as da
 from dask.diagnostics import ProgressBar
 from scipy.signal import decimate
@@ -338,6 +339,90 @@ CHUNK_TIME = 256  # After decimating by 4 - optimized for GPU memory
 CHUNK_SRC_REC = 8  # Chunk size for source-receiver dimensions
 DT_DECIMATE = 4  # 1 kHz → 250 Hz - reduces data size while preserving signal
 NYQUIST_FREQ = 500  # Hz (half of original sampling rate) - critical for downsampling
+
+def verify_data_structure(data_root: Path) -> bool:
+    """
+    Verify that the data structure is correct before preprocessing.
+    
+    Args:
+        data_root: Root directory containing the training data
+        
+    Returns:
+        bool: True if data structure is valid
+    """
+    data_root = Path(data_root)
+    
+    if not data_root.exists():
+        logger.error(f"Data root directory does not exist: {data_root}")
+        return False
+    
+    # Expected families
+    expected_families = [
+        'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
+        'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
+        'CurveFault_A', 'CurveFault_B'
+    ]
+    
+    print("Verifying data structure...")
+    print(f"Data root: {data_root}")
+    print()
+    
+    all_valid = True
+    
+    for family in expected_families:
+        family_dir = data_root / family
+        if not family_dir.exists():
+            print(f"✗ {family}: Directory not found")
+            all_valid = False
+            continue
+        
+        # Check for .npy files
+        npy_files = list(family_dir.glob('*.npy'))
+        if not npy_files:
+            print(f"✗ {family}: No .npy files found")
+            all_valid = False
+            continue
+        
+        print(f"✓ {family}: {len(npy_files)} files found")
+        
+        # Check first file structure
+        try:
+            sample_file = npy_files[0]
+            sample_data = np.load(sample_file, mmap_mode='r')
+            
+            if sample_data.ndim == 4:
+                print(f"  - Shape: {sample_data.shape} (batch, sources, time, receivers)")
+                print(f"  - Dtype: {sample_data.dtype}")
+                
+                # Check expected dimensions
+                if sample_data.shape[2] != 2000:  # Time dimension
+                    print(f"  ⚠ Warning: Expected time dimension 2000, got {sample_data.shape[2]}")
+                if sample_data.shape[3] != 70:  # Receiver dimension
+                    print(f"  ⚠ Warning: Expected receiver dimension 70, got {sample_data.shape[3]}")
+                    
+            elif sample_data.ndim == 3:
+                print(f"  - Shape: {sample_data.shape} (sources, time, receivers)")
+                print(f"  - Dtype: {sample_data.dtype}")
+                
+                # Check expected dimensions
+                if sample_data.shape[1] != 2000:  # Time dimension
+                    print(f"  ⚠ Warning: Expected time dimension 2000, got {sample_data.shape[1]}")
+                if sample_data.shape[2] != 70:  # Receiver dimension
+                    print(f"  ⚠ Warning: Expected receiver dimension 70, got {sample_data.shape[2]}")
+            else:
+                print(f"  ⚠ Warning: Unexpected number of dimensions: {sample_data.ndim}")
+                
+        except Exception as e:
+            print(f"  ✗ Error loading sample file: {e}")
+            all_valid = False
+    
+    print()
+    if all_valid:
+        print("✓ Data structure verification passed!")
+        return True
+    else:
+        print("✗ Data structure verification failed!")
+        return False
 
 def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
     """
@@ -2793,5 +2878,8 @@ monai>=1.2.0
 pytest
 awscli
 boto3
-botocore 
+botocore
+zarr>=2.14.0  # For efficient data storage
+dask>=2023.1.0  # For out-of-memory computations
+scipy>=1.9.0  # For signal processing (decimate function) 
 
