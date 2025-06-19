@@ -123,68 +123,103 @@ def mount_google_drive() -> bool:
         print(f"❌ Google Drive mounting failed: {e}")
         return False
 
-def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples') -> Dict[str, Any]:
+def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', use_s3: bool = False) -> Dict[str, Any]:
     """
-    Verify that training data is available and properly structured.
-    
+    Verify that training data is available and properly structured, either locally or in S3.
+    If use_s3 is True, check S3 for at least one file per family (cost-efficient, one request per family).
     Args:
-        data_path: Path to the training data directory
-        
+        data_path: Path to the training data directory (local, ignored if use_s3)
+        use_s3: Whether to check S3 instead of local
     Returns:
         Dict containing verification results
     """
-    print(f"🔍 Verifying data availability at {data_path}...")
-    
-    data_root = Path(data_path)
-    result = {
-        'data_exists': False,
-        'families_found': [],
-        'families_missing': [],
-        'total_files': 0,
-        'structure_valid': False
-    }
-    
-    if not data_root.exists():
-        print(f"❌ Data directory not found: {data_path}")
-        return result
-    
-    result['data_exists'] = True
-    
-    # Expected families
-    expected_families = [
-        'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
-        'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
-        'CurveFault_A', 'CurveFault_B'
-    ]
-    
-    for family in expected_families:
-        family_dir = data_root / family
-        if family_dir.exists():
-            npy_files = list(family_dir.glob('*.npy'))
-            if npy_files:
-                result['families_found'].append(family)
-                result['total_files'] += len(npy_files)
-                print(f"✅ {family}: {len(npy_files)} files")
+    if use_s3:
+        print(f"🔍 Verifying data availability in S3 bucket...")
+        import boto3
+        import os
+        bucket = os.environ.get('AWS_S3_BUCKET')
+        region = os.environ.get('AWS_REGION', 'us-east-1')
+        s3 = boto3.client('s3', region_name=region)
+        expected_families = [
+            'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
+            'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
+            'CurveFault_A', 'CurveFault_B'
+        ]
+        prefix_families = {fam: f"train_samples/{fam}/" for fam in expected_families}
+        found = []
+        missing = []
+        for family, prefix in prefix_families.items():
+            try:
+                resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+                if 'Contents' in resp and len(resp['Contents']) > 0:
+                    found.append(family)
+                    print(f"✅ {family}: found in S3")
+                else:
+                    missing.append(family)
+                    print(f"❌ {family}: not found in S3")
+            except Exception as e:
+                missing.append(family)
+                print(f"❌ {family}: error checking S3 ({e})")
+        print(f"📊 S3 Summary: {len(found)}/{len(expected_families)} families found")
+        structure_valid = len(found) > 0
+        if not structure_valid:
+            print("⚠️ WARNING: No data found in S3 for any family!")
+        return {
+            'data_exists': structure_valid,
+            'families_found': found,
+            'families_missing': missing,
+            'total_files': None,  # Not counting all files to save cost
+            'structure_valid': structure_valid,
+            'source': 's3',
+        }
+    else:
+        print(f"🔍 Verifying data availability at {data_path}...")
+        from pathlib import Path
+        data_root = Path(data_path)
+        result = {
+            'data_exists': False,
+            'families_found': [],
+            'families_missing': [],
+            'total_files': 0,
+            'structure_valid': False,
+            'source': 'local',
+        }
+        if not data_root.exists():
+            print(f"❌ Data directory not found: {data_path}")
+            print("⚠️ WARNING: No local data found!")
+            return result
+        result['data_exists'] = True
+        expected_families = [
+            'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
+            'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
+            'CurveFault_A', 'CurveFault_B'
+        ]
+        for family in expected_families:
+            family_dir = data_root / family
+            if family_dir.exists():
+                npy_files = list(family_dir.glob('*.npy'))
+                if npy_files:
+                    result['families_found'].append(family)
+                    result['total_files'] += len(npy_files)
+                    print(f"✅ {family}: {len(npy_files)} files")
+                else:
+                    result['families_missing'].append(family)
+                    print(f"⚠️ {family}: Directory exists but no .npy files")
             else:
                 result['families_missing'].append(family)
-                print(f"⚠️ {family}: Directory exists but no .npy files")
-        else:
-            result['families_missing'].append(family)
-            print(f"❌ {family}: Not found")
-    
-    # Verify data structure if families are found
-    if result['families_found']:
-        try:
-            from src.core.preprocess import verify_data_structure
-            result['structure_valid'] = verify_data_structure(data_root)
-        except ImportError:
-            print("⚠️ Could not import verification function")
-            result['structure_valid'] = True  # Assume valid if we can't verify
-    
-    print(f"📊 Summary: {len(result['families_found'])}/{len(expected_families)} families found")
-    print(f"📊 Total files: {result['total_files']}")
-    
-    return result
+                print(f"❌ {family}: Not found")
+        # Verify data structure if families are found
+        if result['families_found']:
+            try:
+                from src.core.preprocess import verify_data_structure
+                result['structure_valid'] = verify_data_structure(data_root)
+            except ImportError:
+                print("⚠️ Could not import verification function")
+                result['structure_valid'] = True  # Assume valid if we can't verify
+        print(f"📊 Local Summary: {len(result['families_found'])}/{len(expected_families)} families found")
+        if not result['families_found']:
+            print("⚠️ WARNING: No local data found for any family!")
+        return result
 
 def run_preprocessing(
     input_root: str = '/content/YaleGWI/train_samples',
@@ -430,7 +465,7 @@ def complete_colab_setup(
     print("\n" + "="*50)
     print("STEP 5: Data Verification")
     print("="*50)
-    results['data_verification'] = verify_data_availability(data_path)
+    results['data_verification'] = verify_data_availability(data_path, use_s3=use_s3)
     
     # Step 6: Preprocessing (if data is available)
     if results['data_verification']['data_exists'] and results['data_verification']['families_found']:
@@ -485,16 +520,13 @@ def setup_aws_credentials_from_secrets() -> bool:
     try:
         from google.colab import userdata
         import os
-        
         # Load AWS credentials from Colab secrets
-        os.environ['AWS_ACCESS_KEY_ID'] = userdata.get('aws_access_key_id')
-        os.environ['AWS_SECRET_ACCESS_KEY'] = userdata.get('aws_secret_access_key')
-        os.environ['AWS_REGION'] = userdata.get('aws_region', 'us-east-1')
-        os.environ['AWS_S3_BUCKET'] = userdata.get('aws_s3_bucket')
-        
+        os.environ['AWS_ACCESS_KEY_ID'] = userdata.get('aws_access_key_id') or ''
+        os.environ['AWS_SECRET_ACCESS_KEY'] = userdata.get('aws_secret_access_key') or ''
+        os.environ['AWS_REGION'] = userdata.get('aws_region') or 'us-east-1'
+        os.environ['AWS_S3_BUCKET'] = userdata.get('aws_s3_bucket') or ''
         print("✅ AWS credentials loaded from Colab secrets")
         return True
-        
     except ImportError:
         print("❌ Google Colab userdata not available - not in Colab environment")
         return False
