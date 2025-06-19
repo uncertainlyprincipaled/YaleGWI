@@ -293,3 +293,6 @@ FAMILY_FILE_MAP = {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model'
     },
 } 
+
+resp = s3.list_objects_v2(Bucket=bucket, Prefix=seis_prefix, MaxKeys=5)
+print(f"DEBUG: {family} seis_prefix={seis_prefix} keys={[obj['Key'] for obj in resp.get('Contents', [])]}") 
