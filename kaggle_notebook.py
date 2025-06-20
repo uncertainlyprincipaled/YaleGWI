@@ -281,34 +281,34 @@ class SeismicDataset(Dataset):
 # Temporary mapping for family data structure
 FAMILY_FILE_MAP = {
     'CurveFault_A': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
     },
     'CurveFault_B': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
     },
     'CurveVel_A': {
-        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
     'CurveVel_B': {
-        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
     'FlatFault_A': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
     },
     'FlatFault_B': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
     },
     'FlatVel_A': {
-        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
     'FlatVel_B': {
-        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
     'Style_A': {
-        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 3
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
     'Style_B': {
-        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 3
+        'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
 } 
 
@@ -996,9 +996,17 @@ def load_data(input_root, output_root, use_s3=False):
         all_processed_paths.extend(processed_paths)
         all_feedback[family] = feedback
 
-    # Optional: Consolidate all processed data into a single Zarr store
-    # This might be useful for certain training schemes.
-    # For now, we keep them separate per family.
+    # Create GPU-specific datasets
+    logger.info("--- Creating GPU-specific datasets ---")
+    split_for_gpus(all_processed_paths, output_root, data_manager)
+    
+    # Clean up temporary family directories
+    for family in families:
+        family_dir = output_root / family
+        if family_dir.exists():
+            import shutil
+            shutil.rmtree(family_dir)
+            logger.info(f"Cleaned up temporary family directory: {family_dir}")
     
     logger.info("--- Preprocessing pipeline complete ---")
     return all_feedback

@@ -677,9 +677,17 @@ def load_data(input_root, output_root, use_s3=False):
         all_processed_paths.extend(processed_paths)
         all_feedback[family] = feedback
 
-    # Optional: Consolidate all processed data into a single Zarr store
-    # This might be useful for certain training schemes.
-    # For now, we keep them separate per family.
+    # Create GPU-specific datasets
+    logger.info("--- Creating GPU-specific datasets ---")
+    split_for_gpus(all_processed_paths, output_root, data_manager)
+    
+    # Clean up temporary family directories
+    for family in families:
+        family_dir = output_root / family
+        if family_dir.exists():
+            import shutil
+            shutil.rmtree(family_dir)
+            logger.info(f"Cleaned up temporary family directory: {family_dir}")
     
     logger.info("--- Preprocessing pipeline complete ---")
     return all_feedback
