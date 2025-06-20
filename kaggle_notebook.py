@@ -894,8 +894,8 @@ def load_data(input_root, output_root, use_s3=False):
         family_dir = input_root / family
         family_output_dir = output_root / family
         
-        # Always process family, but handle S3 case where input_dir may not exist
-        if not family_dir.exists() and not use_s3:
+        # If not using S3, check if the local directory exists before proceeding.
+        if not use_s3 and not family_dir.exists():
             logger.warning(f"Skipping family {family}: directory not found at {family_dir}")
             continue
             
