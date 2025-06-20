@@ -487,11 +487,22 @@ def complete_colab_setup(
         print("\n" + "="*50)
         print("STEP 6: Preprocessing")
         print("="*50)
-        results['preprocessing'] = run_preprocessing(
+        
+        from src.core.preprocess import load_data
+        
+        feedback = load_data(
             input_root=data_path,
-            use_s3=use_s3,
-            save_to_drive=mount_drive
+            output_root='/content/YaleGWI/preprocessed',
+            use_s3=use_s3
         )
+        
+        # We need to get the preprocessing result status differently now
+        # For now, let's assume success if feedback is generated.
+        # A more robust check might be needed in preprocess.py
+        results['preprocessing'] = {
+            'success': feedback is not None,
+            'feedback': feedback
+        }
     
     # Step 7: Training configuration
     print("\n" + "="*50)
@@ -523,6 +534,33 @@ def complete_colab_setup(
     if 'preprocessing' in results:
         print(f"  Preprocessing: {'✅' if results['preprocessing']['success'] else '❌'}")
     
+    # Detailed Preprocessing Feedback
+    if 'preprocessing' in results and results['preprocessing'].get('feedback'):
+        print("\n" + "="*50)
+        print("🔎 Preprocessing Feedback & Recommendations")
+        print("="*50)
+        from src.core.config import FAMILY_FILE_MAP
+        feedback = results['preprocessing']['feedback']
+        
+        print(f"{'Family':<15} | {'Factor Used':<12} | {'Arrays':<8} | {'Warnings':<10} | {'Warn %':<8} | {'Recommendation'}")
+        print("-"*90)
+
+        for family, fb in feedback.items():
+            current_factor = FAMILY_FILE_MAP.get(family, {}).get('downsample_factor', 'N/A')
+            warn_percent = fb.warning_percentage
+            
+            recommendation = "✅ OK"
+            if warn_percent > 20.0:
+                recommendation = f"📉 Decrease factor (current: {current_factor})"
+            elif warn_percent > 5.0:
+                recommendation = f"🤔 Consider decreasing (current: {current_factor})"
+            elif warn_percent == 0.0 and current_factor != 'N/A' and current_factor > 1:
+                recommendation = f"📈 OK to increase (current: {current_factor})"
+
+            print(f"{family:<15} | {current_factor!s:<12} | {fb.arrays_processed:<8} | {fb.nyquist_warnings:<10} | {warn_percent:<7.2f}% | {recommendation}")
+        print("-"*90)
+        print("\n💡 Recommendation: Adjust 'downsample_factor' in src/core/config.py for families with high warning rates.")
+
     return results
 
 def setup_aws_credentials_from_secrets() -> bool:

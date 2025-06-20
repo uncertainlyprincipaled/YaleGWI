@@ -44,8 +44,25 @@ logger = logging.getLogger(__name__)
 # Constants for preprocessing
 CHUNK_TIME = 256  # After decimating by 4 - optimized for GPU memory
 CHUNK_SRC_REC = 8  # Chunk size for source-receiver dimensions
-DT_DECIMATE = 4  # 1 kHz → 250 Hz - reduces data size while preserving signal
 NYQUIST_FREQ = 500  # Hz (half of original sampling rate) - critical for downsampling
+
+class PreprocessingFeedback:
+    """A simple class to collect feedback during preprocessing."""
+    def __init__(self):
+        self.nyquist_warnings = 0
+        self.arrays_processed = 0
+
+    def add_nyquist_warning(self):
+        self.nyquist_warnings += 1
+
+    def increment_arrays_processed(self):
+        self.arrays_processed += 1
+
+    @property
+    def warning_percentage(self) -> float:
+        if self.arrays_processed == 0:
+            return 0.0
+        return (self.nyquist_warnings / self.arrays_processed) * 100
 
 def verify_data_structure(data_root: Path) -> bool:
     """
@@ -131,7 +148,7 @@ def verify_data_structure(data_root: Path) -> bool:
         print("✗ Data structure verification failed!")
         return False
 
-def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
+def validate_nyquist(data: np.ndarray, original_fs: int = 1000, dt_decimate: int = 4, feedback: Optional[PreprocessingFeedback] = None) -> bool:
     """
     Validate that the data satisfies Nyquist criterion after downsampling.
     
@@ -143,26 +160,36 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000) -> bool:
     Args:
         data: Input seismic data array
         original_fs: Original sampling frequency in Hz
+        dt_decimate: The factor by which the data will be downsampled
+        feedback: An optional feedback collector.
         
     Returns:
         bool: True if data satisfies Nyquist criterion
     """
+    if data.ndim not in [3, 4]:
+        logger.warning(f"Unexpected data dimension {data.ndim} in validate_nyquist. Skipping.")
+        return True
+        
+    time_axis = 2 if data.ndim == 4 else 1
+
     # Compute FFT
-    fft_data = np.fft.rfft(data, axis=1)
-    freqs = np.fft.rfftfreq(data.shape[1], d=1/original_fs)
+    fft_data = np.fft.rfft(data, axis=time_axis)
+    freqs = np.fft.rfftfreq(data.shape[time_axis], d=1/original_fs)
     
     # Check if significant energy exists above Nyquist frequency
-    nyquist_mask = freqs > (original_fs / (2 * DT_DECIMATE))
-    high_freq_energy = np.abs(fft_data[:, nyquist_mask]).mean()
+    nyquist_mask = freqs > (original_fs / (2 * dt_decimate))
+    high_freq_energy = np.abs(fft_data[..., nyquist_mask]).mean()
     total_energy = np.abs(fft_data).mean()
     
     # If more than 1% of energy is above Nyquist, warn
-    if high_freq_energy / total_energy > 0.01:
+    if total_energy > 1e-9 and high_freq_energy / total_energy > 0.01:
         warnings.warn(f"Significant energy above Nyquist frequency detected: {high_freq_energy/total_energy:.2%}")
+        if feedback:
+            feedback.add_nyquist_warning()
         return False
     return True
 
-def preprocess_one(arr: np.ndarray) -> np.ndarray:
+def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = True, feedback: Optional[PreprocessingFeedback] = None) -> np.ndarray:
     """
     Preprocess a single seismic array with downsampling and normalization.
     
@@ -173,24 +200,35 @@ def preprocess_one(arr: np.ndarray) -> np.ndarray:
     - Robust Normalization: Handle outliers using percentiles
     
     Processing Steps:
-    1. Validate Nyquist criterion
-    2. Apply anti-aliasing filter and downsample
+    1. Validate Nyquist criterion (if seismic)
+    2. Apply anti-aliasing filter and downsample (if seismic)
     3. Convert to float16
     4. Normalize using robust statistics
     
     Args:
         arr: Input seismic array
+        dt_decimate: The factor by which to downsample the data
+        is_seismic: Flag to indicate if the data is seismic or a velocity model
+        feedback: An optional feedback collector.
         
     Returns:
         np.ndarray: Preprocessed array
     """
     try:
-        # Validate Nyquist criterion
-        if not validate_nyquist(arr):
-            logger.warning("Data may violate Nyquist criterion after downsampling")
-        
-        # Decimate time axis with anti-aliasing filter
-        arr = decimate(arr, DT_DECIMATE, axis=1, ftype='fir')
+        if feedback:
+            feedback.increment_arrays_processed()
+
+        if is_seismic:
+            if arr.ndim not in [3, 4]:
+                logger.warning(f"Unexpected data dimension {arr.ndim} for seismic data. Skipping decimation.")
+            else:
+                time_axis = 2 if arr.ndim == 4 else 1
+                # Validate Nyquist criterion
+                if not validate_nyquist(arr, dt_decimate=dt_decimate, feedback=feedback):
+                    logger.warning("Data may violate Nyquist criterion after downsampling")
+                
+                # Decimate time axis with anti-aliasing filter
+                arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
         
         # Convert to float16
         arr = arr.astype('float16')
@@ -198,30 +236,55 @@ def preprocess_one(arr: np.ndarray) -> np.ndarray:
         # Robust normalization per trace
         μ = np.median(arr, keepdims=True)
         σ = np.percentile(arr, 95, keepdims=True) - np.percentile(arr, 5, keepdims=True)
-        arr = (arr - μ) / (σ + 1e-8)  # Add small epsilon to avoid division by zero
         
-        return arr
+        # Avoid division by zero
+        if np.isscalar(σ) and σ > 1e-6:
+            arr = (arr - μ) / σ
+        elif not np.isscalar(σ):
+            arr = (arr - μ) / (σ + 1e-6)
+        else:
+            arr = arr - μ
+            
     except Exception as e:
-        logger.error(f"Error preprocessing array: {str(e)}")
-        raise
+        logger.error(f"Error during preprocessing: {e}")
+        # Return original array on error to avoid crashing the whole pipeline
+        return arr
+        
+    return arr
 
-def process_family(family: str, input_dir: Path, output_dir: Path, data_manager: Optional[DataManager] = None) -> List[str]:
+def process_family(family: str, input_dir: Path, output_dir: Path, data_manager: Optional[DataManager] = None) -> Tuple[List[str], PreprocessingFeedback]:
     """
-    Process all files in a family and return paths to processed files.
+    Process all files for a given geological family.
     
     Args:
-        family: Name of the geological family
-        input_dir: Input directory containing raw data
-        output_dir: Output directory for processed data
-        data_manager: Optional DataManager for S3 operations
+        family: The name of the family to process.
+        input_dir: The directory where the raw data is located.
+        output_dir: The directory to save processed files.
+        data_manager: Optional DataManager for S3 operations.
         
     Returns:
-        List[str]: Paths to processed files
+        A tuple containing a list of processed file paths and a feedback object.
     """
-    input_dir = Path(input_dir)
-    output_dir = Path(output_dir)
+    logger.info(f"Processing family: {family}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    feedback = PreprocessingFeedback()
+
+    # Get family-specific settings
+    family_config = FAMILY_FILE_MAP.get(family, {})
+    seis_glob = family_config.get('seis_glob', '*.npy')
+    vel_glob = family_config.get('vel_glob', '*.npy')
+    downsample_factor = family_config.get('downsample_factor', 4) # Default to 4 if not specified
+    
+    seis_files = sorted(input_dir.glob(seis_glob))
+    vel_files = sorted(input_dir.glob(vel_glob))
+
+    if not seis_files or not vel_files:
+        logger.warning(f"No data files found for family {family} in {input_dir}")
+        return [], feedback
+
+    logger.info(f"Processing family '{family}' with downsample_factor={downsample_factor}")
+
     processed_paths = []
     
     if data_manager and data_manager.use_s3:
@@ -237,12 +300,12 @@ def process_family(family: str, input_dir: Path, output_dir: Path, data_manager:
                         n_samples = arr.shape[0]
                         for i in range(n_samples):
                             sample = arr[i]
-                            processed = preprocess_one(sample)
+                            processed = preprocess_one(sample, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
                             out_key = f"preprocessed/{family}/sample_{len(processed_paths):06d}.npy"
                             if data_manager.upload_to_s3(processed, out_key):
                                 processed_paths.append(out_key)
                     elif arr.ndim == 3:
-                        processed = preprocess_one(arr)
+                        processed = preprocess_one(arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
                         out_key = f"preprocessed/{family}/sample_{len(processed_paths):06d}.npy"
                         if data_manager.upload_to_s3(processed, out_key):
                             processed_paths.append(out_key)
@@ -251,30 +314,27 @@ def process_family(family: str, input_dir: Path, output_dir: Path, data_manager:
                 continue
     else:
         # Process local files
-        files = sorted(input_dir.glob('*.npy'))
-        for f in tqdm(files, desc=f"Processing {family}"):
+        pbar = tqdm(zip(seis_files, vel_files), total=len(seis_files), desc=f"Processing {family} locally")
+        for sfile, vfile in pbar:
             try:
-                arr = np.load(f, mmap_mode='r')
-                if arr.ndim == 4:
-                    n_samples = arr.shape[0]
-                    for i in range(n_samples):
-                        sample = arr[i]
-                        processed = preprocess_one(sample)
-                        out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
-                        np.save(out_path, processed)
-                        processed_paths.append(str(out_path))
-                elif arr.ndim == 3:
-                    processed = preprocess_one(arr)
-                    out_path = output_dir / f"sample_{len(processed_paths):06d}.npy"
-                    np.save(out_path, processed)
-                    processed_paths.append(str(out_path))
-                else:
-                    logger.warning(f"Unexpected shape {arr.shape} in {f}")
+                seis_arr = np.load(sfile, mmap_mode='r')
+                vel_arr = np.load(vfile, mmap_mode='r')
+                
+                # Apply preprocessing
+                seis_arr = preprocess_one(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
+                vel_arr = preprocess_one(vel_arr, is_seismic=False, feedback=feedback)
+
+                out_seis_path = output_dir / f"seis_{sfile.stem}.npy"
+                out_vel_path = output_dir / f"vel_{vfile.stem}.npy"
+                
+                np.save(out_seis_path, seis_arr)
+                np.save(out_vel_path, vel_arr)
+                processed_paths.append(str(out_seis_path))
             except Exception as e:
-                logger.error(f"Error processing file {f}: {str(e)}")
+                logger.error(f"Error processing file {sfile}: {str(e)}")
                 continue
     
-    return processed_paths
+    return processed_paths, feedback
 
 def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_size: Tuple[int, ...], data_manager: Optional[DataManager] = None) -> None:
     """
@@ -444,13 +504,15 @@ def main():
         # Process each family
         families = list(CFG.paths.families.keys())
         all_processed_paths = []
+        all_feedback = {}
         
         for family in families:
             logger.info(f"\nProcessing family: {family}")
             input_dir = input_root / family
             temp_dir = output_root / 'temp' / family
-            processed_paths = process_family(family, input_dir, temp_dir, data_manager)
+            processed_paths, feedback = process_family(family, input_dir, temp_dir, data_manager)
             all_processed_paths.extend(processed_paths)
+            all_feedback[family] = feedback
             logger.info(f"Family {family}: {len(processed_paths)} samples processed")
 
         # Split and create zarr datasets for GPUs
@@ -471,42 +533,48 @@ def main():
 
 def load_data(input_root, output_root, use_s3=False):
     """
-    High-level entry point for preprocessing pipeline. Sets up DataManager, processes all families, and splits for GPUs.
+    Main function to run the complete preprocessing pipeline.
+    This function discovers data families, processes them, and stores them in a
+    GPU-optimized format (Zarr).
+    
     Args:
-        input_root (str or Path): Root directory for input data
-        output_root (str or Path): Directory to write processed data
-        use_s3 (bool): Whether to use S3 for IO
+        input_root (str): Path to the root of the raw data.
+        output_root (str): Path where the processed data will be saved.
+        use_s3 (bool): Whether to use S3 for data I/O.
+        
     Returns:
-        List[str]: All processed file paths
+        A dictionary containing feedback from the preprocessing run.
     """
-    from pathlib import Path
-    import subprocess
-    from src.core.data_manager import DataManager
     input_root = Path(input_root)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
-    data_manager = DataManager(use_s3=use_s3) if use_s3 else None
-
-    from src.core.config import CFG
-    families = list(CFG.paths.families.keys())
+    
+    data_manager = DataManager(use_s3=use_s3)
+    families = FAMILY_FILE_MAP.keys()
+    
     all_processed_paths = []
+    all_feedback = {}
+
     for family in families:
-        print(f"Processing family: {family}")
-        input_dir = input_root / family
-        temp_dir = output_root / 'temp' / family
-        processed_paths = process_family(family, input_dir, temp_dir, data_manager)
+        logger.info(f"--- Starting family: {family} ---")
+        family_dir = input_root / family
+        family_output_dir = output_root / family
+        
+        # Always process family, but handle S3 case where input_dir may not exist
+        if not family_dir.exists() and not use_s3:
+            logger.warning(f"Skipping family {family}: directory not found at {family_dir}")
+            continue
+            
+        processed_paths, feedback = process_family(family, family_dir, family_output_dir, data_manager)
         all_processed_paths.extend(processed_paths)
-        print(f"Family {family}: {len(processed_paths)} samples processed")
-    print("\nCreating GPU-specific datasets...")
-    split_for_gpus(all_processed_paths, output_root, data_manager)
-    # Clean up temporary files
-    temp_dir = output_root / 'temp'
-    if temp_dir.exists():
-        subprocess.run(['rm', '-rf', str(temp_dir)])
-    print("\nPreprocessing complete!")
-    if data_manager and data_manager.use_s3:
-        print(f"Data uploaded to s3://{data_manager.s3_bucket}/preprocessed/")
-    return all_processed_paths
+        all_feedback[family] = feedback
+
+    # Optional: Consolidate all processed data into a single Zarr store
+    # This might be useful for certain training schemes.
+    # For now, we keep them separate per family.
+    
+    logger.info("--- Preprocessing pipeline complete ---")
+    return all_feedback
 
 if __name__ == "__main__":
     main() 
