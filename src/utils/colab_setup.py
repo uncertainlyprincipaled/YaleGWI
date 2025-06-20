@@ -260,7 +260,8 @@ def run_preprocessing(
         'success': False,
         'processed_files': 0,
         'error': None,
-        'output_path': output_root
+        'output_path': output_root,
+        'feedback': {}
     }
     
     # Monitor memory before preprocessing
@@ -276,18 +277,22 @@ def run_preprocessing(
         # Import preprocessing function
         from src.core.preprocess import load_data
         
-        # Run preprocessing
-        processed_paths = load_data(
+        # Run preprocessing and capture feedback
+        feedback = load_data(
             input_root=input_root,
             output_root=output_root,
             use_s3=use_s3
         )
         
         result['success'] = True
-        result['processed_files'] = len(processed_paths)
+        result['feedback'] = feedback
         
+        # Estimate processed files from feedback
+        total_processed = sum(fb.arrays_processed for fb in feedback.values())
+        result['processed_files'] = total_processed
+
         print(f"✅ Preprocessing completed successfully!")
-        print(f"📊 Processed {len(processed_paths)} files")
+        print(f"📊 Processed {total_processed} files")
         
         # Verify output
         output_dir = Path(output_root)
@@ -487,22 +492,12 @@ def complete_colab_setup(
         print("\n" + "="*50)
         print("STEP 6: Preprocessing")
         print("="*50)
-        
-        from src.core.preprocess import load_data
-        
-        feedback = load_data(
+        results['preprocessing'] = run_preprocessing(
             input_root=data_path,
             output_root='/content/YaleGWI/preprocessed',
-            use_s3=use_s3
+            use_s3=use_s3,
+            save_to_drive=mount_drive
         )
-        
-        # We need to get the preprocessing result status differently now
-        # For now, let's assume success if feedback is generated.
-        # A more robust check might be needed in preprocess.py
-        results['preprocessing'] = {
-            'success': feedback is not None,
-            'feedback': feedback
-        }
     
     # Step 7: Training configuration
     print("\n" + "="*50)
