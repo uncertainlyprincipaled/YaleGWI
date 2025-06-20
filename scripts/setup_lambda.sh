@@ -19,12 +19,8 @@ echo "🔧 Installing CUDA and PyTorch..."
 nvidia-smi
 nvcc --version
 
-# Clone repository
-echo "📥 Cloning YaleGWI repository..."
-if [ ! -d "YaleGWI" ]; then
-    git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
-fi
-cd YaleGWI
+# The script now assumes you have already cloned the repository
+# and are running this from the root of the project directory.
 
 # Create virtual environment
 echo "🐍 Setting up Python environment..."
