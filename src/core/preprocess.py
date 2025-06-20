@@ -276,64 +276,71 @@ def process_family(family: str, input_dir: Path, output_dir: Path, data_manager:
     vel_glob = family_config.get('vel_glob', '*.npy')
     downsample_factor = family_config.get('downsample_factor', 4) # Default to 4 if not specified
     
-    seis_files = sorted(input_dir.glob(seis_glob))
-    vel_files = sorted(input_dir.glob(vel_glob))
-
-    if not seis_files or not vel_files:
-        logger.warning(f"No data files found for family {family} in {input_dir}")
-        return [], feedback
-
     logger.info(f"Processing family '{family}' with downsample_factor={downsample_factor}")
-
     processed_paths = []
-    
+
+    # === S3 Processing Path ===
     if data_manager and data_manager.use_s3:
-        # Process files from S3
-        s3_prefix = f"raw/train_samples/{family}/"
-        s3_files = data_manager.list_s3_files(s3_prefix)
-        
-        for s3_key in tqdm(s3_files, desc=f"Processing {family} from S3"):
-            try:
-                arr = data_manager.stream_from_s3(s3_key)
-                if arr is not None:
-                    if arr.ndim == 4:
-                        n_samples = arr.shape[0]
-                        for i in range(n_samples):
-                            sample = arr[i]
-                            processed = preprocess_one(sample, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
-                            out_key = f"preprocessed/{family}/sample_{len(processed_paths):06d}.npy"
-                            if data_manager.upload_to_s3(processed, out_key):
-                                processed_paths.append(out_key)
-                    elif arr.ndim == 3:
-                        processed = preprocess_one(arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
-                        out_key = f"preprocessed/{family}/sample_{len(processed_paths):06d}.npy"
-                        if data_manager.upload_to_s3(processed, out_key):
-                            processed_paths.append(out_key)
-            except Exception as e:
-                logger.error(f"Error processing S3 file {s3_key}: {str(e)}")
-                continue
-    else:
-        # Process local files
-        pbar = tqdm(zip(seis_files, vel_files), total=len(seis_files), desc=f"Processing {family} locally")
-        for sfile, vfile in pbar:
-            try:
-                seis_arr = np.load(sfile, mmap_mode='r')
-                vel_arr = np.load(vfile, mmap_mode='r')
+        # 1. List files directly from S3
+        seis_keys = data_manager.s3_list_keys(family_config.get('seis_dir', '') + '/')
+        vel_keys = data_manager.s3_list_keys(family_config.get('vel_dir', '') + '/')
+
+        # 2. Check if files exist in S3
+        if not seis_keys or not vel_keys:
+            logger.warning(f"No data files found for family {family} in S3 bucket.")
+            return [], feedback
+
+        # 3. Loop and process from S3
+        pbar = tqdm(zip(seis_keys, vel_keys), total=len(seis_keys), desc=f"Processing {family} from S3")
+        for seis_key, vel_key in pbar:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_seis_path = Path(tmpdir) / Path(seis_key).name
+                local_vel_path = Path(tmpdir) / Path(vel_key).name
+                
+                data_manager.s3_download(seis_key, str(local_seis_path))
+                data_manager.s3_download(vel_key, str(local_vel_path))
+
+                seis_arr = np.load(local_seis_path, mmap_mode='r')
+                vel_arr = np.load(local_vel_path, mmap_mode='r')
                 
                 # Apply preprocessing
                 seis_arr = preprocess_one(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
                 vel_arr = preprocess_one(vel_arr, is_seismic=False, feedback=feedback)
-
-                out_seis_path = output_dir / f"seis_{sfile.stem}.npy"
-                out_vel_path = output_dir / f"vel_{vfile.stem}.npy"
+                
+                out_seis_path = output_dir / f"seis_{Path(seis_key).stem}.npy"
+                out_vel_path = output_dir / f"vel_{Path(vel_key).stem}.npy"
                 
                 np.save(out_seis_path, seis_arr)
                 np.save(out_vel_path, vel_arr)
                 processed_paths.append(str(out_seis_path))
-            except Exception as e:
-                logger.error(f"Error processing file {sfile}: {str(e)}")
-                continue
-    
+    # === Local Processing Path ===
+    else:
+        # 1. List files from the local directory
+        seis_files = sorted(input_dir.glob(seis_glob))
+        vel_files = sorted(input_dir.glob(vel_glob))
+
+        # 2. Check if files exist locally
+        if not seis_files or not vel_files:
+            logger.warning(f"No data files found for family {family} in {input_dir}")
+            return [], feedback
+
+        # 3. Loop and process local files
+        pbar = tqdm(zip(seis_files, vel_files), total=len(seis_files), desc=f"Processing {family} locally")
+        for sfile, vfile in pbar:
+            seis_arr = np.load(sfile, mmap_mode='r')
+            vel_arr = np.load(vfile, mmap_mode='r')
+            
+            # Apply preprocessing
+            seis_arr = preprocess_one(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
+            vel_arr = preprocess_one(vel_arr, is_seismic=False, feedback=feedback)
+
+            out_seis_path = output_dir / f"seis_{sfile.stem}.npy"
+            out_vel_path = output_dir / f"vel_{vfile.stem}.npy"
+            
+            np.save(out_seis_path, seis_arr)
+            np.save(out_vel_path, vel_arr)
+            processed_paths.append(str(out_seis_path))
+            
     return processed_paths, feedback
 
 def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_size: Tuple[int, ...], data_manager: Optional[DataManager] = None) -> None:
