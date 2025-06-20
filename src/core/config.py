@@ -294,5 +294,3 @@ FAMILY_FILE_MAP = {
     },
 } 
 
-resp = s3.list_objects_v2(Bucket=bucket, Prefix=seis_prefix, MaxKeys=5)
-print(f"DEBUG: {family} seis_prefix={seis_prefix} keys={[obj['Key'] for obj in resp.get('Contents', [])]}") 
