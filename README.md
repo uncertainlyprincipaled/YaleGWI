@@ -189,11 +189,24 @@ This project is optimized for the Kaggle environment.
 !git clone -b dev https://github.com/uncertainlyprincipaled/YaleGWI.git
 %cd YaleGWI
 ```
-4. **Install dependencies**:
-```python
-!pip install -r requirements.txt
+4. **Install dependencies using Mamba**:
+Kaggle comes with Mamba pre-installed. We use the `environment.yml` file for a fast and reliable setup.
+```bash
+# Create and activate the environment
+mamba env create -f environment.yml
+source activate YaleGWI
 ```
-5. **Run preprocessing with S3 offloading**:
+5. Setting up AWS Credentials in Kaggle
+   1. Go to your Kaggle account settings
+   2. Click on "Add-ons" tab
+   3. Click on "Secrets" in the left sidebar
+   4. Add the following secrets:
+      - `aws_access_key_id`: Your AWS access key ID
+      - `aws_secret_access_key`: Your AWS secret access key
+      - `aws_region`: Your AWS region (optional, defaults to 'us-east-1')
+      - `aws_s3_bucket`: Your S3 bucket name for storing preprocessed data
+
+6. **Run preprocessing with S3 offloading**:
 ```python
 !pip install zarr
 import zarr
@@ -208,7 +221,7 @@ After preprocessing, the script uploads the data to S3. You can verify the data 
 # Then, run the verification script:
 python -m tests.test_verify_s3_preprocess
 ```
-6. **Start training**:
+7. **Start training**:
 ```python
 # Train SpecProj-UNet
 !python kaggle_training.py --model specproj_unet --epochs 30 --keep-alive
@@ -216,16 +229,6 @@ python -m tests.test_verify_s3_preprocess
 # Train Heat-Kernel Model  
 !python kaggle_training.py --model heat_kernel --epochs 30 --keep-alive
 ```
-
-#### Setting up AWS Credentials in Kaggle
-1. Go to your Kaggle account settings
-2. Click on "Add-ons" tab
-3. Click on "Secrets" in the left sidebar
-4. Add the following secrets:
-   - `aws_access_key_id`: Your AWS access key ID
-   - `aws_secret_access_key`: Your AWS secret access key
-   - `aws_region`: Your AWS region (optional, defaults to 'us-east-1')
-   - `aws_s3_bucket`: Your S3 bucket name for storing preprocessed data
 
 #### Notebook Organization
 The project uses a notebook update script (`update_kaggle_notebook.py`) that automatically organizes code into cells in the correct order:
@@ -444,7 +447,7 @@ ssh -i ~/.ssh/lambda_labs_ed25519 ubuntu@<YOUR_INSTANCE_IP>
 The first time you connect, you will be asked to verify the host's authenticity. Type `yes`. Then, enter your SSH key's passphrase.
 
 **B. Run the Setup Script**
-Once you are logged in, clone the repository and run the setup script. This will install all dependencies and prepare the environment.
+Once you are logged in, clone the repository and run the setup script. This will automatically install Mamba and set up the environment using `environment.yml`.
 ```bash
 # 1. Clone the repository
 git clone -b dev https://github.com/uncertainlyprincipaled/YaleGWI.git
@@ -470,15 +473,29 @@ python -m tests.test_verify_s3_preprocess
 ```
 
 #### 5. Start Training
-You can now run your training jobs using the `train_lambda.py` script.
+You can now run your training jobs. The `train_lambda.sh` script created by the setup will automatically activate the correct Mamba environment.
 ```bash
 # Train individual models
-python src/core/train_lambda.py --model egnn --epochs 30 --gpu-id 0
-python src/core/train_lambda.py --model se3_transformer --epochs 30 --gpu-id 1
+./train_lambda.sh --model egnn --epochs 30
+# ... existing code ...
+4. **Set Up Python Environment with Mamba**:
+   ```bash
+   # Mamba is recommended for fast installation
+   wget "https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-$(uname)-$(uname -m).sh"
+   bash Mambaforge-$(uname)-$(uname -m).sh -b -p "${HOME}/mambaforge"
+   source "${HOME}/mambaforge/bin/activate"
+   mamba init
+   
+   # After restarting shell, create the environment
+   mamba env create -f environment.yml
+   conda activate YaleGWI
+   ```
 
-# Train ensemble
-python src/core/train_lambda.py --model ensemble --epochs 50 --ensemble-members 4 --all-gpus
-```
+5. **Configure AWS Credentials**
+   ```bash
+   # ... existing code ...
+   ```
+
 ---
 
 ### AWS EC2 Environment

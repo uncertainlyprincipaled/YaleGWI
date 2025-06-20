@@ -22,19 +22,31 @@ nvcc --version
 # The script now assumes you have already cloned the repository
 # and are running this from the root of the project directory.
 
-# Create virtual environment
-echo "🐍 Setting up Python environment..."
-python3 -m venv venv
-source venv/bin/activate
+# --- Use Mamba for Fast Environment Setup ---
+echo "🐍 Setting up environment with Mamba..."
 
-# Install requirements
-echo "📦 Installing Python requirements..."
-pip install --upgrade pip
-pip install -r requirements.txt
+# Install Mambaforge
+if ! command -v mamba &> /dev/null; then
+    echo "Mamba not found. Installing Mambaforge..."
+    wget "https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-$(uname)-$(uname -m).sh"
+    bash Mambaforge-$(uname)-$(uname -m).sh -b -p "${HOME}/mambaforge"
+    
+    # Add mamba to PATH for this script
+    export PATH="${HOME}/mambaforge/bin:${PATH}"
+    
+    # Permanently add to shell's config
+    mamba init
+    echo "Mamba installed. Please run 'source ~/.bashrc' or restart your shell to use it globally."
+fi
 
-# Install additional packages for Lambda Labs
-echo "📦 Installing Lambda Labs specific packages..."
-pip install zarr dask scipy scikit-image mlflow
+# Create environment from file
+echo "📦 Creating environment from environment.yml. This might take a few minutes..."
+mamba env create -f environment.yml
+
+# Activate the environment for subsequent steps in this script
+source activate YaleGWI
+
+echo "✅ Mamba environment 'YaleGWI' created and activated."
 
 # Setup AWS credentials (if using S3)
 echo "🔑 Setting up AWS credentials..."
@@ -93,7 +105,7 @@ if torch.cuda.is_available():
 
 # Test Phase 1 components
 echo "🧪 Testing Phase 1 components..."
-python3 colab_test_setup.py
+python3 -m tests.test_verify_s3_preprocess
 
 # Create training script
 echo "📝 Creating training script..."
@@ -142,8 +154,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Activate virtual environment
-source venv/bin/activate
+# Activate Mamba environment
+source ${HOME}/mambaforge/bin/activate YaleGWI
 
 # Build command
 CMD="python src/core/train_lambda.py --epochs $EPOCHS --batch $BATCH_SIZE"
@@ -184,6 +196,9 @@ cat > monitor_training.sh << 'EOF'
 # Training monitoring script
 # Usage: ./monitor_training.sh
 
+# Activate Mamba environment
+source ${HOME}/mambaforge/bin/activate YaleGWI
+
 echo "🖥️ System Resources:"
 echo "==================="
 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits
@@ -211,8 +226,8 @@ echo ""
 echo "🎉 Lambda Labs setup completed!"
 echo ""
 echo "📋 Next steps:"
-echo "1. Activate virtual environment: source venv/bin/activate"
-echo "2. Test setup: python colab_test_setup.py"
+echo "1. Activate Mamba environment: conda activate YaleGWI"
+echo "2. Test S3 setup: python -m tests.test_verify_s3_preprocess"
 echo "3. Start training: ./train_lambda.sh --epochs 30 --batch 8 --amp"
 echo "4. Monitor training: ./monitor_training.sh"
 echo ""
