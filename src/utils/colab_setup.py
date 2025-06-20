@@ -123,119 +123,6 @@ def mount_google_drive() -> bool:
         print(f"❌ Google Drive mounting failed: {e}")
         return False
 
-def verify_data_availability(data_path: str = '/content/YaleGWI/train_samples', use_s3: bool = False) -> Dict[str, Any]:
-    """
-    Verify that training data is available and properly structured, either locally or in S3.
-    If use_s3 is True, check S3 for at least one file per family (cost-efficient, one request per family).
-    Args:
-        data_path: Path to the training data directory (local, ignored if use_s3)
-        use_s3: Whether to check S3 instead of local
-    Returns:
-        Dict containing verification results
-    """
-    if use_s3:
-        print("DEBUG: Entering S3 data verification block")
-        print(f"🔍 Verifying data availability in S3 bucket...")
-        
-        import boto3
-        import os
-        from src.core.config import CFG, FAMILY_FILE_MAP
-        bucket = os.environ.get('AWS_S3_BUCKET') or CFG.s3_paths.bucket
-        region = os.environ.get('AWS_REGION', 'us-east-1')
-        s3 = boto3.client('s3', region_name=region)
-        found = []
-        missing = []
-        print(f"DEBUG: FAMILY_FILE_MAP keys: {list(FAMILY_FILE_MAP.keys())}")
-        for family, info in FAMILY_FILE_MAP.items():
-            s3_family_prefix = CFG.s3_paths.families[family]
-            # Check seis_dir
-            seis_prefix = f"{s3_family_prefix}/{info['seis_dir']}/" if info['seis_dir'] else f"{s3_family_prefix}/"
-            vel_prefix = f"{s3_family_prefix}/{info['vel_dir']}/" if info['vel_dir'] else f"{s3_family_prefix}/"
-            found_seis = False
-            found_vel = False
-            try:
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=seis_prefix, MaxKeys=5)
-                seis_keys = [obj['Key'] for obj in resp.get('Contents', [])]
-                print(f"DEBUG: {family} seis_prefix={seis_prefix} keys={seis_keys}")
-                if len(seis_keys) > 0:
-                    found_seis = True
-            except Exception as e:
-                print(f"❌ {family}: error checking seis S3 ({e})")
-            try:
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=vel_prefix, MaxKeys=5)
-                vel_keys = [obj['Key'] for obj in resp.get('Contents', [])]
-                print(f"DEBUG: {family} vel_prefix={vel_prefix} keys={vel_keys}")
-                if len(vel_keys) > 0:
-                    found_vel = True
-            except Exception as e:
-                print(f"❌ {family}: error checking vel S3 ({e})")
-            if found_seis and found_vel:
-                found.append(family)
-                print(f"✅ {family}: found in S3 (seis+vel)")
-            else:
-                missing.append(family)
-                print(f"❌ {family}: not found in S3 (seis: {found_seis}, vel: {found_vel})")
-        print(f"📊 S3 Summary: {len(found)}/{len(FAMILY_FILE_MAP)} families found")
-        structure_valid = len(found) > 0
-        if not structure_valid:
-            print("⚠️ WARNING: No data found in S3 for any family!")
-        return {
-            'data_exists': structure_valid,
-            'families_found': found,
-            'families_missing': missing,
-            'total_files': None,  # Not counting all files to save cost
-            'structure_valid': structure_valid,
-            'source': 's3',
-        }
-    else:
-        print(f"🔍 Verifying data availability at {data_path}...")
-        from pathlib import Path
-        data_root = Path(data_path)
-        result = {
-            'data_exists': False,
-            'families_found': [],
-            'families_missing': [],
-            'total_files': 0,
-            'structure_valid': False,
-            'source': 'local',
-        }
-        if not data_root.exists():
-            print(f"❌ Data directory not found: {data_path}")
-            print("⚠️ WARNING: No local data found!")
-            return result
-        result['data_exists'] = True
-        expected_families = [
-            'FlatVel_A', 'FlatVel_B', 'CurveVel_A', 'CurveVel_B',
-            'Style_A', 'Style_B', 'FlatFault_A', 'FlatFault_B',
-            'CurveFault_A', 'CurveFault_B'
-        ]
-        for family in expected_families:
-            family_dir = data_root / family
-            if family_dir.exists():
-                npy_files = list(family_dir.glob('*.npy'))
-                if npy_files:
-                    result['families_found'].append(family)
-                    result['total_files'] += len(npy_files)
-                    print(f"✅ {family}: {len(npy_files)} files")
-                else:
-                    result['families_missing'].append(family)
-                    print(f"⚠️ {family}: Directory exists but no .npy files")
-            else:
-                result['families_missing'].append(family)
-                print(f"❌ {family}: Not found")
-        # Verify data structure if families are found
-        if result['families_found']:
-            try:
-                from src.core.preprocess import verify_data_structure
-                result['structure_valid'] = verify_data_structure(data_root)
-            except ImportError:
-                print("⚠️ Could not import verification function")
-                result['structure_valid'] = True  # Assume valid if we can't verify
-        print(f"📊 Local Summary: {len(result['families_found'])}/{len(expected_families)} families found")
-        if not result['families_found']:
-            print("⚠️ WARNING: No local data found for any family!")
-        return result
-
 def run_preprocessing(
     input_root: str = '/content/YaleGWI/train_samples',
     output_root: str = '/content/YaleGWI/preprocessed',
@@ -290,6 +177,12 @@ def run_preprocessing(
         # Estimate processed files from feedback
         total_processed = sum(fb.arrays_processed for fb in feedback.values())
         result['processed_files'] = total_processed
+
+        if total_processed == 0:
+            print("⚠️ No files were processed. Check data paths and S3 configuration.")
+            result['success'] = False
+            result['error'] = "No files processed."
+            return result
 
         print(f"✅ Preprocessing completed successfully!")
         print(f"📊 Processed {total_processed} files")
@@ -481,28 +374,20 @@ def complete_colab_setup(
             print("⚠️ Dataset download utilities not available")
             results['dataset_download'] = False
     
-    # Step 5: Data verification
+    # Step 5 & 6: Preprocessing
     print("\n" + "="*50)
-    print("STEP 5: Data Verification")
+    print("STEP 5 & 6: Data Preprocessing")
     print("="*50)
-    results['data_verification'] = verify_data_availability(data_path, use_s3=use_s3)
-    
-    # Step 6: Preprocessing (if data is available)
-    if results['data_verification']['data_exists'] and results['data_verification']['families_found']:
-        print("\n" + "="*50)
-        print("STEP 6: Preprocessing")
-        print("="*50)
-        results['preprocessing'] = run_preprocessing(
-            input_root=data_path,
-            output_root='/content/YaleGWI/preprocessed',
-            use_s3=use_s3,
-            save_to_drive=mount_drive
-        )
-    
+    results['preprocessing'] = run_preprocessing(
+        input_root=data_path,
+        output_root='/content/YaleGWI/preprocessed',
+        use_s3=use_s3,
+        save_to_drive=mount_drive
+    )
+
     # Step 7: Training configuration
     print("\n" + "="*50)
     print("STEP 7: Training Configuration")
-    print("="*50)
     results['training_config'] = setup_training_config()
     
     print("\n" + "="*50)
@@ -524,11 +409,10 @@ def complete_colab_setup(
         print(f"  Google Drive: {'✅' if results.get('drive_mounted', False) else '❌'}")
     if download_dataset:
         print(f"  Dataset Download: {'✅' if results.get('dataset_download', False) else '❌'}")
-    print(f"  Data: {'✅' if results['data_verification']['data_exists'] else '❌'}")
-    print(f"  Families: {len(results['data_verification']['families_found'])}/10")
-    if 'preprocessing' in results:
-        print(f"  Preprocessing: {'✅' if results['preprocessing']['success'] else '❌'}")
     
+    preproc_success = results.get('preprocessing', {}).get('success', False)
+    print(f"  Preprocessing: {'✅' if preproc_success else '❌'}")
+
     # Detailed Preprocessing Feedback
     if 'preprocessing' in results and results['preprocessing'].get('feedback'):
         print("\n" + "="*50)
