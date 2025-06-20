@@ -294,8 +294,8 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
         full_seis_prefix = f"{family_s3_prefix}/{seis_dir}/" if seis_dir else f"{family_s3_prefix}/"
         full_vel_prefix = f"{family_s3_prefix}/{vel_dir}/" if vel_dir else f"{family_s3_prefix}/"
         
-        seis_keys = data_manager.s3_list_keys(full_seis_prefix)
-        vel_keys = data_manager.s3_list_keys(full_vel_prefix)
+        seis_keys = data_manager.list_s3_files(full_seis_prefix)
+        vel_keys = data_manager.list_s3_files(full_vel_prefix)
         
         # 2. Check if files exist in S3
         if not seis_keys or not vel_keys:

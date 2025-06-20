@@ -384,6 +384,7 @@ def complete_colab_setup(
     from src.core.config import CFG
     # Determine the correct input root based on whether we're using S3
     effective_input_root = CFG.s3_paths.raw_prefix if use_s3 else data_path
+    print(f"Effective input root: {effective_input_root}")
 
     # Step 5 & 6: Preprocessing
     print("\n" + "="*50)
