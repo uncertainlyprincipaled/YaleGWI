@@ -28,8 +28,9 @@ echo "🐍 Setting up environment with Mamba..."
 # Install Mambaforge
 if ! command -v mamba &> /dev/null; then
     echo "Mamba not found. Installing Mambaforge..."
-    wget "https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-$(uname)-$(uname -m).sh"
-    bash Mambaforge-$(uname)-$(uname -m).sh -b -p "${HOME}/mambaforge"
+    # Using a direct, stable link to avoid issues with 'latest' tag redirects.
+    wget "https://github.com/conda-forge/miniforge/releases/download/24.3.0-0/Mambaforge-Linux-x86_64.sh"
+    bash Mambaforge-Linux-x86_64.sh -b -p "${HOME}/mambaforge"
     
     # Add mamba to PATH for this script
     export PATH="${HOME}/mambaforge/bin:${PATH}"
