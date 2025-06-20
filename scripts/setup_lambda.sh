@@ -54,6 +54,13 @@ fi
 
 # Create data directories
 echo "📁 Creating data directories..."
+# On Lambda Labs, /data might not exist or not be writable by the default user.
+# We will create it if it doesn't exist and ensure the current user owns it.
+if [ ! -d "/data" ]; then
+    sudo mkdir -p /data
+fi
+sudo chown -R $(whoami):$(whoami) /data
+
 mkdir -p /data/preprocessed
 mkdir -p /data/raw
 mkdir -p outputs
