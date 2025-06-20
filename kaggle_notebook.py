@@ -601,12 +601,20 @@ def process_family(family: str, input_dir: Path, output_dir: Path, data_manager:
     # === S3 Processing Path ===
     if data_manager and data_manager.use_s3:
         # 1. List files directly from S3
-        seis_keys = data_manager.s3_list_keys(family_config.get('seis_dir', '') + '/')
-        vel_keys = data_manager.s3_list_keys(family_config.get('vel_dir', '') + '/')
+        family_s3_prefix = CFG.s3_paths.families[family]
+        
+        seis_dir = family_config.get('seis_dir', '')
+        vel_dir = family_config.get('vel_dir', '')
 
+        full_seis_prefix = f"{family_s3_prefix}/{seis_dir}/" if seis_dir else f"{family_s3_prefix}/"
+        full_vel_prefix = f"{family_s3_prefix}/{vel_dir}/" if vel_dir else f"{family_s3_prefix}/"
+        
+        seis_keys = data_manager.s3_list_keys(full_seis_prefix)
+        vel_keys = data_manager.s3_list_keys(full_vel_prefix)
+        
         # 2. Check if files exist in S3
         if not seis_keys or not vel_keys:
-            logger.warning(f"No data files found for family {family} in S3 bucket.")
+            logger.warning(f"No data files found for family {family} in S3 at prefixes: {full_seis_prefix}, {full_vel_prefix}")
             return [], feedback
 
         # 3. Loop and process from S3
