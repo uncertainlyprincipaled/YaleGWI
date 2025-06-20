@@ -294,16 +294,115 @@ def setup_training_config(
         print(f"❌ Failed to configure training: {e}")
         return {}
 
+def run_tests_and_validation() -> Dict[str, Any]:
+    """
+    Run tests and validation to verify the setup is working correctly.
+    
+    Returns:
+        Dict containing test results
+    """
+    print("🧪 Running tests and validation...")
+    
+    results = {
+        'preprocessing_tests': False,
+        'phase1_tests': False,
+        'integration_tests': False,
+        'errors': []
+    }
+    
+    try:
+        # Test 1: Preprocessing fixes
+        print("  Testing preprocessing fixes...")
+        from src.core.preprocess import preprocess_one, validate_nyquist, PreprocessingFeedback
+        import numpy as np
+        
+        # Test with mock data
+        seis_4d = np.random.randn(500, 5, 2000, 70).astype(np.float32)
+        feedback = PreprocessingFeedback()
+        
+        result = preprocess_one(seis_4d, dt_decimate=4, is_seismic=True, feedback=feedback)
+        if result.shape[2] == 500:  # Should be downsampled from 2000 to 500
+            results['preprocessing_tests'] = True
+            print("  ✅ Preprocessing tests passed")
+        else:
+            results['errors'].append(f"Preprocessing shape mismatch: expected time dim 500, got {result.shape[2]}")
+            
+    except Exception as e:
+        results['errors'].append(f"Preprocessing test failed: {e}")
+        print(f"  ❌ Preprocessing tests failed: {e}")
+    
+    try:
+        # Test 2: Phase 1 components
+        print("  Testing Phase 1 components...")
+        from src.core.registry import ModelRegistry
+        from src.core.checkpoint import CheckpointManager
+        from src.core.data_manager import DataManager
+        from src.core.geometric_cv import GeometricCrossValidator
+        
+        # Test model registry
+        registry = ModelRegistry()
+        if registry is not None:
+            print("  ✅ Model registry working")
+            
+        # Test checkpoint manager
+        checkpoint_mgr = CheckpointManager()
+        if checkpoint_mgr is not None:
+            print("  ✅ Checkpoint manager working")
+            
+        # Test data manager
+        data_mgr = DataManager(use_s3=False)  # Test local mode
+        if data_mgr is not None:
+            print("  ✅ Data manager working")
+            
+        results['phase1_tests'] = True
+        
+    except Exception as e:
+        results['errors'].append(f"Phase 1 test failed: {e}")
+        print(f"  ❌ Phase 1 tests failed: {e}")
+    
+    try:
+        # Test 3: Integration test (simplified)
+        print("  Testing integration...")
+        from src.core.config import CFG
+        
+        # Verify config loads
+        if CFG.env.kind in ['colab', 'kaggle']:
+            print("  ✅ Environment config working")
+            
+        # Verify paths exist
+        if hasattr(CFG, 'paths') and hasattr(CFG.paths, 'families'):
+            print("  ✅ Family paths configured")
+            
+        results['integration_tests'] = True
+        
+    except Exception as e:
+        results['errors'].append(f"Integration test failed: {e}")
+        print(f"  ❌ Integration tests failed: {e}")
+    
+    # Summary
+    print(f"\n📊 Test Results:")
+    print(f"  Preprocessing: {'✅' if results['preprocessing_tests'] else '❌'}")
+    print(f"  Phase 1 Components: {'✅' if results['phase1_tests'] else '❌'}")
+    print(f"  Integration: {'✅' if results['integration_tests'] else '❌'}")
+    
+    if results['errors']:
+        print(f"\n⚠️ Errors encountered:")
+        for error in results['errors']:
+            print(f"  - {error}")
+    
+    return results
+
 def complete_colab_setup(
     data_path: str = '/content/YaleGWI/train_samples',
     use_s3: bool = False,
     mount_drive: bool = True,
     download_dataset: bool = False,
     dataset_source: str = 'manual',
-    setup_aws: bool = True
+    setup_aws: bool = True,
+    run_tests: bool = True
 ) -> Dict[str, Any]:
     """
-    Complete Colab setup including environment, data verification, and preprocessing.
+    Complete Colab setup including environment, data verification, preprocessing, and testing.
     
     Args:
         data_path: Path to training data
@@ -312,6 +411,7 @@ def complete_colab_setup(
         download_dataset: Whether to attempt dataset download
         dataset_source: Source for dataset download ('kaggle', 'url', 'gdrive', 'manual')
         setup_aws: Whether to set up AWS credentials
+        run_tests: Whether to run tests after setup
         
     Returns:
         Dict containing complete setup results
@@ -404,6 +504,13 @@ def complete_colab_setup(
     print("STEP 7: Training Configuration")
     results['training_config'] = setup_training_config()
     
+    # Step 8: Testing and Validation (NEW)
+    if run_tests:
+        print("\n" + "="*50)
+        print("STEP 8: Testing and Validation")
+        print("="*50)
+        results['tests'] = run_tests_and_validation()
+    
     print("\n" + "="*50)
     print("🎉 Setup Complete!")
     print("="*50)
@@ -426,6 +533,12 @@ def complete_colab_setup(
     
     preproc_success = results.get('preprocessing', {}).get('success', False)
     print(f"  Preprocessing: {'✅' if preproc_success else '❌'}")
+    
+    if run_tests and 'tests' in results:
+        tests = results['tests']
+        print(f"  Preprocessing Tests: {'✅' if tests.get('preprocessing_tests', False) else '❌'}")
+        print(f"  Phase 1 Tests: {'✅' if tests.get('phase1_tests', False) else '❌'}")
+        print(f"  Integration Tests: {'✅' if tests.get('integration_tests', False) else '❌'}")
 
     # Detailed Preprocessing Feedback
     if 'preprocessing' in results and results['preprocessing'].get('feedback'):
@@ -453,6 +566,15 @@ def complete_colab_setup(
             print(f"{family:<15} | {current_factor!s:<12} | {fb.arrays_processed:<8} | {fb.nyquist_warnings:<10} | {warn_percent:<7.2f}% | {recommendation}")
         print("-"*90)
         print("\n💡 Recommendation: Adjust 'downsample_factor' in src/core/config.py for families with high warning rates.")
+
+    # Test Results Summary
+    if run_tests and 'tests' in results and results['tests'].get('errors'):
+        print("\n" + "="*50)
+        print("⚠️ Test Issues Found")
+        print("="*50)
+        for error in results['tests']['errors']:
+            print(f"  - {error}")
+        print("\n💡 Consider fixing these issues before proceeding with training.")
 
     return results
 

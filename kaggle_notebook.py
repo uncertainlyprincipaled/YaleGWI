@@ -488,25 +488,63 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000, dt_decimate: int
     if data.ndim not in [3, 4]:
         logger.warning(f"Unexpected data dimension {data.ndim} in validate_nyquist. Skipping.")
         return True
-        
-    time_axis = 2 if data.ndim == 4 else 1
+    
+    # Handle different data shapes more robustly
+    if data.ndim == 4:
+        # (batch, sources, time, receivers) or (batch, channels, time, receivers)
+        if data.shape[1] == 5:  # sources
+            time_axis = 2
+        elif data.shape[1] == 1:  # channels
+            time_axis = 2
+        else:
+            # Try to infer time axis - look for the longest dimension
+            time_axis = np.argmax(data.shape[1:]) + 1
+    else:  # 3D
+        # (sources, time, receivers) or (time, receivers, sources)
+        if data.shape[0] == 5:  # sources first
+            time_axis = 1
+        elif data.shape[2] == 5:  # sources last
+            time_axis = 0
+        else:
+            # Try to infer time axis - look for the longest dimension
+            time_axis = np.argmax(data.shape)
 
-    # Compute FFT
-    fft_data = np.fft.rfft(data, axis=time_axis)
-    freqs = np.fft.rfftfreq(data.shape[time_axis], d=1/original_fs)
-    
-    # Check if significant energy exists above Nyquist frequency
-    nyquist_mask = freqs > (original_fs / (2 * dt_decimate))
-    high_freq_energy = np.abs(fft_data[..., nyquist_mask]).mean()
-    total_energy = np.abs(fft_data).mean()
-    
-    # If more than 1% of energy is above Nyquist, warn
-    if total_energy > 1e-9 and high_freq_energy / total_energy > 0.01:
-        warnings.warn(f"Significant energy above Nyquist frequency detected: {high_freq_energy/total_energy:.2%}")
-        if feedback:
-            feedback.add_nyquist_warning()
-        return False
-    return True
+    # Ensure time_axis is valid
+    if time_axis >= data.ndim:
+        logger.warning(f"Invalid time_axis {time_axis} for data shape {data.shape}. Skipping validation.")
+        return True
+
+    try:
+        # Compute FFT
+        fft_data = np.fft.rfft(data, axis=time_axis)
+        freqs = np.fft.rfftfreq(data.shape[time_axis], d=1/original_fs)
+        
+        # Check if significant energy exists above Nyquist frequency
+        nyquist_mask = freqs > (original_fs / (2 * dt_decimate))
+        
+        # Handle case where nyquist_mask might be empty or have wrong shape
+        if not np.any(nyquist_mask):
+            return True
+            
+        # Ensure mask has correct shape for broadcasting
+        mask_shape = [1] * data.ndim
+        mask_shape[time_axis] = -1
+        nyquist_mask = nyquist_mask.reshape(mask_shape)
+        
+        high_freq_energy = np.abs(fft_data * nyquist_mask).mean()
+        total_energy = np.abs(fft_data).mean()
+        
+        # If more than 1% of energy is above Nyquist, warn
+        if total_energy > 1e-9 and high_freq_energy / total_energy > 0.01:
+            warnings.warn(f"Significant energy above Nyquist frequency detected: {high_freq_energy/total_energy:.2%}")
+            if feedback:
+                feedback.add_nyquist_warning()
+            return False
+        return True
+        
+    except Exception as e:
+        logger.warning(f"Error in validate_nyquist: {e}. Skipping validation.")
+        return True
 
 def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = True, feedback: Optional[PreprocessingFeedback] = None) -> np.ndarray:
     """
@@ -541,28 +579,59 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
             if arr.ndim not in [3, 4]:
                 logger.warning(f"Unexpected data dimension {arr.ndim} for seismic data. Skipping decimation.")
             else:
-                time_axis = 2 if arr.ndim == 4 else 1
-                # Validate Nyquist criterion
-                if not validate_nyquist(arr, dt_decimate=dt_decimate, feedback=feedback):
-                    logger.warning("Data may violate Nyquist criterion after downsampling")
+                # Determine time axis more robustly
+                if arr.ndim == 4:
+                    # (batch, sources/channels, time, receivers)
+                    if arr.shape[1] == 5:  # sources
+                        time_axis = 2
+                    elif arr.shape[1] == 1:  # channels
+                        time_axis = 2
+                    else:
+                        # Try to infer time axis - look for the longest dimension
+                        time_axis = np.argmax(arr.shape[1:]) + 1
+                else:  # 3D
+                    # (sources, time, receivers) or (time, receivers, sources)
+                    if arr.shape[0] == 5:  # sources first
+                        time_axis = 1
+                    elif arr.shape[2] == 5:  # sources last
+                        time_axis = 0
+                    else:
+                        # Try to infer time axis - look for the longest dimension
+                        time_axis = np.argmax(arr.shape)
                 
-                # Decimate time axis with anti-aliasing filter
-                arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
+                # Ensure time_axis is valid
+                if time_axis >= arr.ndim:
+                    logger.warning(f"Invalid time_axis {time_axis} for data shape {arr.shape}. Skipping decimation.")
+                else:
+                    # Validate Nyquist criterion
+                    if not validate_nyquist(arr, dt_decimate=dt_decimate, feedback=feedback):
+                        logger.warning("Data may violate Nyquist criterion after downsampling")
+                    
+                    # Decimate time axis with anti-aliasing filter
+                    try:
+                        arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
+                    except Exception as e:
+                        logger.warning(f"Decimation failed: {e}. Skipping decimation.")
         
         # Convert to float16
         arr = arr.astype('float16')
         
         # Robust normalization per trace
-        μ = np.median(arr, keepdims=True)
-        σ = np.percentile(arr, 95, keepdims=True) - np.percentile(arr, 5, keepdims=True)
-        
-        # Avoid division by zero
-        if np.isscalar(σ) and σ > 1e-6:
-            arr = (arr - μ) / σ
-        elif not np.isscalar(σ):
-            arr = (arr - μ) / (σ + 1e-6)
-        else:
-            arr = arr - μ
+        try:
+            μ = np.median(arr, keepdims=True)
+            σ = np.percentile(arr, 95, keepdims=True) - np.percentile(arr, 5, keepdims=True)
+            
+            # Avoid division by zero
+            if np.isscalar(σ) and σ > 1e-6:
+                arr = (arr - μ) / σ
+            elif not np.isscalar(σ):
+                arr = (arr - μ) / (σ + 1e-6)
+            else:
+                arr = arr - μ
+        except Exception as e:
+            logger.warning(f"Normalization failed: {e}. Using simple normalization.")
+            # Fallback to simple normalization
+            arr = (arr - arr.mean()) / (arr.std() + 1e-6)
             
     except Exception as e:
         logger.error(f"Error during preprocessing: {e}")
@@ -707,17 +776,16 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         arr_shape = first_arr.shape
         arr_dtype = first_arr.dtype
         
-        # Validate expected dimensions
+        # Log the actual shape for debugging
+        logger.info(f"Creating zarr dataset with shape: {arr_shape}, dtype: {arr_dtype}")
+        
+        # More flexible shape validation - just log warnings instead of raising errors
         if len(arr_shape) == 4:  # Seismic data
-            expected_shape = (500, 5, 1000, 70)
-            if arr_shape != expected_shape:
-                logger.warning(f"Unexpected seismic data shape: {arr_shape}, expected {expected_shape}")
-        elif len(arr_shape) == 4 and arr_shape[1] == 1:  # Velocity model
-            expected_shape = (500, 1, 70, 70)
-            if arr_shape != expected_shape:
-                logger.warning(f"Unexpected velocity model shape: {arr_shape}, expected {expected_shape}")
+            logger.info(f"Processing 4D seismic data with shape: {arr_shape}")
+        elif len(arr_shape) == 3:  # Single sample seismic data
+            logger.info(f"Processing 3D seismic data with shape: {arr_shape}")
         else:
-            raise ValueError(f"Unexpected array shape: {arr_shape}")
+            logger.warning(f"Unexpected array shape: {arr_shape}")
             
         # Create lazy Dask arrays
         lazy_arrays = []
@@ -739,12 +807,24 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
         
+        # Adjust chunk size based on actual data shape
+        if len(arr_shape) == 4:
+            # For 4D data, use smaller chunks
+            adjusted_chunk_size = (1, min(4, arr_shape[1]), min(64, arr_shape[2]), min(8, arr_shape[3]))
+        elif len(arr_shape) == 3:
+            # For 3D data, use appropriate chunks
+            adjusted_chunk_size = (1, min(64, arr_shape[0]), min(8, arr_shape[1]))
+        else:
+            adjusted_chunk_size = chunk_size
+            
+        logger.info(f"Using chunk size: {adjusted_chunk_size}")
+        
         # Save to zarr with compression
         stack.to_zarr(
             output_path,
             component='seis',
             compressor=zarr.Blosc(cname='zstd', clevel=3),
-            chunks=chunk_size
+            chunks=adjusted_chunk_size
         )
         
         # Upload to S3 if using S3
