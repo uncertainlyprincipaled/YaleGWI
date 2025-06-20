@@ -347,7 +347,7 @@ import dask.array as da
 from dask.diagnostics import ProgressBar
 from scipy.signal import decimate
 import logging
-from typing import Tuple, List, Optional, Dict, Any
+from typing import Tuple, List, Optional, Dict, Any, Union
 import warnings
 import boto3
 from botocore.exceptions import ClientError
@@ -571,13 +571,13 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
         
     return arr
 
-def process_family(family: str, input_dir: Optional[Path], output_dir: Path, data_manager: Optional[DataManager] = None) -> Tuple[List[str], PreprocessingFeedback]:
+def process_family(family: str, input_path: Union[str, Path], output_dir: Path, data_manager: Optional[DataManager] = None) -> Tuple[List[str], PreprocessingFeedback]:
     """
     Process all files for a given geological family.
     
     Args:
         family: The name of the family to process.
-        input_dir: The directory where the raw data is located (used for local processing only).
+        input_path: The local directory path or the S3 prefix for the family's data.
         output_dir: The directory to save processed files.
         data_manager: Optional DataManager for S3 operations.
         
@@ -600,9 +600,13 @@ def process_family(family: str, input_dir: Optional[Path], output_dir: Path, dat
 
     # === S3 Processing Path ===
     if data_manager and data_manager.use_s3:
+        if not isinstance(input_path, str):
+            raise ValueError(f"For S3 processing, input_path must be a string prefix, but got {type(input_path)}")
+            
         # 1. List files directly from S3
-        family_s3_prefix = CFG.s3_paths.families[family]
+        family_s3_prefix = input_path
         
+        family_config = FAMILY_FILE_MAP.get(family, {})
         seis_dir = family_config.get('seis_dir', '')
         vel_dir = family_config.get('vel_dir', '')
 
@@ -618,7 +622,7 @@ def process_family(family: str, input_dir: Optional[Path], output_dir: Path, dat
             return [], feedback
 
         # 3. Loop and process from S3
-        pbar = tqdm(zip(seis_keys, vel_keys), total=len(seis_keys), desc=f"Processing {family} from S3")
+        pbar = tqdm(zip(sorted(seis_keys), sorted(vel_keys)), total=len(seis_keys), desc=f"Processing {family} from S3")
         for seis_key, vel_key in pbar:
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_seis_path = Path(tmpdir) / Path(seis_key).name
@@ -642,10 +646,11 @@ def process_family(family: str, input_dir: Optional[Path], output_dir: Path, dat
                 processed_paths.append(str(out_seis_path))
     # === Local Processing Path ===
     else:
-        if not input_dir:
-            raise ValueError("input_dir must be provided for local processing.")
+        if not isinstance(input_path, Path):
+            raise ValueError(f"For local processing, input_path must be a Path object, but got {type(input_path)}")
 
         # 1. List files from the local directory
+        input_dir = input_path
         seis_files = sorted(input_dir.glob(seis_glob))
         vel_files = sorted(input_dir.glob(vel_glob))
 
@@ -897,13 +902,16 @@ def load_data(input_root, output_root, use_s3=False):
         family_output_dir = output_root / family
 
         if use_s3:
-            processed_paths, feedback = process_family(family, None, family_output_dir, data_manager)
+            # For S3, the input_path is a prefix string
+            family_input_path = f"{input_root}/{family}"
+            processed_paths, feedback = process_family(family, family_input_path, family_output_dir, data_manager)
         else:
-            family_dir = input_root / family
-            if not family_dir.exists():
-                logger.warning(f"Skipping family {family}: directory not found at {family_dir}")
+            # For local, the input_path is a Path object
+            family_input_path = Path(input_root) / family
+            if not family_input_path.exists():
+                logger.warning(f"Skipping family {family}: directory not found at {family_input_path}")
                 continue
-            processed_paths, feedback = process_family(family, family_dir, family_output_dir, data_manager)
+            processed_paths, feedback = process_family(family, family_input_path, family_output_dir, data_manager)
 
         all_processed_paths.extend(processed_paths)
         all_feedback[family] = feedback

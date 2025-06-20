@@ -131,16 +131,16 @@ def mount_google_drive() -> bool:
         return False
 
 def run_preprocessing(
-    input_root: str = '/content/YaleGWI/train_samples',
-    output_root: str = '/content/YaleGWI/preprocessed',
-    use_s3: bool = False,
-    save_to_drive: bool = True
+    input_root: str,
+    output_root: str,
+    use_s3: bool,
+    save_to_drive: bool
 ) -> Dict[str, Any]:
     """
     Run the preprocessing pipeline with monitoring and error handling.
     
     Args:
-        input_root: Input data directory
+        input_root: Input data directory (local path or S3 prefix)
         output_root: Output directory for processed data
         use_s3: Whether to use S3 for data operations
         save_to_drive: Whether to save results to Google Drive
@@ -381,13 +381,16 @@ def complete_colab_setup(
             print("⚠️ Dataset download utilities not available")
             results['dataset_download'] = False
     
+    # Determine the correct input root based on whether we're using S3
+    effective_input_root = data_path if use_s3 else data_path
+
     # Step 5 & 6: Preprocessing
     print("\n" + "="*50)
     print("STEP 5 & 6: Data Preprocessing")
     print("="*50)
     logger.info("Starting data preprocessing...")
     results['preprocessing'] = run_preprocessing(
-        input_root=data_path,
+        input_root=effective_input_root,
         output_root='/content/YaleGWI/preprocessed',
         use_s3=use_s3,
         save_to_drive=mount_drive
