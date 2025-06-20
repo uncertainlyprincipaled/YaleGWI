@@ -381,8 +381,9 @@ def complete_colab_setup(
             print("⚠️ Dataset download utilities not available")
             results['dataset_download'] = False
     
+    from src.core.config import CFG
     # Determine the correct input root based on whether we're using S3
-    effective_input_root = data_path if use_s3 else data_path
+    effective_input_root = CFG.s3_paths.raw_prefix if use_s3 else data_path
 
     # Step 5 & 6: Preprocessing
     print("\n" + "="*50)
