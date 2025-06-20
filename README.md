@@ -6,6 +6,8 @@
 3. [Environment Setup](#3-environment-setup)
    - [Kaggle](#kaggle)
    - [Google Colab](#google-colab)
+     - [Smart Preprocessing Workflow](#smart-preprocessing-workflow)
+     - [Performance Optimization](#performance-optimization-for-colab)
    - [AWS EC2](#aws-ec2)
    - [AWS SageMaker](#aws-sagemaker)
 4. [Usage Examples](#4-usage-examples)
@@ -177,24 +179,48 @@ The project uses a notebook update script (`update_kaggle_notebook.py`) that aut
 
 > **💡 Pro Tip**: For the easiest setup, use the automated setup option below. It handles everything from environment setup to preprocessing in one command!
 
-#### Quick Start: Full Pipeline
+#### Quick Start: Smart Preprocessing Workflow
 
-##### Option A: Automated Setup (Recommended)
+##### Option A: Quick Setup (Recommended for Repeated Runs)
 ```python
-# One-command setup for Colab
+# One-command setup that skips preprocessing if data already exists
 !git clone https://github.com/uncertainlyprincipaled/YaleGWI.git
 %cd YaleGWI
 
-# Run automated setup with AWS credentials from Colab secrets
+# Quick setup - skips preprocessing if data exists locally or in Google Drive
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(
+    use_s3=True,           # Use S3 for data operations
+    mount_drive=True,      # Mount Google Drive for persistent storage
+    run_tests=True,        # Run validation tests
+    force_reprocess=False  # Skip preprocessing if data exists
+)
+
+# Force reprocessing (useful after config changes)
+# results = quick_colab_setup(use_s3=True, force_reprocess=True)
+```
+
+##### Option B: Full Automated Setup (First Time)
+```python
+# Complete setup with preprocessing
 from src.utils.colab_setup import complete_colab_setup
 results = complete_colab_setup(
-    data_path='/content/YaleGWI/train_samples',  # Adjust path as needed
-    use_s3=True,  # Set to True if you have S3 configured
-    mount_drive=True,  # Set to False if you don't want to use Google Drive
-    setup_aws=True,  # Set to True to load AWS credentials from Colab secrets
-    download_dataset=False  # Set to True if you need to download the dataset
+    data_path='/content/YaleGWI/train_samples',
+    use_s3=True,           # Use S3 for data operations
+    mount_drive=True,      # Mount Google Drive for persistent storage
+    download_dataset=False, # Set to True if you need to download the dataset
+    setup_aws=True,        # Load AWS credentials from Colab secrets
+    run_tests=True,        # Run validation tests
+    force_reprocess=False  # Skip preprocessing if data exists
 )
 ```
+
+**Smart Preprocessing Features:**
+- ✅ **Automatic Detection**: Checks local, Google Drive, and S3 for existing data
+- ✅ **Intelligent Skip**: Skips preprocessing if data already exists
+- ✅ **Efficient Copy**: Copies from Google Drive to local if needed
+- ✅ **Force Option**: Override skip behavior when needed
+- ✅ **Data Validation**: Verifies data quality before skipping
 
 **Before running this, make sure to set up your AWS credentials in Colab secrets**:
 1. Go to the left sidebar in Colab
@@ -205,7 +231,7 @@ results = complete_colab_setup(
    - `aws_region`: Your AWS region (e.g., us-east-1)
    - `aws_s3_bucket`: Your S3 bucket name
 
-##### Option B: Manual Setup
+##### Option C: Manual Setup
 1. **Environment Setup**
    ```python
    # Clone repository and setup environment
@@ -223,10 +249,30 @@ results = complete_colab_setup(
    from src.core.preprocess import verify_data_structure
    verify_data_structure('/content/YaleGWI/train_samples')
    ```
-3. **Preprocessing**
+3. **Smart Preprocessing**
    ```python
-   from src.core.preprocess import load_data
-   load_data('/content/YaleGWI/train_samples', '/content/YaleGWI/preprocessed', use_s3=False)
+   # Check if preprocessed data already exists
+   from src.utils.colab_setup import check_preprocessed_data_exists
+   
+   data_status = check_preprocessed_data_exists(
+       output_root='/content/YaleGWI/preprocessed',
+       save_to_drive=True,
+       use_s3=True
+   )
+   
+   if data_status['exists_locally']:
+       print("✅ Preprocessed data found locally - skipping preprocessing")
+   elif data_status['exists_in_drive']:
+       print("📋 Copying preprocessed data from Google Drive...")
+       from src.utils.colab_setup import copy_preprocessed_data_from_drive
+       copy_preprocessed_data_from_drive(
+           data_status['drive_path'], 
+           '/content/YaleGWI/preprocessed'
+       )
+   else:
+       print("🔄 Running preprocessing...")
+       from src.core.preprocess import load_data
+       load_data('/content/YaleGWI/train_samples', '/content/YaleGWI/preprocessed', use_s3=False)
    ```
 4. **Training**
    ```python
@@ -553,6 +599,154 @@ def keep_alive():
 # Upload the dataset directly to Colab using the file browser
 ```
 
+#### Smart Preprocessing Workflow
+
+The new smart preprocessing system automatically detects existing preprocessed data and skips unnecessary reprocessing, dramatically speeding up development workflows.
+
+##### How It Works
+
+1. **Automatic Detection**: Checks multiple locations for existing data:
+   - Local directory (`/content/YaleGWI/preprocessed`)
+   - Google Drive (`/content/drive/MyDrive/YaleGWI/preprocessed`)
+   - S3 bucket (if configured)
+
+2. **Intelligent Skip Logic**:
+   ```python
+   # Priority order for data sources:
+   # 1. Local data (fastest access)
+   # 2. Google Drive data (copy to local)
+   # 3. S3 data (download to local)
+   # 4. Reprocess from raw data (slowest)
+   ```
+
+3. **Data Validation**: Verifies data quality before skipping:
+   - Checks zarr dataset integrity
+   - Validates sample counts
+   - Ensures GPU-specific splits exist
+
+##### Usage Patterns
+
+**First Time Setup** (Full preprocessing):
+```python
+from src.utils.colab_setup import complete_colab_setup
+results = complete_colab_setup(
+    use_s3=True,
+    mount_drive=True,
+    run_tests=True,
+    force_reprocess=False  # Will preprocess if no data exists
+)
+```
+
+**Subsequent Runs** (Skip preprocessing):
+```python
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(
+    use_s3=True,
+    mount_drive=True,
+    run_tests=True,
+    force_reprocess=False  # Will skip if data exists
+)
+```
+
+**After Config Changes** (Force reprocessing):
+```python
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(
+    use_s3=True,
+    mount_drive=True,
+    run_tests=True,
+    force_reprocess=True  # Will reprocess even if data exists
+)
+```
+
+##### Manual Data Management
+
+**Check Data Status**:
+```python
+from src.utils.colab_setup import check_preprocessed_data_exists
+
+status = check_preprocessed_data_exists(
+    output_root='/content/YaleGWI/preprocessed',
+    save_to_drive=True,
+    use_s3=True
+)
+
+print(f"Local data: {status['exists_locally']}")
+print(f"Drive data: {status['exists_in_drive']}")
+print(f"S3 data: {status['exists_in_s3']}")
+print(f"Data quality: {status['data_quality']}")
+```
+
+**Copy from Google Drive**:
+```python
+from src.utils.colab_setup import copy_preprocessed_data_from_drive
+
+success = copy_preprocessed_data_from_drive(
+    drive_path='/content/drive/MyDrive/YaleGWI/preprocessed',
+    local_path='/content/YaleGWI/preprocessed'
+)
+```
+
+##### Expected Behavior
+
+| Scenario | First Run | Subsequent Runs | After Config Change |
+|----------|-----------|-----------------|-------------------|
+| **Local Data** | 🔄 Preprocess | ⏭️ Skip | 🔄 Force Reprocess |
+| **Drive Data** | 🔄 Preprocess | 📋 Copy from Drive | 🔄 Force Reprocess |
+| **S3 Data** | 🔄 Preprocess | 📥 Download from S3 | 🔄 Force Reprocess |
+| **No Data** | 🔄 Preprocess | 🔄 Preprocess | 🔄 Preprocess |
+
+##### Troubleshooting Smart Preprocessing
+
+**Data Not Found When It Should Exist**:
+```python
+# Check data structure manually
+from pathlib import Path
+import zarr
+
+preprocessed_dir = Path('/content/YaleGWI/preprocessed')
+if preprocessed_dir.exists():
+    gpu0_dir = preprocessed_dir / 'gpu0'
+    gpu1_dir = preprocessed_dir / 'gpu1'
+    
+    if gpu0_dir.exists() and gpu1_dir.exists():
+        try:
+            data0 = zarr.open(str(gpu0_dir / 'seismic.zarr'))
+            data1 = zarr.open(str(gpu1_dir / 'seismic.zarr'))
+            print(f"GPU0: {len(data0)} samples")
+            print(f"GPU1: {len(data1)} samples")
+        except Exception as e:
+            print(f"Data corrupted: {e}")
+            # Force reprocessing
+            results = quick_colab_setup(force_reprocess=True)
+```
+
+**Force Reprocessing**:
+```python
+# If you need to reprocess for any reason:
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(force_reprocess=True)
+```
+
+**Clear All Data**:
+```python
+# Remove all preprocessed data to start fresh
+import shutil
+from pathlib import Path
+
+# Remove local data
+local_dir = Path('/content/YaleGWI/preprocessed')
+if local_dir.exists():
+    shutil.rmtree(local_dir)
+
+# Remove Drive data (optional)
+drive_dir = Path('/content/drive/MyDrive/YaleGWI/preprocessed')
+if drive_dir.exists():
+    shutil.rmtree(drive_dir)
+
+print("All preprocessed data cleared")
+```
+
 #### Performance Optimization for Colab
 
 1. **Use TPU (if available)**:
@@ -577,6 +771,13 @@ def keep_alive():
    # Enable automatic mixed precision
    CFG.use_amp = True
    CFG.dtype = "float16"
+   ```
+
+4. **Smart preprocessing** (new):
+   ```python
+   # Use smart preprocessing to avoid unnecessary reprocessing
+   from src.utils.colab_setup import quick_colab_setup
+   results = quick_colab_setup(use_s3=True, force_reprocess=False)
    ```
 
 ### AWS EC2 {#aws-ec2}

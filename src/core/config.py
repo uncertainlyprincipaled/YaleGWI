@@ -263,10 +263,10 @@ class SeismicDataset(Dataset):
 # Temporary mapping for family data structure
 FAMILY_FILE_MAP = {
     'CurveFault_A': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'CurveFault_B': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'CurveVel_A': {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
@@ -275,10 +275,10 @@ FAMILY_FILE_MAP = {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
     },
     'FlatFault_A': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'FlatFault_B': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'FlatVel_A': {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2

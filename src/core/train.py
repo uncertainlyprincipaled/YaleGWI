@@ -169,34 +169,110 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, data_manager):
         logging.error(f"Exception in save_checkpoint: {e}")
     print(f"Checkpoint saved at epoch {epoch} with loss {loss:.4f}")
 
-def train(dryrun: bool = False, fp16: bool = False):
-    """Main training loop."""
+def train(dryrun: bool = False, fp16: bool = False, use_geometric: bool = True):
+    """Main training loop with optional geometric loading support."""
     # Initialize data manager
     data_manager = DataManager()
     
-    # Create loaders for each family
-    train_loaders = []
-    for family in CFG.paths.families:
-        if CFG.debug_mode and family in CFG.families_to_exclude:
-            continue
+    # Initialize Phase 1 components if using geometric loading
+    if use_geometric:
+        print("Initializing Phase 1 geometric components...")
+        try:
+            from src.core.geometric_loader import FamilyDataLoader
+            from src.core.geometric_cv import GeometricCrossValidator
+            from src.core.registry import ModelRegistry
+            from src.core.checkpoint import CheckpointManager
             
-        seis_files, vel_files, family_type = data_manager.list_family_files(family)
-        if seis_files is None:  # Skip excluded families
-            continue
+            # Initialize components
+            registry = ModelRegistry()
+            checkpoint_mgr = CheckpointManager()
+            cv = GeometricCrossValidator(n_splits=5)
+            print("✅ Phase 1 components initialized")
             
-        print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
+            # Try to use geometric loading
+            try:
+                # Check if preprocessed data exists
+                preprocessed_paths = [
+                    Path('/content/drive/MyDrive/YaleGWI/preprocessed'),
+                    Path('/kaggle/working/preprocessed'),
+                    Path('preprocessed')
+                ]
+                
+                data_root = None
+                for path in preprocessed_paths:
+                    if path.exists():
+                        data_root = path
+                        break
+                
+                if data_root:
+                    print(f"Using preprocessed data from: {data_root}")
+                    family_loader = FamilyDataLoader(
+                        data_root=str(data_root),
+                        batch_size=CFG.batch,
+                        num_workers=CFG.num_workers,
+                        extract_features=True
+                    )
+                    print("✅ Geometric data loader initialized")
+                    use_geometric_loader = True
+                else:
+                    print("⚠️ Preprocessed data not found, falling back to original loading")
+                    use_geometric_loader = False
+                    
+            except Exception as e:
+                print(f"⚠️ Geometric loading failed: {e}, falling back to original loading")
+                use_geometric_loader = False
+                
+        except ImportError as e:
+            print(f"⚠️ Phase 1 components not available: {e}, using original loading")
+            use_geometric_loader = False
+    else:
+        use_geometric_loader = False
+    
+    # Create loaders based on available method
+    if use_geometric_loader:
+        # Use geometric loading
+        train_loaders = []
+        families = list(CFG.paths.families.keys())
         
-        loader = data_manager.create_loader(
-            seis_files, vel_files, family_type,
-            batch_size=CFG.batch,
-            shuffle=True,
-            num_workers=CFG.num_workers
-        )
-        if loader is not None:
-            train_loaders.append(loader)
+        for family in families:
+            if CFG.debug_mode and family in getattr(CFG, 'families_to_exclude', []):
+                continue
+                
+            try:
+                loader = family_loader.get_loader(family)
+                if loader is not None:
+                    train_loaders.append(loader)
+                    print(f"✅ Loaded geometric data for family: {family}")
+            except Exception as e:
+                print(f"⚠️ Failed to load geometric data for {family}: {e}")
+                continue
+                
+    else:
+        # Use original loading method
+        train_loaders = []
+        for family in CFG.paths.families:
+            if CFG.debug_mode and family in getattr(CFG, 'families_to_exclude', []):
+                continue
+                
+            seis_files, vel_files, family_type = data_manager.list_family_files(family)
+            if seis_files is None:  # Skip excluded families
+                continue
+                
+            print(f"Processing family: {family} ({family_type}), #seis: {len(seis_files)}, #vel: {len(vel_files)}")
+            
+            loader = data_manager.create_loader(
+                seis_files, vel_files, family_type,
+                batch_size=CFG.batch,
+                shuffle=True,
+                num_workers=CFG.num_workers
+            )
+            if loader is not None:
+                train_loaders.append(loader)
             
     if not train_loaders:
         raise ValueError("No valid data loaders created!")
+        
+    print(f"✅ Created {len(train_loaders)} data loaders")
         
     # Initialize model and move to device
     model = get_model()
@@ -223,8 +299,21 @@ def train(dryrun: bool = False, fp16: bool = False):
         total_batches = 0
         
         for loader in train_loaders:
-            for batch_idx, (x, y) in enumerate(loader):
+            for batch_idx, batch in enumerate(loader):
                 try:
+                    # Handle different batch formats
+                    if use_geometric_loader:
+                        # Geometric loading format
+                        if isinstance(batch, dict):
+                            x = batch['data']
+                            # For now, create dummy target (TODO: integrate velocity data)
+                            y = torch.zeros(x.shape[0], 1, 70, 70, device=x.device)
+                        else:
+                            x, y = batch
+                    else:
+                        # Original loading format
+                        x, y = batch
+                    
                     # Move data to device and convert to float32
                     x = x.to(CFG.env.device).float()
                     y = y.to(CFG.env.device).float()
@@ -262,9 +351,22 @@ def train(dryrun: bool = False, fp16: bool = False):
         avg_loss = total_loss / total_batches
         print(f"Epoch {epoch+1}/{CFG.epochs} completed. Average loss: {avg_loss:.4f}")
         
-        # Save checkpoint
+        # Save checkpoint using appropriate method
         if (epoch + 1) % CFG.debug_upload_interval == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch, avg_loss, data_manager)
+            if use_geometric_loader and 'checkpoint_mgr' in locals():
+                # Use Phase 1 checkpoint manager
+                checkpoint_mgr.save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=None,  # Not using scaler in this version
+                    epoch=epoch,
+                    metrics={'loss': avg_loss},
+                    upload_s3=False  # Can be made configurable
+                )
+            else:
+                # Use original checkpoint method
+                save_checkpoint(model, optimizer, scheduler, epoch, avg_loss, data_manager)
             
     # After all epochs:
     # Save best.pth and best_metadata.json to /kaggle/working for persistence

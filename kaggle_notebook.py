@@ -281,10 +281,10 @@ class SeismicDataset(Dataset):
 # Temporary mapping for family data structure
 FAMILY_FILE_MAP = {
     'CurveFault_A': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'CurveFault_B': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'CurveVel_A': {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
@@ -293,10 +293,10 @@ FAMILY_FILE_MAP = {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
     },
     'FlatFault_A': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'FlatFault_B': {
-        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
+        'seis_glob': '*.npy', 'vel_glob': '*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 2
     },
     'FlatVel_A': {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 2
@@ -1459,6 +1459,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import zarr
+import json
 from scipy.ndimage import gaussian_filter
 from skimage.feature import canny
 from skimage.metrics import structural_similarity as ssim
@@ -1745,8 +1746,16 @@ import torch
 from torch.utils.data import Dataset, Subset
 from sklearn.model_selection import KFold, StratifiedKFold
 from skimage.metrics import structural_similarity as ssim
+from skimage.feature import canny
 import json
-import mlflow
+
+# Optional MLflow import
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    mlflow = None
 
 logger = logging.getLogger(__name__)
 
@@ -1888,6 +1897,8 @@ class GeometricCrossValidator:
     
     def log_geometric_metrics_mlflow(self, metrics: dict, prefix: str = ""):
         """Utility to log geometric metrics to MLflow if available."""
+        if not MLFLOW_AVAILABLE:
+            return
         try:
             for k, v in metrics.items():
                 mlflow.log_metric(f"{prefix}{k}", v)

@@ -7,8 +7,16 @@ import torch
 from torch.utils.data import Dataset, Subset
 from sklearn.model_selection import KFold, StratifiedKFold
 from skimage.metrics import structural_similarity as ssim
+from skimage.feature import canny
 import json
-import mlflow
+
+# Optional MLflow import
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    mlflow = None
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +158,8 @@ class GeometricCrossValidator:
     
     def log_geometric_metrics_mlflow(self, metrics: dict, prefix: str = ""):
         """Utility to log geometric metrics to MLflow if available."""
+        if not MLFLOW_AVAILABLE:
+            return
         try:
             for k, v in metrics.items():
                 mlflow.log_metric(f"{prefix}{k}", v)

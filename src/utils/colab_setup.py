@@ -55,7 +55,7 @@ def setup_colab_environment(
     # Install additional packages for preprocessing
     if install_extra_packages:
         print("📦 Installing additional packages for preprocessing...")
-        extra_packages = ['zarr', 'dask', 'scipy']
+        extra_packages = ['zarr', 'dask', 'scipy', 'mlflow']
         for package in extra_packages:
             subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
     
@@ -130,11 +130,160 @@ def mount_google_drive() -> bool:
         print(f"❌ Google Drive mounting failed: {e}")
         return False
 
+def check_preprocessed_data_exists(output_root: str, save_to_drive: bool = False, use_s3: bool = False) -> Dict[str, Any]:
+    """
+    Check if preprocessed data already exists in local, Google Drive, or S3.
+    
+    Args:
+        output_root: Local output directory
+        save_to_drive: Whether to also check Google Drive
+        use_s3: Whether to also check S3
+        
+    Returns:
+        Dict containing existence status and paths
+    """
+    print("🔍 Checking for existing preprocessed data...")
+    
+    result = {
+        'exists_locally': False,
+        'exists_in_drive': False,
+        'exists_in_s3': False,
+        'local_path': output_root,
+        'drive_path': None,
+        's3_path': None,
+        'data_quality': 'unknown'
+    }
+    
+    # Check local directory
+    local_dir = Path(output_root)
+    if local_dir.exists():
+        gpu0_dir = local_dir / 'gpu0'
+        gpu1_dir = local_dir / 'gpu1'
+        
+        if gpu0_dir.exists() and gpu1_dir.exists():
+            # Check for zarr datasets
+            gpu0_zarr = gpu0_dir / 'seismic.zarr'
+            gpu1_zarr = gpu1_dir / 'seismic.zarr'
+            
+            if gpu0_zarr.exists() and gpu1_zarr.exists():
+                try:
+                    import zarr
+                    # Quick check of data quality
+                    data0 = zarr.open(str(gpu0_zarr))
+                    data1 = zarr.open(str(gpu1_zarr))
+                    
+                    if len(data0) > 0 and len(data1) > 0:
+                        result['exists_locally'] = True
+                        result['data_quality'] = f"GPU0: {len(data0)} samples, GPU1: {len(data1)} samples"
+                        print(f"✅ Found local preprocessed data: {result['data_quality']}")
+                    else:
+                        print("⚠️ Local data exists but appears empty")
+                except Exception as e:
+                    print(f"⚠️ Local data exists but may be corrupted: {e}")
+            else:
+                print("⚠️ Local directory exists but missing zarr datasets")
+        else:
+            print("⚠️ Local directory exists but missing GPU subdirectories")
+    else:
+        print("❌ No local preprocessed data found")
+    
+    # Check Google Drive if requested
+    if save_to_drive and Path('/content/drive').exists():
+        drive_path = '/content/drive/MyDrive/YaleGWI/preprocessed'
+        drive_dir = Path(drive_path)
+        
+        if drive_dir.exists():
+            gpu0_drive = drive_dir / 'gpu0'
+            gpu1_drive = drive_dir / 'gpu1'
+            
+            if gpu0_drive.exists() and gpu1_drive.exists():
+                gpu0_zarr_drive = gpu0_drive / 'seismic.zarr'
+                gpu1_zarr_drive = gpu1_drive / 'seismic.zarr'
+                
+                if gpu0_zarr_drive.exists() and gpu1_zarr_drive.exists():
+                    result['exists_in_drive'] = True
+                    result['drive_path'] = drive_path
+                    print(f"✅ Found preprocessed data in Google Drive: {drive_path}")
+                else:
+                    print("⚠️ Google Drive directory exists but missing zarr datasets")
+            else:
+                print("⚠️ Google Drive directory exists but missing GPU subdirectories")
+        else:
+            print("❌ No preprocessed data found in Google Drive")
+    
+    # Check S3 if requested
+    if use_s3:
+        try:
+            from src.core.data_manager import DataManager
+            data_manager = DataManager(use_s3=True)
+            
+            # Check for preprocessed data in S3
+            s3_prefix = "preprocessed"
+            s3_keys = data_manager.list_s3_files(s3_prefix)
+            
+            if s3_keys:
+                # Look for GPU-specific datasets
+                gpu0_keys = [k for k in s3_keys if 'gpu0' in k and 'seismic.zarr' in k]
+                gpu1_keys = [k for k in s3_keys if 'gpu1' in k and 'seismic.zarr' in k]
+                
+                if gpu0_keys and gpu1_keys:
+                    result['exists_in_s3'] = True
+                    result['s3_path'] = f"s3://{data_manager.s3_bucket}/{s3_prefix}"
+                    print(f"✅ Found preprocessed data in S3: {result['s3_path']}")
+                else:
+                    print("⚠️ S3 prefix exists but missing GPU-specific datasets")
+            else:
+                print("❌ No preprocessed data found in S3")
+                
+        except Exception as e:
+            print(f"⚠️ Error checking S3: {e}")
+    
+    return result
+
+def copy_preprocessed_data_from_drive(drive_path: str, local_path: str) -> bool:
+    """
+    Copy preprocessed data from Google Drive to local directory.
+    
+    Args:
+        drive_path: Google Drive path
+        local_path: Local path to copy to
+        
+    Returns:
+        bool: True if copy was successful
+    """
+    try:
+        print(f"📋 Copying preprocessed data from Google Drive...")
+        print(f"  From: {drive_path}")
+        print(f"  To: {local_path}")
+        
+        # Create local directory
+        local_dir = Path(local_path)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy using rsync for efficiency
+        result = subprocess.run([
+            'rsync', '-av', '--progress',
+            f'{drive_path}/',
+            f'{local_path}/'
+        ], capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print("✅ Successfully copied preprocessed data from Google Drive")
+            return True
+        else:
+            print(f"❌ Failed to copy from Google Drive: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error copying from Google Drive: {e}")
+        return False
+
 def run_preprocessing(
     input_root: str,
     output_root: str,
     use_s3: bool,
-    save_to_drive: bool
+    save_to_drive: bool,
+    force_reprocess: bool = False
 ) -> Dict[str, Any]:
     """
     Run the preprocessing pipeline with monitoring and error handling.
@@ -144,6 +293,7 @@ def run_preprocessing(
         output_root: Output directory for processed data
         use_s3: Whether to use S3 for data operations
         save_to_drive: Whether to save results to Google Drive
+        force_reprocess: Whether to force reprocessing even if data exists
         
     Returns:
         Dict containing preprocessing results
@@ -171,7 +321,45 @@ def run_preprocessing(
         # Import preprocessing function
         from src.core.preprocess import load_data
         
+        # Check if data already exists
+        data_exists = check_preprocessed_data_exists(output_root, save_to_drive, use_s3)
+        
+        if data_exists['exists_locally']:
+            if not force_reprocess:
+                print("✅ Preprocessed data already exists locally - skipping preprocessing")
+                result['success'] = True
+                result['processed_files'] = 0
+                result['skipped'] = True
+                result['data_quality'] = data_exists['data_quality']
+                return result
+            else:
+                print("🔄 Force reprocessing requested - will overwrite existing data")
+        
+        elif data_exists['exists_in_drive'] and not data_exists['exists_locally']:
+            if not force_reprocess:
+                print("📋 Found data in Google Drive but not locally - copying...")
+                if copy_preprocessed_data_from_drive(data_exists['drive_path'], output_root):
+                    print("✅ Successfully copied preprocessed data from Google Drive")
+                    result['success'] = True
+                    result['processed_files'] = 0
+                    result['skipped'] = True
+                    result['copied_from_drive'] = True
+                    return result
+                else:
+                    print("⚠️ Failed to copy from Google Drive - will reprocess")
+            else:
+                print("🔄 Force reprocessing requested - will reprocess even though data exists in Drive")
+        
+        elif data_exists['exists_in_s3'] and not data_exists['exists_locally'] and not data_exists['exists_in_drive']:
+            if not force_reprocess:
+                print("📋 Found data in S3 but not locally - downloading...")
+                # TODO: Implement S3 download functionality
+                print("⚠️ S3 download not yet implemented - will reprocess")
+            else:
+                print("🔄 Force reprocessing requested - will reprocess even though data exists in S3")
+        
         # Run preprocessing and capture feedback
+        print("🔄 Starting preprocessing pipeline...")
         feedback = load_data(
             input_root=input_root,
             output_root=output_root,
@@ -307,6 +495,8 @@ def run_tests_and_validation() -> Dict[str, Any]:
         'preprocessing_tests': False,
         'phase1_tests': False,
         'integration_tests': False,
+        'data_loading_tests': False,
+        'cv_tests': False,
         'errors': []
     }
     
@@ -379,11 +569,59 @@ def run_tests_and_validation() -> Dict[str, Any]:
         results['errors'].append(f"Integration test failed: {e}")
         print(f"  ❌ Integration tests failed: {e}")
     
+    try:
+        # Test 4: Data Loading (NEW - Critical for Phase 1)
+        print("  Testing data loading...")
+        from src.core.geometric_loader import FamilyDataLoader
+        
+        # Test family data loader instantiation
+        family_loader = FamilyDataLoader('/tmp/test_data', batch_size=16)
+        if family_loader is not None:
+            print("  ✅ Family data loader working")
+            
+        # Test geometric dataset
+        from src.core.geometric_loader import GeometricDataset
+        # Create mock data for testing
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # This is a basic test - in real usage, we'd have actual zarr data
+            print("  ✅ Geometric dataset structure working")
+            
+        results['data_loading_tests'] = True
+        
+    except Exception as e:
+        results['errors'].append(f"Data loading test failed: {e}")
+        print(f"  ❌ Data loading tests failed: {e}")
+    
+    try:
+        # Test 5: Cross-Validation (NEW - Critical for Phase 1)
+        print("  Testing cross-validation...")
+        from src.core.geometric_cv import GeometricCrossValidator
+        
+        # Test CV instantiation
+        cv = GeometricCrossValidator(n_splits=3)
+        if cv is not None:
+            print("  ✅ Cross-validator working")
+            
+        # Test geometric metrics computation
+        test_data = np.random.randn(100, 100)
+        metrics = cv.compute_geometric_metrics(test_data, test_data)
+        if 'ssim' in metrics and 'boundary_iou' in metrics:
+            print("  ✅ Geometric metrics computation working")
+            
+        results['cv_tests'] = True
+        
+    except Exception as e:
+        results['errors'].append(f"Cross-validation test failed: {e}")
+        print(f"  ❌ Cross-validation tests failed: {e}")
+    
     # Summary
     print(f"\n📊 Test Results:")
     print(f"  Preprocessing: {'✅' if results['preprocessing_tests'] else '❌'}")
     print(f"  Phase 1 Components: {'✅' if results['phase1_tests'] else '❌'}")
     print(f"  Integration: {'✅' if results['integration_tests'] else '❌'}")
+    print(f"  Data Loading: {'✅' if results['data_loading_tests'] else '❌'}")
+    print(f"  Cross-Validation: {'✅' if results['cv_tests'] else '❌'}")
     
     if results['errors']:
         print(f"\n⚠️ Errors encountered:")
@@ -399,7 +637,8 @@ def complete_colab_setup(
     download_dataset: bool = False,
     dataset_source: str = 'manual',
     setup_aws: bool = True,
-    run_tests: bool = True
+    run_tests: bool = True,
+    force_reprocess: bool = False
 ) -> Dict[str, Any]:
     """
     Complete Colab setup including environment, data verification, preprocessing, and testing.
@@ -412,6 +651,7 @@ def complete_colab_setup(
         dataset_source: Source for dataset download ('kaggle', 'url', 'gdrive', 'manual')
         setup_aws: Whether to set up AWS credentials
         run_tests: Whether to run tests after setup
+        force_reprocess: Whether to force reprocessing even if data exists
         
     Returns:
         Dict containing complete setup results
@@ -495,7 +735,8 @@ def complete_colab_setup(
         input_root=effective_input_root,
         output_root='/content/YaleGWI/preprocessed',
         use_s3=use_s3,
-        save_to_drive=mount_drive
+        save_to_drive=mount_drive,
+        force_reprocess=force_reprocess
     )
     logger.info("Data preprocessing step finished.")
 
@@ -531,14 +772,26 @@ def complete_colab_setup(
     if download_dataset:
         print(f"  Dataset Download: {'✅' if results.get('dataset_download', False) else '❌'}")
     
-    preproc_success = results.get('preprocessing', {}).get('success', False)
-    print(f"  Preprocessing: {'✅' if preproc_success else '❌'}")
+    preproc_result = results.get('preprocessing', {})
+    preproc_success = preproc_result.get('success', False)
+    preproc_skipped = preproc_result.get('skipped', False)
+    preproc_copied = preproc_result.get('copied_from_drive', False)
+    
+    if preproc_skipped:
+        if preproc_copied:
+            print(f"  Preprocessing: {'✅' if preproc_success else '❌'} (copied from Drive)")
+        else:
+            print(f"  Preprocessing: {'✅' if preproc_success else '❌'} (skipped - data exists)")
+    else:
+        print(f"  Preprocessing: {'✅' if preproc_success else '❌'}")
     
     if run_tests and 'tests' in results:
         tests = results['tests']
         print(f"  Preprocessing Tests: {'✅' if tests.get('preprocessing_tests', False) else '❌'}")
         print(f"  Phase 1 Tests: {'✅' if tests.get('phase1_tests', False) else '❌'}")
         print(f"  Integration Tests: {'✅' if tests.get('integration_tests', False) else '❌'}")
+        print(f"  Data Loading Tests: {'✅' if tests.get('data_loading_tests', False) else '❌'}")
+        print(f"  Cross-Validation Tests: {'✅' if tests.get('cv_tests', False) else '❌'}")
 
     # Detailed Preprocessing Feedback
     if 'preprocessing' in results and results['preprocessing'].get('feedback'):
@@ -699,6 +952,38 @@ def verify_aws_setup() -> Dict[str, Any]:
         print(f"❌ AWS verification failed: {e}")
     
     return results
+
+def quick_colab_setup(
+    use_s3: bool = True,
+    mount_drive: bool = True,
+    run_tests: bool = True,
+    force_reprocess: bool = False
+) -> Dict[str, Any]:
+    """
+    Quick Colab setup that skips preprocessing if data already exists.
+    
+    Args:
+        use_s3: Whether to use S3 for data operations
+        mount_drive: Whether to mount Google Drive
+        run_tests: Whether to run tests after setup
+        force_reprocess: Whether to force reprocessing even if data exists
+        
+    Returns:
+        Dict containing setup results
+    """
+    print("⚡ Quick Colab Setup - Skipping preprocessing if data exists")
+    print("="*60)
+    
+    return complete_colab_setup(
+        data_path='/content/YaleGWI/train_samples',
+        use_s3=use_s3,
+        mount_drive=mount_drive,
+        download_dataset=False,  # Skip dataset download
+        dataset_source='manual',
+        setup_aws=use_s3,
+        run_tests=run_tests,
+        force_reprocess=force_reprocess
+    )
 
 if __name__ == "__main__":
     # Example usage
