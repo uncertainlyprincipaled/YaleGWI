@@ -76,6 +76,34 @@ class DataManager:
             
         self._initialized = True
     
+    def s3_download(self, s3_key: str, local_path: str) -> bool:
+        """
+        Download a file from S3 to a local path.
+        
+        Args:
+            s3_key: The key of the object in the S3 bucket.
+            local_path: The local path to save the file to.
+            
+        Returns:
+            True if download was successful, False otherwise.
+        """
+        if not self.use_s3:
+            raise RuntimeError("S3 operations not enabled")
+        
+        try:
+            with open(local_path, 'wb') as f:
+                self.s3.download_fileobj(self.s3_bucket, s3_key, f)
+            return True
+        except ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                logging.error(f"S3 object not found: {s3_key}")
+            else:
+                logging.error(f"Failed to download {s3_key} from S3: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during S3 download: {e}")
+            return False
+
     def _setup_s3(self):
         """Set up S3 client and configuration."""
         try:
