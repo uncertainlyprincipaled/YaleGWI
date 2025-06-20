@@ -13,9 +13,16 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import logging
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Set up logging robustly to ensure messages are always displayed
+logger = logging.getLogger()
+# If the logger has handlers, it's already been configured.
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 def setup_colab_environment(
     repo_url: str = "https://github.com/uncertainlyprincipaled/YaleGWI.git",
@@ -378,12 +385,14 @@ def complete_colab_setup(
     print("\n" + "="*50)
     print("STEP 5 & 6: Data Preprocessing")
     print("="*50)
+    logger.info("Starting data preprocessing...")
     results['preprocessing'] = run_preprocessing(
         input_root=data_path,
         output_root='/content/YaleGWI/preprocessed',
         use_s3=use_s3,
         save_to_drive=mount_drive
     )
+    logger.info("Data preprocessing step finished.")
 
     # Step 7: Training configuration
     print("\n" + "="*50)

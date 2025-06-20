@@ -571,13 +571,13 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
         
     return arr
 
-def process_family(family: str, input_dir: Path, output_dir: Path, data_manager: Optional[DataManager] = None) -> Tuple[List[str], PreprocessingFeedback]:
+def process_family(family: str, input_dir: Optional[Path], output_dir: Path, data_manager: Optional[DataManager] = None) -> Tuple[List[str], PreprocessingFeedback]:
     """
     Process all files for a given geological family.
     
     Args:
         family: The name of the family to process.
-        input_dir: The directory where the raw data is located.
+        input_dir: The directory where the raw data is located (used for local processing only).
         output_dir: The directory to save processed files.
         data_manager: Optional DataManager for S3 operations.
         
@@ -642,6 +642,9 @@ def process_family(family: str, input_dir: Path, output_dir: Path, data_manager:
                 processed_paths.append(str(out_seis_path))
     # === Local Processing Path ===
     else:
+        if not input_dir:
+            raise ValueError("input_dir must be provided for local processing.")
+
         # 1. List files from the local directory
         seis_files = sorted(input_dir.glob(seis_glob))
         vel_files = sorted(input_dir.glob(vel_glob))
@@ -891,15 +894,17 @@ def load_data(input_root, output_root, use_s3=False):
 
     for family in families:
         logger.info(f"--- Starting family: {family} ---")
-        family_dir = input_root / family
         family_output_dir = output_root / family
-        
-        # If not using S3, check if the local directory exists before proceeding.
-        if not use_s3 and not family_dir.exists():
-            logger.warning(f"Skipping family {family}: directory not found at {family_dir}")
-            continue
-            
-        processed_paths, feedback = process_family(family, family_dir, family_output_dir, data_manager)
+
+        if use_s3:
+            processed_paths, feedback = process_family(family, None, family_output_dir, data_manager)
+        else:
+            family_dir = input_root / family
+            if not family_dir.exists():
+                logger.warning(f"Skipping family {family}: directory not found at {family_dir}")
+                continue
+            processed_paths, feedback = process_family(family, family_dir, family_output_dir, data_manager)
+
         all_processed_paths.extend(processed_paths)
         all_feedback[family] = feedback
 
