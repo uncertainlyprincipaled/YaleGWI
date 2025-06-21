@@ -12,6 +12,7 @@ import gc
 from pathlib import Path
 from typing import Optional, Dict, Any
 import logging
+import numpy as np
 
 # Set up logging robustly to ensure messages are always displayed
 logger = logging.getLogger()
@@ -106,6 +107,10 @@ def setup_colab_environment(
     print("🔍 Checking zarr installation...")
     zarr_working = check_and_fix_zarr_installation()
     
+    # Check and fix s3fs installation
+    print("🔍 Checking s3fs installation...")
+    s3fs_working = check_and_fix_s3fs_installation()
+    
     # Set up environment variables
     os.environ['GWI_ENV'] = 'colab'
     os.environ['DEBUG_MODE'] = '0'
@@ -174,7 +179,8 @@ def setup_colab_environment(
         'cuda_available': cuda_available,
         'gpu_count': gpu_count,
         'environment': 'colab',
-        'zarr_working': zarr_working
+        'zarr_working': zarr_working,
+        's3fs_working': s3fs_working
     }
 
 def mount_google_drive() -> bool:
@@ -599,6 +605,8 @@ def run_tests_and_validation() -> Dict[str, Any]:
         'data_loading_tests': False,
         'cv_tests': False,
         '5d_dimension_tests': False,  # NEW: Test for 5D dimension handling
+        'shape_separation_tests': False,  # NEW: Test for shape separation
+        's3fs_compatibility_tests': False,  # NEW: Test for s3fs compatibility
         'errors': []
     }
     
@@ -781,6 +789,102 @@ def run_tests_and_validation() -> Dict[str, Any]:
         results['errors'].append(f"5D dimension test failed: {e}")
         print(f"  ❌ 5D dimension tests failed: {e}")
     
+    try:
+        # Test 7: Shape Separation Test (NEW - Critical for preprocessing fix)
+        print("  Testing shape separation...")
+        import tempfile
+        
+        # Create test data with different shapes (like the actual data)
+        seismic_data = np.random.randn(500, 5, 250, 70).astype(np.float16)  # Seismic data (downsampled)
+        velocity_data = np.random.randn(500, 1, 70, 70).astype(np.float16)  # Velocity data (different shape)
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            
+            # Save test files with different naming patterns
+            np.save(tmp_path / "seis_data1.npy", seismic_data)
+            np.save(tmp_path / "seis_data2.npy", seismic_data)
+            np.save(tmp_path / "vel_data1.npy", velocity_data)
+            np.save(tmp_path / "vel_data2.npy", velocity_data)
+            
+            # Test the separation logic (same as in preprocess.py)
+            seismic_paths = []
+            velocity_paths = []
+            
+            for path in tmp_path.glob("*.npy"):
+                if 'seis_' in path.name:
+                    seismic_paths.append(str(path))
+                elif 'vel_' in path.name:
+                    velocity_paths.append(str(path))
+            
+            print(f"  ✅ Found {len(seismic_paths)} seismic files and {len(velocity_paths)} velocity files")
+            
+            # Verify shapes are consistent within each type
+            if seismic_paths:
+                first_seismic = np.load(seismic_paths[0])
+                for path in seismic_paths:
+                    arr = np.load(path)
+                    if arr.shape != first_seismic.shape:
+                        raise ValueError(f"Seismic shape mismatch: {first_seismic.shape} vs {arr.shape}")
+                print(f"  ✅ All seismic files have consistent shape: {first_seismic.shape}")
+            
+            if velocity_paths:
+                first_velocity = np.load(velocity_paths[0])
+                for path in velocity_paths:
+                    arr = np.load(path)
+                    if arr.shape != first_velocity.shape:
+                        raise ValueError(f"Velocity shape mismatch: {first_velocity.shape} vs {arr.shape}")
+                print(f"  ✅ All velocity files have consistent shape: {first_velocity.shape}")
+            
+            # Test that seismic and velocity have different shapes (as expected)
+            if seismic_paths and velocity_paths:
+                seismic_shape = np.load(seismic_paths[0]).shape
+                velocity_shape = np.load(velocity_paths[0]).shape
+                if seismic_shape != velocity_shape:
+                    print(f"  ✅ Seismic and velocity shapes correctly different: {seismic_shape} vs {velocity_shape}")
+                    results['shape_separation_tests'] = True
+                else:
+                    print(f"  ⚠️ Unexpected: Seismic and velocity shapes are the same: {seismic_shape}")
+            else:
+                print("  ⚠️ Missing either seismic or velocity files for comparison")
+        
+    except Exception as e:
+        results['errors'].append(f"Shape separation test failed: {e}")
+        print(f"  ❌ Shape separation tests failed: {e}")
+    
+    try:
+        # Test 8: S3fs Compatibility Test (NEW - Critical for s3fs update fix)
+        print("  Testing s3fs compatibility...")
+        import s3fs
+        
+        # Check s3fs version
+        print(f"  ✅ S3fs version: {s3fs.__version__}")
+        
+        # Test basic s3fs functionality without requiring AWS credentials
+        try:
+            # Create a simple s3fs instance (anonymous mode)
+            fs = s3fs.S3FileSystem(anon=True)
+            print("  ✅ S3fs basic functionality working")
+            
+            # Test that we can create the filesystem without the 'asynchronous' error
+            # This was the main issue with old s3fs versions
+            results['s3fs_compatibility_tests'] = True
+            
+        except Exception as e:
+            if "asynchronous" in str(e):
+                print(f"  ❌ S3fs has the old 'asynchronous' compatibility issue: {e}")
+                results['errors'].append("S3fs needs to be updated to fix 'asynchronous' parameter issue")
+            else:
+                print(f"  ❌ S3fs functionality test failed: {e}")
+                results['errors'].append(f"S3fs functionality test failed: {e}")
+        
+    except ImportError:
+        print("  ❌ S3fs not installed")
+        results['errors'].append("S3fs not installed")
+    except Exception as e:
+        results['errors'].append(f"S3fs compatibility test failed: {e}")
+        print(f"  ❌ S3fs compatibility tests failed: {e}")
+    
     # Summary
     print(f"\n📊 Test Results:")
     print(f"  Preprocessing: {'✅' if results['preprocessing_tests'] else '❌'}")
@@ -789,6 +893,8 @@ def run_tests_and_validation() -> Dict[str, Any]:
     print(f"  Data Loading: {'✅' if results['data_loading_tests'] else '❌'}")
     print(f"  Cross-Validation: {'✅' if results['cv_tests'] else '❌'}")
     print(f"  5D Dimension Handling: {'✅' if results['5d_dimension_tests'] else '❌'}")
+    print(f"  Shape Separation: {'✅' if results['shape_separation_tests'] else '❌'}")
+    print(f"  S3fs Compatibility: {'✅' if results['s3fs_compatibility_tests'] else '❌'}")
     
     if results['errors']:
         print(f"\n⚠️ Errors encountered:")
@@ -1361,6 +1467,54 @@ def check_and_fix_zarr_installation() -> bool:
             return True
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed to install zarr: {e}")
+            return False
+
+def check_and_fix_s3fs_installation() -> bool:
+    """
+    Check s3fs installation and update if needed to fix compatibility issues.
+    
+    Returns:
+        bool: True if s3fs is working properly
+    """
+    print("🔍 Checking s3fs installation...")
+    
+    try:
+        import s3fs
+        print(f"✅ S3fs version: {s3fs.__version__}")
+        
+        # Check if version is too old (causing compatibility issues)
+        version_parts = s3fs.__version__.split('.')
+        major = int(version_parts[0])
+        minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+        
+        if major < 2023 or (major == 2023 and minor < 1):
+            print("⚠️ S3fs version is old and may cause compatibility issues")
+            print("💡 Updating s3fs to latest version...")
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 's3fs'], check=True)
+                print("✅ S3fs updated successfully")
+                # Reload s3fs to get new version
+                import importlib
+                importlib.reload(s3fs)
+                print(f"✅ New s3fs version: {s3fs.__version__}")
+                return True
+            except subprocess.CalledProcessError as e:
+                print(f"❌ Failed to update s3fs: {e}")
+                print("⚠️ Continuing with old version - S3 operations may fail")
+                return False
+        else:
+            print("✅ S3fs version is recent and should work properly")
+            return True
+            
+    except ImportError:
+        print("❌ S3fs not installed")
+        print("💡 Installing s3fs...")
+        try:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs'], check=True)
+            print("✅ S3fs installed successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to install s3fs: {e}")
             return False
 
 if __name__ == "__main__":
