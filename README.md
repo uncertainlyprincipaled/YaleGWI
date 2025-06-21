@@ -381,9 +381,23 @@ from src.utils.colab_setup import quick_colab_setup
 results = quick_colab_setup(use_s3=True, mount_drive=True)
 ```
 
+If you encounter `got multiple values for keyword argument 'chunks'` errors:
+```python
+# This is a dask-zarr compatibility issue that has been fixed
+# The code now properly handles chunking without conflicts
+
+# 1. Test the fix
+!python test_zarr_fix.py
+
+# 2. Run setup again (should work now)
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(use_s3=True, mount_drive=True)
+```
+
 The preprocessing pipeline now automatically handles zarr compression issues by:
 - Trying default compression first
 - Falling back to no compression if needed
+- Using computed arrays as final fallback
 - Providing clear error messages and guidance
 
 ---

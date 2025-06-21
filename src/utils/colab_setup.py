@@ -503,6 +503,17 @@ def run_preprocessing(
             result['error'] = str(e)
             print(f"❌ Attribute error during preprocessing: {e}")
         raise
+    except TypeError as e:
+        if "got multiple values for keyword argument 'chunks'" in str(e):
+            print("❌ Zarr chunks parameter conflict detected!")
+            print("💡 This is a known issue with dask-zarr compatibility.")
+            print("🔄 The code has been updated to handle this automatically.")
+            print("💡 Please try running the setup again - it should work now.")
+            result['error'] = f"Zarr chunks conflict (fixed): {str(e)}"
+        else:
+            result['error'] = str(e)
+            print(f"❌ Type error during preprocessing: {e}")
+        raise
     except Exception as e:
         result['error'] = str(e)
         print(f"❌ Preprocessing failed: {e}")

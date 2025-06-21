@@ -807,7 +807,7 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
         
-        # Adjust chunk size based on actual data shape
+        # Adjust chunk size based on actual data shape and rechunk the array
         if len(arr_shape) == 4:
             # For 4D data, use smaller chunks
             adjusted_chunk_size = (1, min(4, arr_shape[1]), min(64, arr_shape[2]), min(8, arr_shape[3]))
@@ -817,7 +817,10 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         else:
             adjusted_chunk_size = chunk_size
             
+        # Rechunk the array to the desired chunk size
+        stack = stack.rechunk(adjusted_chunk_size)
         logger.info(f"Using chunk size: {adjusted_chunk_size}")
+        logger.info(f"Stack shape: {stack.shape}, chunks: {stack.chunks}")
 
         # --- Save to Zarr ---
         # If using S3, save directly to S3. Otherwise, save locally.
@@ -831,33 +834,51 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             # Use compatible compression - try different approaches
             try:
                 # Try using zarr's default compression
-                stack.to_zarr(store, chunks=adjusted_chunk_size)
+                logger.info("Attempting to save with default compression...")
+                stack.to_zarr(store)
                 logger.info("Successfully saved to S3 with default compression.")
             except Exception as comp_error:
                 logger.warning(f"Default compression failed: {comp_error}")
                 # Fallback to no compression
-                stack.to_zarr(store, chunks=adjusted_chunk_size, compressor=None)
-                logger.info("Successfully saved to S3 without compression.")
+                try:
+                    logger.info("Attempting to save without compression...")
+                    stack.to_zarr(store, compressor=None)
+                    logger.info("Successfully saved to S3 without compression.")
+                except Exception as no_comp_error:
+                    logger.warning(f"No compression also failed: {no_comp_error}")
+                    # Final fallback: compute and save as numpy arrays
+                    logger.info("Attempting to save as computed arrays...")
+                    computed_stack = stack.compute()
+                    zarr.save(store, computed_stack)
+                    logger.info("Successfully saved to S3 as computed arrays.")
         else:
             logger.info(f"Saving zarr dataset locally: {output_path}")
             try:
                 # Try using zarr's default compression
+                logger.info("Attempting to save with default compression...")
                 stack.to_zarr(
                     output_path,
-                    component='data', # Using 'data' as component for local
-                    chunks=adjusted_chunk_size
+                    component='data' # Using 'data' as component for local
                 )
                 logger.info("Successfully saved locally with default compression.")
             except Exception as comp_error:
                 logger.warning(f"Default compression failed: {comp_error}")
                 # Fallback to no compression
-                stack.to_zarr(
-                    output_path,
-                    component='data',
-                    chunks=adjusted_chunk_size,
-                    compressor=None
-                )
-                logger.info("Successfully saved locally without compression.")
+                try:
+                    logger.info("Attempting to save without compression...")
+                    stack.to_zarr(
+                        output_path,
+                        component='data',
+                        compressor=None
+                    )
+                    logger.info("Successfully saved locally without compression.")
+                except Exception as no_comp_error:
+                    logger.warning(f"No compression also failed: {no_comp_error}")
+                    # Final fallback: compute and save as numpy arrays
+                    logger.info("Attempting to save as computed arrays...")
+                    computed_stack = stack.compute()
+                    zarr.save(output_path, computed_stack)
+                    logger.info("Successfully saved locally as computed arrays.")
                 
     except Exception as e:
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")

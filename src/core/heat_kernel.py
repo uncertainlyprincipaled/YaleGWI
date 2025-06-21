@@ -64,6 +64,7 @@ class HeatKernelLayer(nn.Module):
     
     def _initialize_diffusion_kernel(self) -> torch.Tensor:
         """Initialize diffusion kernel with Gaussian-like structure."""
+        # This is a little hacky, no?
         kernel = torch.zeros(self.kernel_size, self.kernel_size)
         center = self.kernel_size // 2
         
