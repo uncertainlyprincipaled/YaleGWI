@@ -1527,7 +1527,20 @@ def check_and_fix_s3fs_installation() -> bool:
                             return True
                         except Exception as e2:
                             print(f"❌ Alternative installation also failed: {e2}")
-                            return False
+                            # Try one final approach - install a known working version
+                            print("💡 Trying final s3fs fix...")
+                            try:
+                                subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs', 'fsspec'], check=True)
+                                subprocess.run([sys.executable, '-m', 'pip', 'install', 'fsspec>=2023.1.0'], check=True)
+                                subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0'], check=True)
+                                importlib.reload(s3fs)
+                                fs = s3fs.S3FileSystem(anon=True)
+                                print("✅ S3fs fixed with final approach")
+                                return True
+                            except Exception as e3:
+                                print(f"❌ All s3fs fixes failed: {e3}")
+                                print("⚠️ S3 operations will be disabled - using local processing only")
+                                return False
                     else:
                         print(f"✅ S3fs working (different error: {e})")
                         return True

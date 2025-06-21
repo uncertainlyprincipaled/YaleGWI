@@ -726,6 +726,7 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
                 np.save(out_seis_path, seis_arr)
                 np.save(out_vel_path, vel_arr)
                 processed_paths.append(str(out_seis_path))
+                processed_paths.append(str(out_vel_path))
     # === Local Processing Path ===
     else:
         if not isinstance(input_path, Path):
@@ -757,6 +758,7 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             np.save(out_seis_path, seis_arr)
             np.save(out_vel_path, vel_arr)
             processed_paths.append(str(out_seis_path))
+            processed_paths.append(str(out_vel_path))
             
     return processed_paths, feedback
 
@@ -944,6 +946,15 @@ def save_zarr_data(stack, output_path, data_manager):
                     logger.info("Saved locally as fallback.")
                 except Exception as e3:
                     logger.error(f"Local fallback also failed: {e3}")
+                    # Final fallback - save as numpy arrays
+                    try:
+                        logger.info("Final fallback: saving as numpy arrays...")
+                        computed_stack = stack.compute()
+                        np.save(output_path.with_suffix('.npy'), computed_stack)
+                        logger.info("Saved as numpy arrays as final fallback.")
+                    except Exception as e4:
+                        logger.error(f"All save methods failed: {e4}")
+                        raise
     else:
         logger.info(f"Saving zarr dataset locally: {output_path}")
         
