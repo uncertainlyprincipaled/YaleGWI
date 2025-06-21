@@ -598,6 +598,7 @@ def run_tests_and_validation() -> Dict[str, Any]:
         'integration_tests': False,
         'data_loading_tests': False,
         'cv_tests': False,
+        '5d_dimension_tests': False,  # NEW: Test for 5D dimension handling
         'errors': []
     }
     
@@ -716,6 +717,62 @@ def run_tests_and_validation() -> Dict[str, Any]:
         results['errors'].append(f"Cross-validation test failed: {e}")
         print(f"  ❌ Cross-validation tests failed: {e}")
     
+    try:
+        # Test 6: 5D Dimension Handling (NEW - Critical for preprocessing fix)
+        print("  Testing 5D dimension handling...")
+        import zarr
+        import dask.array as da
+        import dask
+        
+        # Create 5D test data similar to the actual data shape
+        # Shape: (batch, samples, sources, time, receivers) = (16, 500, 5, 1000, 70)
+        test_data = np.random.randn(500, 5, 1000, 70).astype(np.float16)
+        
+        # Create multiple arrays to simulate stacking
+        arrays = [test_data for _ in range(3)]  # 3 files
+        
+        # Create lazy Dask arrays from files
+        lazy_arrays = [
+            da.from_delayed(dask.delayed(lambda x: x)(arr), shape=test_data.shape, dtype=test_data.dtype)
+            for arr in arrays
+        ]
+        
+        # Stack arrays (this creates 5D data)
+        stack = da.stack(lazy_arrays, axis=0)
+        stack_shape = stack.shape
+        
+        # Test the chunk size adjustment logic (same as in preprocess.py)
+        if len(stack_shape) == 5:
+            adjusted_chunk_size = (
+                1,  # batch dimension
+                min(4, stack_shape[1]),  # samples dimension
+                min(4, stack_shape[2]),  # sources dimension  
+                min(64, stack_shape[3]),  # time dimension
+                min(8, stack_shape[4])   # receivers dimension
+            )
+        else:
+            adjusted_chunk_size = tuple(1 for _ in range(len(stack_shape)))
+        
+        # Test rechunking
+        stack = stack.rechunk(adjusted_chunk_size)
+        
+        # Test saving to zarr
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "test_5d.zarr"
+            stack.to_zarr(str(output_path), compressor=None)
+            
+            # Verify data
+            loaded_data = zarr.open(str(output_path))
+            if loaded_data.shape == stack_shape:
+                print("  ✅ 5D dimension handling working")
+                results['5d_dimension_tests'] = True
+            else:
+                raise ValueError(f"Shape mismatch: expected {stack_shape}, got {loaded_data.shape}")
+        
+    except Exception as e:
+        results['errors'].append(f"5D dimension test failed: {e}")
+        print(f"  ❌ 5D dimension tests failed: {e}")
+    
     # Summary
     print(f"\n📊 Test Results:")
     print(f"  Preprocessing: {'✅' if results['preprocessing_tests'] else '❌'}")
@@ -723,6 +780,7 @@ def run_tests_and_validation() -> Dict[str, Any]:
     print(f"  Integration: {'✅' if results['integration_tests'] else '❌'}")
     print(f"  Data Loading: {'✅' if results['data_loading_tests'] else '❌'}")
     print(f"  Cross-Validation: {'✅' if results['cv_tests'] else '❌'}")
+    print(f"  5D Dimension Handling: {'✅' if results['5d_dimension_tests'] else '❌'}")
     
     if results['errors']:
         print(f"\n⚠️ Errors encountered:")

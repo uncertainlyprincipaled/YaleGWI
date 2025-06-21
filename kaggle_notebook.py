@@ -807,15 +807,36 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
         
+        # Get the actual shape after stacking
+        stack_shape = stack.shape
+        logger.info(f"Stack shape after stacking: {stack_shape}")
+        
         # Adjust chunk size based on actual data shape and rechunk the array
-        if len(arr_shape) == 4:
+        if len(stack_shape) == 5:
+            # For 5D data (batch, samples, sources, time, receivers)
+            # Use appropriate chunks for each dimension
+            adjusted_chunk_size = (
+                1,  # batch dimension - keep small for memory efficiency
+                min(4, stack_shape[1]),  # samples dimension
+                min(4, stack_shape[2]),  # sources dimension  
+                min(64, stack_shape[3]),  # time dimension
+                min(8, stack_shape[4])   # receivers dimension
+            )
+        elif len(stack_shape) == 4:
             # For 4D data, use smaller chunks
-            adjusted_chunk_size = (1, min(4, arr_shape[1]), min(64, arr_shape[2]), min(8, arr_shape[3]))
-        elif len(arr_shape) == 3:
+            adjusted_chunk_size = (1, min(4, stack_shape[1]), min(64, stack_shape[2]), min(8, stack_shape[3]))
+        elif len(stack_shape) == 3:
             # For 3D data, use appropriate chunks
-            adjusted_chunk_size = (1, min(64, arr_shape[0]), min(8, arr_shape[1]))
+            adjusted_chunk_size = (1, min(64, stack_shape[0]), min(8, stack_shape[1]))
         else:
-            adjusted_chunk_size = chunk_size
+            # For other dimensions, try to use the provided chunk_size
+            # but ensure it matches the number of dimensions
+            if len(chunk_size) == len(stack_shape):
+                adjusted_chunk_size = chunk_size
+            else:
+                # Create a default chunk size that matches the dimensions
+                adjusted_chunk_size = tuple(1 for _ in range(len(stack_shape)))
+                logger.warning(f"Using default chunk size {adjusted_chunk_size} for unexpected shape {stack_shape}")
             
         # Rechunk the array to the desired chunk size
         stack = stack.rechunk(adjusted_chunk_size)
