@@ -783,12 +783,12 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             return
             
         first_arr = np.load(processed_paths[0], mmap_mode='r')
-            
         arr_shape = first_arr.shape
         arr_dtype = first_arr.dtype
         
         # Log the actual shape for debugging
         logger.info(f"Creating zarr dataset with shape: {arr_shape}, dtype: {arr_dtype}")
+        logger.info(f"Number of processed paths: {len(processed_paths)}")
         
         # More flexible shape validation - just log warnings instead of raising errors
         if len(arr_shape) == 4:  # Seismic data
@@ -799,10 +799,29 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             logger.warning(f"Unexpected array shape: {arr_shape}")
             
         # Create lazy Dask arrays from local files
-        lazy_arrays = [
-            da.from_delayed(dask.delayed(np.load)(p, allow_pickle=True), shape=arr_shape, dtype=arr_dtype)
-            for p in processed_paths
-        ]
+        lazy_arrays = []
+        valid_paths = 0
+        for p in processed_paths:
+            try:
+                # Load and check shape of each file
+                arr = np.load(p, mmap_mode='r')
+                if arr.shape != arr_shape:
+                    logger.warning(f"Shape mismatch in {p}: expected {arr_shape}, got {arr.shape}")
+                    # Skip files with wrong shape to avoid stacking errors
+                    continue
+                lazy_arrays.append(
+                    da.from_delayed(dask.delayed(np.load)(p, allow_pickle=True), shape=arr_shape, dtype=arr_dtype)
+                )
+                valid_paths += 1
+            except Exception as e:
+                logger.warning(f"Failed to load {p}: {e}")
+                continue
+        
+        logger.info(f"Valid arrays found: {valid_paths}/{len(processed_paths)}")
+        
+        if not lazy_arrays:
+            logger.error("No valid arrays found to stack")
+            return
             
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
@@ -849,20 +868,18 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             import s3fs
             s3_path = f"s3://{data_manager.s3_bucket}/{output_path.parent.name}/{output_path.name}"
             logger.info(f"Saving zarr dataset directly to S3: {s3_path}")
-            fs = s3fs.S3FileSystem()
-            store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
             
-            # Use basic zarr saving without compression
+            # Use fsspec-based approach for zarr 3.0.8
             try:
                 logger.info("Saving to S3 without compression...")
-                stack.to_zarr(store)
+                stack.to_zarr(s3_path)
                 logger.info("Successfully saved to S3 without compression.")
             except Exception as e:
                 logger.warning(f"S3 save failed: {e}")
                 # Final fallback - compute and save
                 logger.info("Attempting to save as computed arrays...")
                 computed_stack = stack.compute()
-                zarr.save(store, computed_stack)
+                zarr.save(s3_path, computed_stack)
                 logger.info("Successfully saved to S3 as computed arrays.")
         else:
             logger.info(f"Saving zarr dataset locally: {output_path}")
