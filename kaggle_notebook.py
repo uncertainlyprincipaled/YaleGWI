@@ -840,31 +840,41 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
         raise
 
-def split_for_gpus(processed_paths: List[str], output_base: Path, data_manager: Optional[DataManager] = None, by_family: bool = True) -> None:
+def split_for_gpus(processed_paths: List[str], output_base: Path, data_manager: Optional[DataManager] = None) -> None:
     """
     Split processed files into two datasets for the two T4 GPUs and optionally upload to S3.
-    If by_family is True, split by family (half families to each GPU), else split within families.
-    Ensure all data is downsampled to float16.
+    Simple family-based splitting: put half the families in each GPU dataset.
     """
     try:
-        if by_family:
-            # Group processed_paths by family
-            family_groups = {}
-            for path in processed_paths:
-                # Assume path contains family name as a parent directory
-                family = Path(path).parent.parent.name if Path(path).parent.name in ['data', 'model'] else Path(path).parent.name
-                family_groups.setdefault(family, []).append(path)
-            families = sorted(family_groups.keys())
-            mid = len(families) // 2
-            gpu0_fams = families[:mid]
-            gpu1_fams = families[mid:]
-            gpu0_paths = [p for fam in gpu0_fams for p in family_groups[fam]]
-            gpu1_paths = [p for fam in gpu1_fams for p in family_groups[fam]]
-        else:
-            n_samples = len(processed_paths)
-            mid_point = n_samples // 2
-            gpu0_paths = processed_paths[:mid_point]
-            gpu1_paths = processed_paths[mid_point:]
+        # Get all families from FAMILY_FILE_MAP
+        all_families = list(FAMILY_FILE_MAP.keys())
+        mid = len(all_families) // 2
+        
+        # Split families: first half to GPU0, second half to GPU1
+        gpu0_families = all_families[:mid]
+        gpu1_families = all_families[mid:]
+        
+        logger.info(f"GPU0 families: {gpu0_families}")
+        logger.info(f"GPU1 families: {gpu1_families}")
+        
+        # Group processed_paths by family
+        family_groups = {}
+        for path in processed_paths:
+            # Extract family name from path
+            family = Path(path).parent.name
+            family_groups.setdefault(family, []).append(path)
+        
+        # Assign paths to GPUs based on family
+        gpu0_paths = []
+        gpu1_paths = []
+        
+        for family in gpu0_families:
+            if family in family_groups:
+                gpu0_paths.extend(family_groups[family])
+                
+        for family in gpu1_families:
+            if family in family_groups:
+                gpu1_paths.extend(family_groups[family])
             
         # Create GPU-specific directories
         gpu0_dir = output_base / 'gpu0'
@@ -3091,32 +3101,4 @@ This notebook implements the preprocessing pipeline for seismic waveform inversi
 
 if __name__ == "__main__":
     create_notebook() 
-
-
-# %%
-# Source: requirements.txt
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.21.0
-pandas>=1.3.0
-matplotlib>=3.4.0
-tqdm>=4.62.0
-kagglehub>=0.2.0
-watchdog>=2.1.0  # For development
-einops
-omegaconf
-polars>=0.20.0
-google-auth-oauthlib>=0.4.6
-google-auth-httplib2>=0.1.0
-google-api-python-client>=2.0.0
-psutil>=5.9.0  # For memory monitoring
-timm>=0.9.0
-monai>=1.2.0
-pytest
-awscli
-boto3
-botocore
-zarr>=2.14.0  # For efficient data storage
-dask>=2023.1.0  # For out-of-memory computations
-scipy>=1.9.0  # For signal processing (decimate function) 
 

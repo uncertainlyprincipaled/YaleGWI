@@ -189,12 +189,11 @@ This project is optimized for the Kaggle environment.
 !git clone -b dev https://github.com/uncertainlyprincipaled/YaleGWI.git
 %cd YaleGWI
 ```
-4. **Install dependencies using Mamba**:
-Kaggle comes with Mamba pre-installed. We use the `environment.yml` file for a fast and reliable setup.
-```bash
-# Create and activate the environment
-mamba env create -f environment.yml
-source activate YaleGWI
+4. **Install dependencies using pip (more reliable in Kaggle)**:
+```python
+!pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+!pip install numpy pandas matplotlib tqdm pytest boto3 botocore awscli zarr dask scipy s3fs psutil timm einops polars watchdog omegaconf
+!pip install kagglehub google-auth-oauthlib google-auth-httplib2 google-api-python-client monai pytorch-lightning==2.0.0 torchmetrics==0.11.4 segmentation-models-pytorch webdataset plotly packaging
 ```
 5. Setting up AWS Credentials in Kaggle
    1. Go to your Kaggle account settings
@@ -442,7 +441,7 @@ Once the instance is running, copy its IP address.
 **A. SSH into the Instance**
 The default username is `ubuntu`. Use the `ed25519` key you created.
 ```bash
-ssh -i ~/.ssh/lambda_labs_ed25519 ubuntu@<YOUR_INSTANCE_IP>
+ssh -i ~/.ssh/lambda_train_key ubuntu@YOUR_INSTANCE_IP
 ```
 The first time you connect, you will be asked to verify the host's authenticity. Type `yes`. Then, enter your SSH key's passphrase.
 
@@ -527,7 +526,7 @@ You can now run your training jobs. The `train_lambda.sh` script created by the 
 
 2. **SSH into the Instance**
    ```bash
-   ssh -i .env/aws/<your-key>.pem ubuntu@<instance-ip>
+   ssh -i .env/aws/your-key.pem ubuntu@instance-ip
    ```
 
 3. **Clone the Repository**
