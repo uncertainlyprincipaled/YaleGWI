@@ -852,14 +852,16 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             fs = s3fs.S3FileSystem()
             store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
             
-            # Use compatible compression - try different approaches
+            # Use zarr 3.0.8 compatible compression - try different approaches
             try:
-                # Try using zarr's default compression
-                logger.info("Attempting to save with default compression...")
-                stack.to_zarr(store)
-                logger.info("Successfully saved to S3 with default compression.")
+                # Try using zarr 3.0.8 compatible compression
+                import numcodecs
+                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                logger.info("Attempting to save with zarr 3.0.8 compatible compression...")
+                stack.to_zarr(store, compressor=compressor)
+                logger.info("Successfully saved to S3 with zarr 3.0.8 compatible compression.")
             except Exception as comp_error:
-                logger.warning(f"Default compression failed: {comp_error}")
+                logger.warning(f"Zarr 3.0.8 compression failed: {comp_error}")
                 # Fallback to no compression
                 try:
                     logger.info("Attempting to save without compression...")
@@ -875,15 +877,18 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         else:
             logger.info(f"Saving zarr dataset locally: {output_path}")
             try:
-                # Try using zarr's default compression
-                logger.info("Attempting to save with default compression...")
+                # Try using zarr 3.0.8 compatible compression
+                import numcodecs
+                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                logger.info("Attempting to save with zarr 3.0.8 compatible compression...")
                 stack.to_zarr(
                     output_path,
-                    component='data' # Using 'data' as component for local
+                    component='data', # Using 'data' as component for local
+                    compressor=compressor
                 )
-                logger.info("Successfully saved locally with default compression.")
+                logger.info("Successfully saved locally with zarr 3.0.8 compatible compression.")
             except Exception as comp_error:
-                logger.warning(f"Default compression failed: {comp_error}")
+                logger.warning(f"Zarr 3.0.8 compression failed: {comp_error}")
                 # Fallback to no compression
                 try:
                     logger.info("Attempting to save without compression...")

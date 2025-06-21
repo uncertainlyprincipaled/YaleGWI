@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 def test_zarr_compression():
-    """Test that zarr compression works without Blosc"""
+    """Test that zarr compression works with zarr 3.0.8 compatibility"""
     print("🧪 Testing zarr compression fix...")
     
     try:
@@ -26,14 +26,16 @@ def test_zarr_compression():
         dask_array = dask_array.rechunk((50, 50))  # Ensure proper chunking
         print("✅ Dask array created and rechunked")
         
-        # Test saving with default compression
+        # Test saving with zarr 3.0.8 compatible compression
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test.zarr"
             
             try:
-                # Try default compression (without chunks parameter)
-                dask_array.to_zarr(str(output_path))
-                print("✅ Default compression works")
+                # Try with bytes-to-bytes codec (zarr 3.0.8 compatible)
+                import numcodecs
+                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                dask_array.to_zarr(str(output_path), compressor=compressor)
+                print("✅ Zarr 3.0.8 compatible compression works")
                 
                 # Verify data
                 loaded_data = zarr.open(str(output_path))
@@ -42,9 +44,9 @@ def test_zarr_compression():
                 return True
                 
             except Exception as e:
-                print(f"⚠️ Default compression failed: {e}")
+                print(f"⚠️ Zarr 3.0.8 compression failed: {e}")
                 
-                # Try without compression
+                # Try without compression (fallback)
                 dask_array.to_zarr(str(output_path), compressor=None)
                 print("✅ No compression works")
                 
@@ -113,12 +115,12 @@ def test_5d_dimension_handling():
         stack = stack.rechunk(adjusted_chunk_size)
         print(f"✅ Rechunked successfully. Final shape: {stack.shape}, chunks: {stack.chunks}")
         
-        # Test saving to zarr
+        # Test saving to zarr with zarr 3.0.8 compatibility
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test_5d.zarr"
             
             try:
-                # Try saving with no compression
+                # Try saving with no compression (most compatible)
                 stack.to_zarr(str(output_path), compressor=None)
                 print("✅ 5D data saved to zarr successfully")
                 
