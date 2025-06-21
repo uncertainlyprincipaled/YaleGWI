@@ -756,21 +756,54 @@ def run_tests_and_validation() -> Dict[str, Any]:
         # Test rechunking
         stack = stack.rechunk(adjusted_chunk_size)
         
-        # Test saving to zarr with zarr 3.0.8 compatibility
+        # Test saving to zarr with proper fallbacks
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test_5d.zarr"
             
-            try:
-                # Try with zarr 3.0.8 compatible compression first
-                import numcodecs
-                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                stack.to_zarr(str(output_path), codec=codec)
-                print("  ✅ 5D data saved with zarr 3.0.8 compression")
-            except Exception as comp_error:
-                print(f"  ⚠️ Zarr 3.0.8 compression failed: {comp_error}")
-                # Fallback to no compression
-                stack.to_zarr(str(output_path), codec=None)
-                print("  ✅ 5D data saved without compression")
+            # Try different zarr saving approaches
+            success = False
+            
+            # Approach 1: Try with compressor parameter
+            if not success:
+                try:
+                    import numcodecs
+                    compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    stack.to_zarr(str(output_path), compressor=compressor)
+                    print("  ✅ 5D data saved with compressor parameter")
+                    success = True
+                except Exception as e:
+                    print(f"  ⚠️ Compressor parameter failed: {e}")
+            
+            # Approach 2: Try with codec parameter
+            if not success:
+                try:
+                    import numcodecs
+                    codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    stack.to_zarr(str(output_path), codec=codec)
+                    print("  ✅ 5D data saved with codec parameter")
+                    success = True
+                except Exception as e:
+                    print(f"  ⚠️ Codec parameter failed: {e}")
+            
+            # Approach 3: Try without compression
+            if not success:
+                try:
+                    stack.to_zarr(str(output_path))
+                    print("  ✅ 5D data saved without compression")
+                    success = True
+                except Exception as e:
+                    print(f"  ⚠️ No compression failed: {e}")
+            
+            # Approach 4: Final fallback - compute and save
+            if not success:
+                try:
+                    computed_stack = stack.compute()
+                    zarr.save(str(output_path), computed_stack)
+                    print("  ✅ 5D data saved as computed arrays")
+                    success = True
+                except Exception as e:
+                    print(f"  ❌ All zarr saving approaches failed: {e}")
+                    return False
             
             # Verify data
             loaded_data = zarr.open(str(output_path))
@@ -1343,22 +1376,41 @@ def check_and_fix_zarr_installation() -> bool:
             # Test compression with zarr 3.0.8 compatibility
             try:
                 import numcodecs
-                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                test_compressed = zarr.create((10, 10), dtype='float32', codec=codec)
-                test_compressed[:] = 1.0
-                print("✅ Zarr 3.0.8 compatible compression working")
-                return True
+                # For zarr 3.0.8, try different approaches
+                try:
+                    # Try with compressor parameter (older API)
+                    compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    test_compressed = zarr.create((10, 10), dtype='float32', compressor=compressor)
+                    test_compressed[:] = 1.0
+                    print("✅ Zarr compression working with compressor parameter")
+                    return True
+                except Exception as e1:
+                    print(f"⚠️ Compressor parameter failed: {e1}")
+                    # Try with codec parameter (newer API)
+                    try:
+                        codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                        test_compressed = zarr.create((10, 10), dtype='float32', codec=codec)
+                        test_compressed[:] = 1.0
+                        print("✅ Zarr compression working with codec parameter")
+                        return True
+                    except Exception as e2:
+                        print(f"⚠️ Codec parameter failed: {e2}")
+                        # Try without any compression
+                        test_compressed = zarr.create((10, 10), dtype='float32')
+                        test_compressed[:] = 1.0
+                        print("✅ Zarr compression (none) working")
+                        return True
             except ImportError:
                 print("⚠️ numcodecs not available, testing without compression")
-                test_compressed = zarr.create((10, 10), dtype='float32', codec=None)
+                test_compressed = zarr.create((10, 10), dtype='float32')
                 test_compressed[:] = 1.0
                 print("✅ Zarr compression (none) working")
                 return True
             except Exception as comp_error:
-                print(f"⚠️ Zarr 3.0.8 compression test failed: {comp_error}")
-                # Fallback to no compression
+                print(f"⚠️ Zarr compression test failed: {comp_error}")
+                # Final fallback to no compression
                 try:
-                    test_compressed = zarr.create((10, 10), dtype='float32', codec=None)
+                    test_compressed = zarr.create((10, 10), dtype='float32')
                     test_compressed[:] = 1.0
                     print("✅ Zarr compression (none) working as fallback")
                     return True

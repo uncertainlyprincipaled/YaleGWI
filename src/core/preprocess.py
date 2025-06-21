@@ -533,59 +533,117 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             fs = s3fs.S3FileSystem()
             store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
             
-            # Use zarr 3.0.8 compatible compression - try different approaches
-            try:
-                # Try using zarr 3.0.8 compatible compression
-                import numcodecs
-                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                logger.info("Attempting to save with zarr 3.0.8 compatible compression...")
-                stack.to_zarr(store, codec=codec)
-                logger.info("Successfully saved to S3 with zarr 3.0.8 compatible compression.")
-            except Exception as comp_error:
-                logger.warning(f"Zarr 3.0.8 compression failed: {comp_error}")
-                # Fallback to no compression
+            # Use robust zarr saving with multiple fallback approaches
+            # Try different zarr saving approaches
+            success = False
+            
+            # Approach 1: Try with compressor parameter
+            if not success:
+                try:
+                    import numcodecs
+                    compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    logger.info("Attempting to save with compressor parameter...")
+                    stack.to_zarr(store, compressor=compressor)
+                    logger.info("Successfully saved to S3 with compressor parameter.")
+                    success = True
+                except Exception as e:
+                    logger.warning(f"Compressor parameter failed: {e}")
+            
+            # Approach 2: Try with codec parameter
+            if not success:
+                try:
+                    import numcodecs
+                    codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    logger.info("Attempting to save with codec parameter...")
+                    stack.to_zarr(store, codec=codec)
+                    logger.info("Successfully saved to S3 with codec parameter.")
+                    success = True
+                except Exception as e:
+                    logger.warning(f"Codec parameter failed: {e}")
+            
+            # Approach 3: Try without compression
+            if not success:
                 try:
                     logger.info("Attempting to save without compression...")
-                    stack.to_zarr(store, codec=None)
+                    stack.to_zarr(store)
                     logger.info("Successfully saved to S3 without compression.")
-                except Exception as no_comp_error:
-                    logger.warning(f"No compression also failed: {no_comp_error}")
-                    # Final fallback: compute and save as numpy arrays
+                    success = True
+                except Exception as e:
+                    logger.warning(f"No compression failed: {e}")
+            
+            # Approach 4: Final fallback - compute and save
+            if not success:
+                try:
                     logger.info("Attempting to save as computed arrays...")
                     computed_stack = stack.compute()
                     zarr.save(store, computed_stack)
                     logger.info("Successfully saved to S3 as computed arrays.")
+                    success = True
+                except Exception as e:
+                    logger.error(f"All S3 saving approaches failed: {e}")
+                    raise
         else:
             logger.info(f"Saving zarr dataset locally: {output_path}")
-            try:
-                # Try using zarr 3.0.8 compatible compression
-                import numcodecs
-                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                logger.info("Attempting to save with zarr 3.0.8 compatible compression...")
-                stack.to_zarr(
-                    output_path,
-                    component='data', # Using 'data' as component for local
-                    codec=codec
-                )
-                logger.info("Successfully saved locally with zarr 3.0.8 compatible compression.")
-            except Exception as comp_error:
-                logger.warning(f"Zarr 3.0.8 compression failed: {comp_error}")
-                # Fallback to no compression
+            
+            # Try different zarr saving approaches
+            success = False
+            
+            # Approach 1: Try with compressor parameter
+            if not success:
+                try:
+                    import numcodecs
+                    compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    logger.info("Attempting to save with compressor parameter...")
+                    stack.to_zarr(
+                        output_path,
+                        component='data', # Using 'data' as component for local
+                        compressor=compressor
+                    )
+                    logger.info("Successfully saved locally with compressor parameter.")
+                    success = True
+                except Exception as e:
+                    logger.warning(f"Compressor parameter failed: {e}")
+            
+            # Approach 2: Try with codec parameter
+            if not success:
+                try:
+                    import numcodecs
+                    codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                    logger.info("Attempting to save with codec parameter...")
+                    stack.to_zarr(
+                        output_path,
+                        component='data',
+                        codec=codec
+                    )
+                    logger.info("Successfully saved locally with codec parameter.")
+                    success = True
+                except Exception as e:
+                    logger.warning(f"Codec parameter failed: {e}")
+            
+            # Approach 3: Try without compression
+            if not success:
                 try:
                     logger.info("Attempting to save without compression...")
                     stack.to_zarr(
                         output_path,
-                        component='data',
-                        codec=None
+                        component='data'
                     )
                     logger.info("Successfully saved locally without compression.")
-                except Exception as no_comp_error:
-                    logger.warning(f"No compression also failed: {no_comp_error}")
-                    # Final fallback: compute and save as numpy arrays
+                    success = True
+                except Exception as e:
+                    logger.warning(f"No compression failed: {e}")
+            
+            # Approach 4: Final fallback - compute and save
+            if not success:
+                try:
                     logger.info("Attempting to save as computed arrays...")
                     computed_stack = stack.compute()
                     zarr.save(output_path, computed_stack)
                     logger.info("Successfully saved locally as computed arrays.")
+                    success = True
+                except Exception as e:
+                    logger.error(f"All local saving approaches failed: {e}")
+                    raise
                 
     except Exception as e:
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
