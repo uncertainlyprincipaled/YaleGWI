@@ -361,6 +361,31 @@ print("AWS_S3_BUCKET:", os.environ.get('AWS_S3_BUCKET', 'NOT SET'))
 results = quick_colab_setup(use_s3=False, mount_drive=True)
 ```
 
+##### Zarr Compression Issues
+If you encounter `module 'zarr' has no attribute 'Blosc'` errors:
+```python
+# The code has been updated to handle this automatically
+# But if you still have issues, try these steps:
+
+# 1. Test the zarr fix
+!python test_zarr_fix.py
+
+# 2. Reinstall zarr if needed
+!pip install --upgrade zarr
+
+# 3. Restart runtime and try again
+# Runtime -> Restart runtime
+
+# 4. Run setup again
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(use_s3=True, mount_drive=True)
+```
+
+The preprocessing pipeline now automatically handles zarr compression issues by:
+- Trying default compression first
+- Falling back to no compression if needed
+- Providing clear error messages and guidance
+
 ---
 
 ### Lambda Labs Environment

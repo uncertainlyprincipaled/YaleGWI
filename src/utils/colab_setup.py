@@ -102,6 +102,10 @@ def setup_colab_environment(
             except subprocess.CalledProcessError as e:
                 print(f"⚠️ Warning: Failed to install {package}: {e}")
     
+    # Check and fix zarr installation
+    print("🔍 Checking zarr installation...")
+    zarr_working = check_and_fix_zarr_installation()
+    
     # Set up environment variables
     os.environ['GWI_ENV'] = 'colab'
     os.environ['DEBUG_MODE'] = '0'
@@ -169,7 +173,8 @@ def setup_colab_environment(
         'requirements_installed': True,
         'cuda_available': cuda_available,
         'gpu_count': gpu_count,
-        'environment': 'colab'
+        'environment': 'colab',
+        'zarr_working': zarr_working
     }
 
 def mount_google_drive() -> bool:
@@ -487,6 +492,17 @@ def run_preprocessing(
             except subprocess.CalledProcessError as e:
                 print(f"⚠️ Failed to save to Google Drive: {e}")
         
+    except AttributeError as e:
+        if "module 'zarr' has no attribute 'Blosc'" in str(e):
+            print("❌ Zarr compression issue detected!")
+            print("💡 This is a known issue with zarr version compatibility.")
+            print("🔄 The code has been updated to handle this automatically.")
+            print("💡 Please try running the setup again - it should work now.")
+            result['error'] = f"Zarr compression issue (fixed): {str(e)}"
+        else:
+            result['error'] = str(e)
+            print(f"❌ Attribute error during preprocessing: {e}")
+        raise
     except Exception as e:
         result['error'] = str(e)
         print(f"❌ Preprocessing failed: {e}")
@@ -901,6 +917,7 @@ def complete_colab_setup(
     print("\n📋 Setup Summary:")
     print(f"  Environment: {'✅' if results['environment']['repo_cloned'] else '❌'}")
     print(f"  CUDA: {'✅' if results['environment']['cuda_available'] else '❌'}")
+    print(f"  Zarr: {'✅' if results['environment'].get('zarr_working', False) else '❌'}")
     if setup_aws:
         aws_status = results.get('aws_credentials', 'none')
         print(f"  AWS Credentials: {'✅' if aws_status != 'none' else '❌'} ({aws_status})")
@@ -933,6 +950,18 @@ def complete_colab_setup(
         print(f"  Integration Tests: {'✅' if tests.get('integration_tests', False) else '❌'}")
         print(f"  Data Loading Tests: {'✅' if tests.get('data_loading_tests', False) else '❌'}")
         print(f"  Cross-Validation Tests: {'✅' if tests.get('cv_tests', False) else '❌'}")
+
+    # Zarr-specific guidance
+    if not results['environment'].get('zarr_working', False):
+        print("\n" + "="*50)
+        print("⚠️ Zarr Issues Detected")
+        print("="*50)
+        print("Zarr is required for data preprocessing. Common solutions:")
+        print("1. Restart the runtime and try again")
+        print("2. Install zarr manually: !pip install zarr")
+        print("3. Check for version conflicts: !pip list | grep zarr")
+        print("4. Try upgrading zarr: !pip install --upgrade zarr")
+        print("="*50)
 
     # Detailed Preprocessing Feedback
     if 'preprocessing' in results and results['preprocessing'].get('feedback'):
@@ -1210,6 +1239,51 @@ def check_and_fix_cuda_setup() -> bool:
     except ImportError:
         print("❌ PyTorch not installed")
         return False
+
+def check_and_fix_zarr_installation() -> bool:
+    """
+    Check zarr installation and fix common issues.
+    
+    Returns:
+        bool: True if zarr is working properly
+    """
+    print("🔍 Checking zarr installation...")
+    
+    try:
+        import zarr
+        print(f"✅ Zarr version: {zarr.__version__}")
+        
+        # Test basic zarr functionality
+        try:
+            # Test creating a simple array
+            test_array = zarr.create((10, 10), dtype='float32')
+            test_array[:] = 1.0
+            print("✅ Basic zarr functionality working")
+            
+            # Test compression (without Blosc)
+            try:
+                test_compressed = zarr.create((10, 10), dtype='float32', compressor=None)
+                test_compressed[:] = 1.0
+                print("✅ Zarr compression (none) working")
+                return True
+            except Exception as comp_error:
+                print(f"⚠️ Zarr compression test failed: {comp_error}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Basic zarr functionality failed: {e}")
+            return False
+            
+    except ImportError:
+        print("❌ Zarr not installed")
+        print("💡 Installing zarr...")
+        try:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 'zarr'], check=True)
+            print("✅ Zarr installed successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to install zarr: {e}")
+            return False
 
 if __name__ == "__main__":
     # Example usage

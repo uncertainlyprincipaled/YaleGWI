@@ -827,17 +827,37 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             logger.info(f"Saving zarr dataset directly to S3: {s3_path}")
             fs = s3fs.S3FileSystem()
             store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
-            stack.to_zarr(store, compressor=zarr.Blosc(cname='zstd', clevel=3), chunks=adjusted_chunk_size)
-            logger.info("Successfully saved to S3.")
+            
+            # Use compatible compression - try different approaches
+            try:
+                # Try using zarr's default compression
+                stack.to_zarr(store, chunks=adjusted_chunk_size)
+                logger.info("Successfully saved to S3 with default compression.")
+            except Exception as comp_error:
+                logger.warning(f"Default compression failed: {comp_error}")
+                # Fallback to no compression
+                stack.to_zarr(store, chunks=adjusted_chunk_size, compressor=None)
+                logger.info("Successfully saved to S3 without compression.")
         else:
             logger.info(f"Saving zarr dataset locally: {output_path}")
-            stack.to_zarr(
-                output_path,
-                component='data', # Using 'data' as component for local
-                compressor=zarr.Blosc(cname='zstd', clevel=3),
-                chunks=adjusted_chunk_size
-            )
-            logger.info("Successfully saved locally.")
+            try:
+                # Try using zarr's default compression
+                stack.to_zarr(
+                    output_path,
+                    component='data', # Using 'data' as component for local
+                    chunks=adjusted_chunk_size
+                )
+                logger.info("Successfully saved locally with default compression.")
+            except Exception as comp_error:
+                logger.warning(f"Default compression failed: {comp_error}")
+                # Fallback to no compression
+                stack.to_zarr(
+                    output_path,
+                    component='data',
+                    chunks=adjusted_chunk_size,
+                    compressor=None
+                )
+                logger.info("Successfully saved locally without compression.")
                 
     except Exception as e:
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
