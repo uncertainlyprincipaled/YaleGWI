@@ -774,18 +774,7 @@ def run_tests_and_validation() -> Dict[str, Any]:
                 except Exception as e:
                     print(f"  ⚠️ Compressor parameter failed: {e}")
             
-            # Approach 2: Try with codec parameter
-            if not success:
-                try:
-                    import numcodecs
-                    codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                    stack.to_zarr(str(output_path), codec=codec)
-                    print("  ✅ 5D data saved with codec parameter")
-                    success = True
-                except Exception as e:
-                    print(f"  ⚠️ Codec parameter failed: {e}")
-            
-            # Approach 3: Try without compression
+            # Approach 2: Try without compression
             if not success:
                 try:
                     stack.to_zarr(str(output_path))
@@ -794,7 +783,7 @@ def run_tests_and_validation() -> Dict[str, Any]:
                 except Exception as e:
                     print(f"  ⚠️ No compression failed: {e}")
             
-            # Approach 4: Final fallback - compute and save
+            # Approach 3: Final fallback - compute and save
             if not success:
                 try:
                     computed_stack = stack.compute()
@@ -1378,7 +1367,7 @@ def check_and_fix_zarr_installation() -> bool:
                 import numcodecs
                 # For zarr 3.0.8, try different approaches
                 try:
-                    # Try with compressor parameter (older API)
+                    # Try with compressor parameter (correct API)
                     compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
                     test_compressed = zarr.create((10, 10), dtype='float32', compressor=compressor)
                     test_compressed[:] = 1.0
@@ -1386,20 +1375,11 @@ def check_and_fix_zarr_installation() -> bool:
                     return True
                 except Exception as e1:
                     print(f"⚠️ Compressor parameter failed: {e1}")
-                    # Try with codec parameter (newer API)
-                    try:
-                        codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                        test_compressed = zarr.create((10, 10), dtype='float32', codec=codec)
-                        test_compressed[:] = 1.0
-                        print("✅ Zarr compression working with codec parameter")
-                        return True
-                    except Exception as e2:
-                        print(f"⚠️ Codec parameter failed: {e2}")
-                        # Try without any compression
-                        test_compressed = zarr.create((10, 10), dtype='float32')
-                        test_compressed[:] = 1.0
-                        print("✅ Zarr compression (none) working")
-                        return True
+                    # Try without any compression (fallback)
+                    test_compressed = zarr.create((10, 10), dtype='float32')
+                    test_compressed[:] = 1.0
+                    print("✅ Zarr compression (none) working")
+                    return True
             except ImportError:
                 print("⚠️ numcodecs not available, testing without compression")
                 test_compressed = zarr.create((10, 10), dtype='float32')
