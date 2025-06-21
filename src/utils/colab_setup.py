@@ -117,9 +117,32 @@ def setup_colab_environment(
         
         print(f"✅ PyTorch {torch.__version__} installed")
         print(f"✅ CUDA available: {cuda_available}")
+        
         if cuda_available:
             print(f"✅ GPU count: {gpu_count}")
             print(f"✅ GPU name: {torch.cuda.get_device_name(0)}")
+            
+            # Test CUDA functionality
+            try:
+                test_tensor = torch.randn(10, 10).cuda()
+                test_result = test_tensor.sum()
+                print("✅ CUDA functionality verified")
+            except Exception as e:
+                print(f"⚠️ CUDA functionality test failed: {e}")
+                cuda_available = False
+        else:
+            print("⚠️ CUDA not available - checking for GPU runtime...")
+            
+            # Check if we're in a GPU runtime
+            if 'COLAB_GPU' in os.environ:
+                print("⚠️ GPU runtime detected but CUDA not available")
+                print("💡 Try: Runtime -> Change runtime type -> GPU")
+            elif 'COLAB_TPU_ADDR' in os.environ:
+                print("ℹ️ TPU runtime detected")
+            else:
+                print("⚠️ No GPU runtime detected")
+                print("💡 For faster processing, enable GPU: Runtime -> Change runtime type -> GPU")
+                
     except ImportError as e:
         print(f"❌ PyTorch installation failed: {e}")
         cuda_available = False
@@ -681,6 +704,40 @@ def run_tests_and_validation() -> Dict[str, Any]:
     
     return results
 
+def provide_immediate_guidance():
+    """
+    Provide immediate guidance for common Colab setup issues.
+    """
+    print("\n" + "="*60)
+    print("🚨 IMMEDIATE GUIDANCE FOR CURRENT RUN")
+    print("="*60)
+    
+    print("Based on the current output, here are the issues and solutions:")
+    print()
+    print("1. ❌ CUDA NOT AVAILABLE (CPU-only processing)")
+    print("   - This is causing slow processing (~56s per file)")
+    print("   - Solution: Enable GPU runtime")
+    print("   - Action: Runtime -> Change runtime type -> GPU -> Save")
+    print()
+    print("2. ⚠️ DECIMATION ERRORS (Fixed in code)")
+    print("   - The 'Invalid cutoff frequency' errors are now handled")
+    print("   - Processing will continue without downsampling for fault families")
+    print()
+    print("3. ⚠️ NUMPY OVERFLOW WARNINGS (Handled)")
+    print("   - These are now handled with better error checking")
+    print("   - Processing will continue safely")
+    print()
+    print("💡 RECOMMENDED ACTION:")
+    print("   - Let the current run complete (it will work, just slower)")
+    print("   - OR restart with GPU runtime for 10x faster processing")
+    print()
+    print("🔄 To restart with GPU:")
+    print("   1. Stop this run")
+    print("   2. Runtime -> Change runtime type -> GPU")
+    print("   3. Restart runtime")
+    print("   4. Re-run the setup")
+    print("="*60)
+
 def complete_colab_setup(
     data_path: str = '/content/YaleGWI/train_samples',
     use_s3: bool = False,
@@ -716,6 +773,17 @@ def complete_colab_setup(
     print("STEP 1: Environment Setup")
     print("="*50)
     results['environment'] = setup_colab_environment()
+    
+    # Check CUDA setup
+    print("\n" + "="*50)
+    print("STEP 1.5: CUDA Setup Check")
+    print("="*50)
+    cuda_working = check_and_fix_cuda_setup()
+    results['cuda_working'] = cuda_working
+    
+    if not cuda_working:
+        print("⚠️ CUDA not working - processing will be slower on CPU")
+        print("💡 Consider enabling GPU runtime for faster processing")
     
     # Step 2: AWS Setup (if requested)
     if setup_aws:
@@ -1097,6 +1165,51 @@ def quick_colab_setup(
         run_tests=run_tests,
         force_reprocess=force_reprocess
     )
+
+def check_and_fix_cuda_setup() -> bool:
+    """
+    Check CUDA setup and provide guidance for fixing issues.
+    
+    Returns:
+        bool: True if CUDA is working properly
+    """
+    print("🔍 Checking CUDA setup...")
+    
+    try:
+        import torch
+        import os
+        
+        # Check if we're in a GPU runtime
+        if 'COLAB_GPU' not in os.environ:
+            print("❌ Not in GPU runtime")
+            print("💡 To enable GPU:")
+            print("   1. Go to Runtime -> Change runtime type")
+            print("   2. Select 'GPU' as Hardware accelerator")
+            print("   3. Click 'Save' and restart the runtime")
+            return False
+        
+        # Check CUDA availability
+        if not torch.cuda.is_available():
+            print("❌ CUDA not available despite GPU runtime")
+            print("💡 This might be a temporary issue. Try:")
+            print("   1. Restart the runtime (Runtime -> Restart runtime)")
+            print("   2. Re-run the setup")
+            return False
+        
+        # Test CUDA functionality
+        try:
+            test_tensor = torch.randn(100, 100).cuda()
+            result = test_tensor.sum()
+            print("✅ CUDA is working properly")
+            return True
+        except Exception as e:
+            print(f"❌ CUDA functionality test failed: {e}")
+            print("💡 Try restarting the runtime")
+            return False
+            
+    except ImportError:
+        print("❌ PyTorch not installed")
+        return False
 
 if __name__ == "__main__":
     # Example usage

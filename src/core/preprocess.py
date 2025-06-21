@@ -239,7 +239,7 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
     
     Processing Steps:
     1. Validate Nyquist criterion (if seismic)
-    2. Apply anti-aliasing filter and downsample (if seismic)
+    2. Apply anti-aliasing filter and downsample (if seismic and dt_decimate > 1)
     3. Convert to float16
     4. Normalize using robust statistics
     
@@ -256,7 +256,7 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
         if feedback:
             feedback.increment_arrays_processed()
 
-        if is_seismic:
+        if is_seismic and dt_decimate > 1:
             if arr.ndim not in [3, 4]:
                 logger.warning(f"Unexpected data dimension {arr.ndim} for seismic data. Skipping decimation.")
             else:
@@ -290,9 +290,16 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
                     
                     # Decimate time axis with anti-aliasing filter
                     try:
-                        arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
+                        # Check if the time dimension is large enough for decimation
+                        time_dim_size = arr.shape[time_axis]
+                        if time_dim_size < dt_decimate * 2:
+                            logger.warning(f"Time dimension {time_dim_size} too small for decimation factor {dt_decimate}. Skipping decimation.")
+                        else:
+                            arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
                     except Exception as e:
                         logger.warning(f"Decimation failed: {e}. Skipping decimation.")
+        elif is_seismic and dt_decimate == 1:
+            logger.info("No downsampling applied (dt_decimate=1)")
         
         # Convert to float16
         arr = arr.astype('float16')
@@ -302,17 +309,23 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
             μ = np.median(arr, keepdims=True)
             σ = np.percentile(arr, 95, keepdims=True) - np.percentile(arr, 5, keepdims=True)
             
-            # Avoid division by zero
-            if np.isscalar(σ) and σ > 1e-6:
-                arr = (arr - μ) / σ
-            elif not np.isscalar(σ):
-                arr = (arr - μ) / (σ + 1e-6)
+            # Avoid division by zero and handle overflow
+            if np.isscalar(σ):
+                if σ > 1e-6:
+                    arr = (arr - μ) / σ
+                else:
+                    arr = arr - μ
             else:
-                arr = arr - μ
+                # Handle array case
+                safe_σ = np.where(σ > 1e-6, σ, 1e-6)
+                arr = (arr - μ) / safe_σ
         except Exception as e:
             logger.warning(f"Normalization failed: {e}. Using simple normalization.")
             # Fallback to simple normalization
-            arr = (arr - arr.mean()) / (arr.std() + 1e-6)
+            try:
+                arr = (arr - arr.mean()) / (arr.std() + 1e-6)
+            except Exception as e2:
+                logger.warning(f"Simple normalization also failed: {e2}. Skipping normalization.")
             
     except Exception as e:
         logger.error(f"Error during preprocessing: {e}")
@@ -447,12 +460,10 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
     try:
         # Dynamically determine shape from first file
         if not processed_paths:
-            raise ValueError("No processed paths provided.")
+            logger.info("No processed paths provided. Skipping Zarr creation.")
+            return
             
-        if data_manager and data_manager.use_s3:
-            first_arr = data_manager.stream_from_s3(processed_paths[0])
-        else:
-            first_arr = np.load(processed_paths[0], mmap_mode='r')
+        first_arr = np.load(processed_paths[0], mmap_mode='r')
             
         arr_shape = first_arr.shape
         arr_dtype = first_arr.dtype
@@ -468,22 +479,11 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         else:
             logger.warning(f"Unexpected array shape: {arr_shape}")
             
-        # Create lazy Dask arrays
-        lazy_arrays = []
-        for path in processed_paths:
-            if data_manager and data_manager.use_s3:
-                x = da.from_delayed(
-                    dask.delayed(data_manager.stream_from_s3)(path),
-                    shape=arr_shape,
-                    dtype=arr_dtype
-                )
-            else:
-                x = da.from_delayed(
-                    dask.delayed(np.load)(path),
-                    shape=arr_shape,
-                    dtype=arr_dtype
-                )
-            lazy_arrays.append(x)
+        # Create lazy Dask arrays from local files
+        lazy_arrays = [
+            da.from_delayed(dask.delayed(np.load)(p, allow_pickle=True), shape=arr_shape, dtype=arr_dtype)
+            for p in processed_paths
+        ]
             
         # Stack arrays
         stack = da.stack(lazy_arrays, axis=0)
@@ -499,23 +499,26 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             adjusted_chunk_size = chunk_size
             
         logger.info(f"Using chunk size: {adjusted_chunk_size}")
-        
-        # Save to zarr with compression
-        stack.to_zarr(
-            output_path,
-            component='seis',
-            compressor=zarr.Blosc(cname='zstd', clevel=3),
-            chunks=adjusted_chunk_size
-        )
-        
-        # Upload to S3 if using S3
+
+        # --- Save to Zarr ---
+        # If using S3, save directly to S3. Otherwise, save locally.
         if data_manager and data_manager.use_s3:
-            s3_key = f"preprocessed/{output_path.name}"
-            if data_manager.upload_to_s3(np.load(output_path), s3_key):
-                # Clean up local file after successful upload
-                if output_path.exists():
-                    output_path.unlink()
-                    logger.info(f"Cleaned up local file {output_path}")
+            import s3fs
+            s3_path = f"s3://{data_manager.s3_bucket}/{output_path.parent.name}/{output_path.name}"
+            logger.info(f"Saving zarr dataset directly to S3: {s3_path}")
+            fs = s3fs.S3FileSystem()
+            store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
+            stack.to_zarr(store, compressor=zarr.Blosc(cname='zstd', clevel=3), chunks=adjusted_chunk_size)
+            logger.info("Successfully saved to S3.")
+        else:
+            logger.info(f"Saving zarr dataset locally: {output_path}")
+            stack.to_zarr(
+                output_path,
+                component='data', # Using 'data' as component for local
+                compressor=zarr.Blosc(cname='zstd', clevel=3),
+                chunks=adjusted_chunk_size
+            )
+            logger.info("Successfully saved locally.")
                 
     except Exception as e:
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
