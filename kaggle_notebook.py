@@ -856,16 +856,16 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             try:
                 # Try using zarr 3.0.8 compatible compression
                 import numcodecs
-                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
                 logger.info("Attempting to save with zarr 3.0.8 compatible compression...")
-                stack.to_zarr(store, compressor=compressor)
+                stack.to_zarr(store, codec=codec)
                 logger.info("Successfully saved to S3 with zarr 3.0.8 compatible compression.")
             except Exception as comp_error:
                 logger.warning(f"Zarr 3.0.8 compression failed: {comp_error}")
                 # Fallback to no compression
                 try:
                     logger.info("Attempting to save without compression...")
-                    stack.to_zarr(store, compressor=None)
+                    stack.to_zarr(store, codec=None)
                     logger.info("Successfully saved to S3 without compression.")
                 except Exception as no_comp_error:
                     logger.warning(f"No compression also failed: {no_comp_error}")
@@ -879,12 +879,12 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             try:
                 # Try using zarr 3.0.8 compatible compression
                 import numcodecs
-                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
                 logger.info("Attempting to save with zarr 3.0.8 compatible compression...")
                 stack.to_zarr(
                     output_path,
                     component='data', # Using 'data' as component for local
-                    compressor=compressor
+                    codec=codec
                 )
                 logger.info("Successfully saved locally with zarr 3.0.8 compatible compression.")
             except Exception as comp_error:
@@ -895,7 +895,7 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
                     stack.to_zarr(
                         output_path,
                         component='data',
-                        compressor=None
+                        codec=None
                     )
                     logger.info("Successfully saved locally without compression.")
                 except Exception as no_comp_error:

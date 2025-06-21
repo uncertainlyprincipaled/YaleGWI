@@ -763,13 +763,13 @@ def run_tests_and_validation() -> Dict[str, Any]:
             try:
                 # Try with zarr 3.0.8 compatible compression first
                 import numcodecs
-                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                stack.to_zarr(str(output_path), compressor=compressor)
+                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                stack.to_zarr(str(output_path), codec=codec)
                 print("  ✅ 5D data saved with zarr 3.0.8 compression")
             except Exception as comp_error:
                 print(f"  ⚠️ Zarr 3.0.8 compression failed: {comp_error}")
                 # Fallback to no compression
-                stack.to_zarr(str(output_path), compressor=None)
+                stack.to_zarr(str(output_path), codec=None)
                 print("  ✅ 5D data saved without compression")
             
             # Verify data
@@ -1343,14 +1343,14 @@ def check_and_fix_zarr_installation() -> bool:
             # Test compression with zarr 3.0.8 compatibility
             try:
                 import numcodecs
-                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                test_compressed = zarr.create((10, 10), dtype='float32', compressor=compressor)
+                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                test_compressed = zarr.create((10, 10), dtype='float32', codec=codec)
                 test_compressed[:] = 1.0
                 print("✅ Zarr 3.0.8 compatible compression working")
                 return True
             except ImportError:
                 print("⚠️ numcodecs not available, testing without compression")
-                test_compressed = zarr.create((10, 10), dtype='float32', compressor=None)
+                test_compressed = zarr.create((10, 10), dtype='float32', codec=None)
                 test_compressed[:] = 1.0
                 print("✅ Zarr compression (none) working")
                 return True
@@ -1358,7 +1358,7 @@ def check_and_fix_zarr_installation() -> bool:
                 print(f"⚠️ Zarr 3.0.8 compression test failed: {comp_error}")
                 # Fallback to no compression
                 try:
-                    test_compressed = zarr.create((10, 10), dtype='float32', compressor=None)
+                    test_compressed = zarr.create((10, 10), dtype='float32', codec=None)
                     test_compressed[:] = 1.0
                     print("✅ Zarr compression (none) working as fallback")
                     return True

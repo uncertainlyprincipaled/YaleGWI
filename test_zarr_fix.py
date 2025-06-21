@@ -33,8 +33,8 @@ def test_zarr_compression():
             try:
                 # Try with bytes-to-bytes codec (zarr 3.0.8 compatible)
                 import numcodecs
-                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                dask_array.to_zarr(str(output_path), compressor=compressor)
+                codec = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
+                dask_array.to_zarr(str(output_path), codec=codec)
                 print("✅ Zarr 3.0.8 compatible compression works")
                 
                 # Verify data
@@ -47,7 +47,7 @@ def test_zarr_compression():
                 print(f"⚠️ Zarr 3.0.8 compression failed: {e}")
                 
                 # Try without compression (fallback)
-                dask_array.to_zarr(str(output_path), compressor=None)
+                dask_array.to_zarr(str(output_path), codec=None)
                 print("✅ No compression works")
                 
                 # Verify data
@@ -121,7 +121,7 @@ def test_5d_dimension_handling():
             
             try:
                 # Try saving with no compression (most compatible)
-                stack.to_zarr(str(output_path), compressor=None)
+                stack.to_zarr(str(output_path), codec=None)
                 print("✅ 5D data saved to zarr successfully")
                 
                 # Verify data
