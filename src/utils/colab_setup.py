@@ -1491,26 +1491,53 @@ def check_and_fix_s3fs_installation() -> bool:
             print("⚠️ S3fs version is old and may cause compatibility issues")
             print("💡 Updating s3fs to latest version...")
             try:
-                subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 's3fs'], check=True)
+                # Force reinstall s3fs to latest version
+                subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0'], check=True)
                 print("✅ S3fs updated successfully")
+                
                 # Reload s3fs to get new version
                 import importlib
                 importlib.reload(s3fs)
                 print(f"✅ New s3fs version: {s3fs.__version__}")
-                return True
+                
+                # Test that the fix worked
+                try:
+                    fs = s3fs.S3FileSystem(anon=True)
+                    print("✅ S3fs functionality verified after update")
+                    return True
+                except Exception as e:
+                    if "asynchronous" in str(e):
+                        print(f"❌ S3fs still has 'asynchronous' issue after update: {e}")
+                        return False
+                    else:
+                        print(f"✅ S3fs working (different error: {e})")
+                        return True
+                        
             except subprocess.CalledProcessError as e:
                 print(f"❌ Failed to update s3fs: {e}")
                 print("⚠️ Continuing with old version - S3 operations may fail")
                 return False
         else:
             print("✅ S3fs version is recent and should work properly")
-            return True
+            # Test functionality
+            try:
+                fs = s3fs.S3FileSystem(anon=True)
+                print("✅ S3fs functionality verified")
+                return True
+            except Exception as e:
+                if "asynchronous" in str(e):
+                    print(f"❌ S3fs has 'asynchronous' issue despite recent version: {e}")
+                    return False
+                else:
+                    print(f"✅ S3fs working (different error: {e})")
+                    return True
             
     except ImportError:
         print("❌ S3fs not installed")
         print("💡 Installing s3fs...")
         try:
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs'], check=True)
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0'], check=True)
             print("✅ S3fs installed successfully")
             return True
         except subprocess.CalledProcessError as e:

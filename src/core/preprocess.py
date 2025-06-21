@@ -443,147 +443,203 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
 
 def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_size: Tuple[int, ...], data_manager: Optional[DataManager] = None) -> None:
     """
-    Create a zarr dataset from processed files and optionally upload to S3.
-    
-    Intuition:
-    - Lazy Loading: Use Dask for out-of-memory computations
-    - Chunked Storage: Enable parallel access and efficient compression
-    - Cloud Storage: Optional S3 upload for distributed access
-    - Memory Management: Clean up local files after successful upload
+    Create a zarr dataset from processed numpy files with proper shape handling.
     
     Args:
-        processed_paths: List of paths to processed files
-        output_path: Path to save zarr dataset
-        chunk_size: Chunk size for zarr array
+        processed_paths: List of paths to processed numpy files
+        output_path: Path where to save the zarr dataset
+        chunk_size: Chunk size for the zarr dataset
         data_manager: Optional DataManager for S3 operations
     """
     try:
-        # Dynamically determine shape from first file
         if not processed_paths:
             logger.info("No processed paths provided. Skipping Zarr creation.")
             return
             
-        first_arr = np.load(processed_paths[0], mmap_mode='r')
-        arr_shape = first_arr.shape
-        arr_dtype = first_arr.dtype
+        # Separate seismic and velocity files
+        seismic_paths = []
+        velocity_paths = []
         
-        # Log the actual shape for debugging
-        logger.info(f"Creating zarr dataset with shape: {arr_shape}, dtype: {arr_dtype}")
-        logger.info(f"Number of processed paths: {len(processed_paths)}")
-        
-        # More flexible shape validation - just log warnings instead of raising errors
-        if len(arr_shape) == 4:  # Seismic data
-            logger.info(f"Processing 4D seismic data with shape: {arr_shape}")
-        elif len(arr_shape) == 3:  # Single sample seismic data
-            logger.info(f"Processing 3D seismic data with shape: {arr_shape}")
-        else:
-            logger.warning(f"Unexpected array shape: {arr_shape}")
-            
-        # Create lazy Dask arrays from local files
-        lazy_arrays = []
-        valid_paths = 0
-        for p in processed_paths:
-            try:
-                # Load and check shape of each file
-                arr = np.load(p, mmap_mode='r')
-                if arr.shape != arr_shape:
-                    logger.warning(f"Shape mismatch in {p}: expected {arr_shape}, got {arr.shape}")
-                    # Skip files with wrong shape to avoid stacking errors
-                    continue
-                lazy_arrays.append(
-                    da.from_delayed(dask.delayed(np.load)(p, allow_pickle=True), shape=arr_shape, dtype=arr_dtype)
-                )
-                valid_paths += 1
-            except Exception as e:
-                logger.warning(f"Failed to load {p}: {e}")
-                continue
-        
-        logger.info(f"Valid arrays found: {valid_paths}/{len(processed_paths)}")
-        
-        if not lazy_arrays:
-            logger.error("No valid arrays found to stack")
-            return
-            
-        # Stack arrays
-        stack = da.stack(lazy_arrays, axis=0)
-        
-        # Get the actual shape after stacking
-        stack_shape = stack.shape
-        logger.info(f"Stack shape after stacking: {stack_shape}")
-        
-        # Adjust chunk size based on actual data shape and rechunk the array
-        if len(stack_shape) == 5:
-            # For 5D data (batch, samples, sources, time, receivers)
-            # Use appropriate chunks for each dimension
-            adjusted_chunk_size = (
-                1,  # batch dimension - keep small for memory efficiency
-                min(4, stack_shape[1]),  # samples dimension
-                min(4, stack_shape[2]),  # sources dimension  
-                min(64, stack_shape[3]),  # time dimension
-                min(8, stack_shape[4])   # receivers dimension
-            )
-        elif len(stack_shape) == 4:
-            # For 4D data, use smaller chunks
-            adjusted_chunk_size = (1, min(4, stack_shape[1]), min(64, stack_shape[2]), min(8, stack_shape[3]))
-        elif len(stack_shape) == 3:
-            # For 3D data, use appropriate chunks
-            adjusted_chunk_size = (1, min(64, stack_shape[0]), min(8, stack_shape[1]))
-        else:
-            # For other dimensions, try to use the provided chunk_size
-            # but ensure it matches the number of dimensions
-            if len(chunk_size) == len(stack_shape):
-                adjusted_chunk_size = chunk_size
+        for path in processed_paths:
+            if 'seis_' in Path(path).name:
+                seismic_paths.append(path)
+            elif 'vel_' in Path(path).name:
+                velocity_paths.append(path)
             else:
-                # Create a default chunk size that matches the dimensions
-                adjusted_chunk_size = tuple(1 for _ in range(len(stack_shape)))
-                logger.warning(f"Using default chunk size {adjusted_chunk_size} for unexpected shape {stack_shape}")
+                logger.warning(f"Unknown file type: {path}")
+        
+        logger.info(f"Found {len(seismic_paths)} seismic files and {len(velocity_paths)} velocity files")
+        
+        # Process seismic data if available
+        if seismic_paths:
+            first_seismic = np.load(seismic_paths[0], mmap_mode='r')
+            seismic_shape = first_seismic.shape
+            seismic_dtype = first_seismic.dtype
             
-        # Rechunk the array to the desired chunk size
-        stack = stack.rechunk(adjusted_chunk_size)
-        logger.info(f"Using chunk size: {adjusted_chunk_size}")
-        logger.info(f"Stack shape: {stack.shape}, chunks: {stack.chunks}")
-
-        # --- Save to Zarr ---
-        # If using S3, save directly to S3. Otherwise, save locally.
-        if data_manager and data_manager.use_s3:
-            import s3fs
-            s3_path = f"s3://{data_manager.s3_bucket}/{output_path.parent.name}/{output_path.name}"
-            logger.info(f"Saving zarr dataset directly to S3: {s3_path}")
+            logger.info(f"Processing seismic data with shape: {seismic_shape}, dtype: {seismic_dtype}")
             
-            # Use fsspec-based approach for zarr 3.0.8
-            try:
-                logger.info("Saving to S3 without compression...")
-                stack.to_zarr(s3_path)
-                logger.info("Successfully saved to S3 without compression.")
-            except Exception as e:
-                logger.warning(f"S3 save failed: {e}")
-                # Final fallback - compute and save
-                logger.info("Attempting to save as computed arrays...")
-                computed_stack = stack.compute()
-                zarr.save(s3_path, computed_stack)
-                logger.info("Successfully saved to S3 as computed arrays.")
-        else:
-            logger.info(f"Saving zarr dataset locally: {output_path}")
+            # Create lazy Dask arrays for seismic data
+            seismic_arrays = []
+            valid_seismic = 0
+            for p in seismic_paths:
+                try:
+                    arr = np.load(p, mmap_mode='r')
+                    if arr.shape != seismic_shape:
+                        logger.warning(f"Seismic shape mismatch in {p}: expected {seismic_shape}, got {arr.shape}")
+                        continue
+                    seismic_arrays.append(
+                        da.from_delayed(dask.delayed(np.load)(p, allow_pickle=True), shape=seismic_shape, dtype=seismic_dtype)
+                    )
+                    valid_seismic += 1
+                except Exception as e:
+                    logger.warning(f"Failed to load seismic file {p}: {e}")
+                    continue
             
-            # Save without compression
-            try:
-                logger.info("Saving locally without compression...")
-                stack.to_zarr(
-                    output_path,
-                    component='data' # Using 'data' as component for local
-                )
-                logger.info("Successfully saved locally without compression.")
-            except Exception as e:
-                logger.warning(f"Local save failed: {e}")
-                # Final fallback - compute and save
-                logger.info("Attempting to save as computed arrays...")
-                computed_stack = stack.compute()
-                zarr.save(output_path, computed_stack)
-                logger.info("Successfully saved locally as computed arrays.")
+            logger.info(f"Valid seismic arrays: {valid_seismic}/{len(seismic_paths)}")
+            
+            if seismic_arrays:
+                # Stack seismic arrays
+                seismic_stack = da.stack(seismic_arrays, axis=0)
+                logger.info(f"Seismic stack shape: {seismic_stack.shape}")
+                
+                # Save seismic data
+                seismic_output = output_path.parent / f"{output_path.name}_seismic"
+                save_zarr_data(seismic_stack, seismic_output, data_manager)
+        
+        # Process velocity data if available
+        if velocity_paths:
+            first_velocity = np.load(velocity_paths[0], mmap_mode='r')
+            velocity_shape = first_velocity.shape
+            velocity_dtype = first_velocity.dtype
+            
+            logger.info(f"Processing velocity data with shape: {velocity_shape}, dtype: {velocity_dtype}")
+            
+            # Create lazy Dask arrays for velocity data
+            velocity_arrays = []
+            valid_velocity = 0
+            for p in velocity_paths:
+                try:
+                    arr = np.load(p, mmap_mode='r')
+                    if arr.shape != velocity_shape:
+                        logger.warning(f"Velocity shape mismatch in {p}: expected {velocity_shape}, got {arr.shape}")
+                        continue
+                    velocity_arrays.append(
+                        da.from_delayed(dask.delayed(np.load)(p, allow_pickle=True), shape=velocity_shape, dtype=velocity_dtype)
+                    )
+                    valid_velocity += 1
+                except Exception as e:
+                    logger.warning(f"Failed to load velocity file {p}: {e}")
+                    continue
+            
+            logger.info(f"Valid velocity arrays: {valid_velocity}/{len(velocity_paths)}")
+            
+            if velocity_arrays:
+                # Stack velocity arrays
+                velocity_stack = da.stack(velocity_arrays, axis=0)
+                logger.info(f"Velocity stack shape: {velocity_stack.shape}")
+                
+                # Save velocity data
+                velocity_output = output_path.parent / f"{output_path.name}_velocity"
+                save_zarr_data(velocity_stack, velocity_output, data_manager)
+        
+        if not seismic_arrays and not velocity_arrays:
+            logger.error("No valid arrays found to save")
+            return
                 
     except Exception as e:
         logger.error(f"Error creating/uploading zarr dataset: {str(e)}")
         raise
+
+def save_zarr_data(stack, output_path, data_manager):
+    """
+    Save stacked data to zarr format with proper chunking and S3/local saving.
+    
+    Args:
+        stack: Dask array to save
+        output_path: Path to save the data
+        data_manager: DataManager instance for S3 operations
+    """
+    # Get the actual shape after stacking
+    stack_shape = stack.shape
+    logger.info(f"Stack shape after stacking: {stack_shape}")
+    
+    # Adjust chunk size based on actual data shape and rechunk the array
+    if len(stack_shape) == 5:
+        # For 5D data (batch, samples, sources, time, receivers)
+        # Use appropriate chunks for each dimension
+        adjusted_chunk_size = (
+            1,  # batch dimension - keep small for memory efficiency
+            min(4, stack_shape[1]),  # samples dimension
+            min(4, stack_shape[2]),  # sources dimension  
+            min(64, stack_shape[3]),  # time dimension
+            min(8, stack_shape[4])   # receivers dimension
+        )
+    elif len(stack_shape) == 4:
+        # For 4D data, use smaller chunks
+        adjusted_chunk_size = (1, min(4, stack_shape[1]), min(64, stack_shape[2]), min(8, stack_shape[3]))
+    elif len(stack_shape) == 3:
+        # For 3D data, use appropriate chunks
+        adjusted_chunk_size = (1, min(64, stack_shape[0]), min(8, stack_shape[1]))
+    else:
+        # For other dimensions, create a default chunk size that matches the dimensions
+        adjusted_chunk_size = tuple(1 for _ in range(len(stack_shape)))
+        logger.warning(f"Using default chunk size {adjusted_chunk_size} for unexpected shape {stack_shape}")
+        
+    # Rechunk the array to the desired chunk size
+    stack = stack.rechunk(adjusted_chunk_size)
+    logger.info(f"Using chunk size: {adjusted_chunk_size}")
+    logger.info(f"Stack shape: {stack.shape}, chunks: {stack.chunks}")
+
+    # --- Save to Zarr ---
+    # If using S3, save directly to S3. Otherwise, save locally.
+    if data_manager and data_manager.use_s3:
+        import s3fs
+        s3_path = f"s3://{data_manager.s3_bucket}/{output_path.parent.name}/{output_path.name}"
+        logger.info(f"Saving zarr dataset directly to S3: {s3_path}")
+        
+        # Use fsspec-based approach for zarr 3.0.8 with old s3fs compatibility
+        try:
+            logger.info("Saving to S3 without compression...")
+            # Use direct fsspec URL instead of s3fs.S3Map for better compatibility
+            stack.to_zarr(s3_path)
+            logger.info("Successfully saved to S3 without compression.")
+        except Exception as e:
+            logger.warning(f"S3 save failed: {e}")
+            # Try alternative approach for old s3fs versions
+            try:
+                logger.info("Trying alternative S3 save method...")
+                # Compute the data first, then save
+                computed_stack = stack.compute()
+                # Use zarr.save with fsspec URL
+                zarr.save(s3_path, computed_stack)
+                logger.info("Successfully saved to S3 using alternative method.")
+            except Exception as e2:
+                logger.error(f"All S3 save methods failed: {e2}")
+                logger.info("Falling back to local save only...")
+                # Save locally as fallback
+                try:
+                    stack.to_zarr(output_path, component='data')
+                    logger.info("Saved locally as fallback.")
+                except Exception as e3:
+                    logger.error(f"Local fallback also failed: {e3}")
+    else:
+        logger.info(f"Saving zarr dataset locally: {output_path}")
+        
+        # Save without compression
+        try:
+            logger.info("Saving locally without compression...")
+            stack.to_zarr(
+                output_path,
+                component='data' # Using 'data' as component for local
+            )
+            logger.info("Successfully saved locally without compression.")
+        except Exception as e:
+            logger.warning(f"Local save failed: {e}")
+            # Final fallback - compute and save
+            logger.info("Attempting to save as computed arrays...")
+            computed_stack = stack.compute()
+            zarr.save(output_path, computed_stack)
+            logger.info("Successfully saved locally as computed arrays.")
 
 def split_for_gpus(processed_paths: List[str], output_base: Path, data_manager: Optional[DataManager] = None) -> None:
     """
