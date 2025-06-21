@@ -3102,3 +3102,57 @@ This notebook implements the preprocessing pipeline for seismic waveform inversi
 if __name__ == "__main__":
     create_notebook() 
 
+
+# %%
+# Source: requirements.txt
+# Core PyTorch packages
+torch
+torchvision
+torchaudio
+
+# Scientific computing
+numpy
+pandas
+matplotlib
+scipy
+
+# Utilities
+tqdm
+pytest
+psutil
+
+# AWS and cloud storage
+boto3
+botocore
+awscli
+s3fs
+
+# Data processing
+zarr
+dask
+polars
+
+# Deep learning
+timm
+einops
+monai
+pytorch-lightning==2.0.0
+torchmetrics==0.11.4
+segmentation-models-pytorch
+
+# Configuration and monitoring
+omegaconf
+watchdog
+
+# Google services
+kagglehub
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+# Additional utilities
+webdataset
+plotly
+packaging
+mlflow 
+

@@ -205,6 +205,19 @@ This project is optimized for the Kaggle environment.
       - `aws_region`: Your AWS region (optional, defaults to 'us-east-1')
       - `aws_s3_bucket`: Your S3 bucket name for storing preprocessed data
 
+   5. Load AWS credentials from kaggle secrets
+   ```python
+   from kaggle_secrets import UserSecretsClient
+   user_secrets = UserSecretsClient()
+
+   import os
+   os.environ['AWS_ACCESS_KEY_ID'] = user_secrets.get_secret("aws_access_key_id")
+   os.environ['AWS_SECRET_ACCESS_KEY'] = user_secrets.get_secret("aws_secret_access_key")
+   os.environ['AWS_REGION'] = user_secrets.get_secret("aws_region")
+   os.environ['AWS_S3_BUCKET'] = user_secrets.get_secret("aws_s3_bucket")
+
+   print("✅ AWS credentials loaded")'''
+
 6. **Run preprocessing with S3 offloading**:
 ```python
 !pip install zarr
@@ -291,6 +304,8 @@ results = complete_colab_setup(
 - ✅ **Efficient Copy**: Copies from Google Drive to local if needed
 - ✅ **Force Option**: Override skip behavior when needed
 - ✅ **Data Validation**: Verifies data quality before skipping
+- ✅ **Robust Installation**: Handles missing requirements.txt gracefully
+- ✅ **Flexible AWS Setup**: Works with different Colab secret methods
 
 **Phase 1 Status: ✅ COMPLETE**
 - ✅ All Phase 1 tests passing
@@ -298,96 +313,52 @@ results = complete_colab_setup(
 - ✅ All components functional and tested
 - ✅ Ready for Phase 2 & 3 training
 
-**Before running this, make sure to set up your AWS credentials in Colab secrets**:
-1. Go to the left sidebar in Colab
-2. Click on the "Secrets" icon (🔑)
-3. Add these secrets:
-   - `aws_access_key_id`: Your AWS access key ID
-   - `aws_secret_access_key`: Your AWS secret access key
-   - `aws_region`: Your AWS region (e.g., us-east-1)
-   - `aws_s3_bucket`: Your S3 bucket name
+**AWS Credentials Setup (Optional for S3):**
+The setup automatically tries multiple methods to find AWS credentials:
 
-#### Verify Preprocessed Data (Optional)
-After preprocessing, you can verify the data structure:
+1. **Google Colab Secrets** (Recommended):
+   - Go to the left sidebar in Colab
+   - Click on the "Secrets" icon (🔑)
+   - Add these secrets:
+     - `aws_access_key_id`: Your AWS access key ID
+     - `aws_secret_access_key`: Your AWS secret access key
+     - `aws_region`: Your AWS region (e.g., us-east-1)
+     - `aws_s3_bucket`: Your S3 bucket name
+
+2. **Environment Variables**: If already set in the environment
+3. **Manual Setup**: Creates `.env/aws/credentials.json` file
+
+**If AWS credentials are not available:**
+- The setup will offer to switch to local processing mode
+- You can still use Google Drive for persistent storage
+- All preprocessing and training will work locally
+
+#### Troubleshooting Setup Issues
+
+##### Package Installation Errors
+If you encounter package installation errors:
 ```python
-# Run verification test
-!python src/utils/colab_test_setup.py
+# Test the setup components
+!python test_colab_setup.py
 
-# Or check manually
-from pathlib import Path
-import zarr
-
-# Check GPU datasets
-gpu0_path = Path('/content/YaleGWI/preprocessed/gpu0/seismic.zarr')
-gpu1_path = Path('/content/YaleGWI/preprocessed/gpu1/seismic.zarr')
-
-if gpu0_path.exists() and gpu1_path.exists():
-    data0 = zarr.open(str(gpu0_path))
-    data1 = zarr.open(str(gpu1_path))
-    print(f"✅ GPU0: {data0.shape} samples")
-    print(f"✅ GPU1: {data1.shape} samples")
-else:
-    print("❌ GPU datasets not found - preprocessing may have failed")
+# Or install packages manually
+!pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+!pip install numpy pandas matplotlib tqdm pytest boto3 botocore awscli zarr dask scipy s3fs psutil timm einops polars watchdog omegaconf
+!pip install kagglehub google-auth-oauthlib google-auth-httplib2 google-api-python-client monai pytorch-lightning==2.0.0 torchmetrics==0.11.4 segmentation-models-pytorch webdataset plotly packaging
 ```
 
-#### Performance Optimization for Colab
-1. **Use TPU (if available)**:
-   ```python
-   # Check if TPU is available
-   import os
-   if 'COLAB_TPU_ADDR' in os.environ:
-       print("TPU available - consider using TPU for faster training")
-   ```
-2. **Optimize data loading**:
-   ```python
-   # Use memory mapping for large datasets
-   CFG.use_mmap = True
-   
-   # Reduce number of workers for Colab
-   CFG.num_workers = 2
-   ```
-3. **Use mixed precision**:
-   ```python
-   # Enable automatic mixed precision
-   CFG.use_amp = True
-   CFG.dtype = "float16"
-   ```
-4. **Smart preprocessing** (new):
-   ```python
-   # Use smart preprocessing to avoid unnecessary reprocessing
-   from src.utils.colab_setup import quick_colab_setup
-   results = quick_colab_setup(use_s3=True, force_reprocess=False)
-   ```
-
-#### Troubleshooting Common Colab Issues
-##### Memory Issues
+##### AWS Credentials Issues
+If AWS setup fails:
 ```python
-# If you encounter memory issues:
-import gc
-import torch
+# Check what credentials are available
+import os
+print("AWS_ACCESS_KEY_ID:", "SET" if os.environ.get('AWS_ACCESS_KEY_ID') else "NOT SET")
+print("AWS_SECRET_ACCESS_KEY:", "SET" if os.environ.get('AWS_SECRET_ACCESS_KEY') else "NOT SET")
+print("AWS_REGION:", os.environ.get('AWS_REGION', 'NOT SET'))
+print("AWS_S3_BUCKET:", os.environ.get('AWS_S3_BUCKET', 'NOT SET'))
 
-# Clear GPU cache
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-
-# Clear Python memory
-gc.collect()
-
-# Reduce batch size
-CFG.batch = 8  # or even smaller
-```
-##### Runtime Disconnection
-```python
-# To prevent runtime disconnection during long preprocessing:
-import time
-
-def keep_alive():
-    """Keep the runtime alive during long operations."""
-    while True:
-        time.sleep(60)
-        print("Still running...")
-
-# Run this in a separate cell during preprocessing
+# Continue with local processing
+results = quick_colab_setup(use_s3=False, mount_drive=True)
 ```
 
 ---

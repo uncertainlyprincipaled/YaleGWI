@@ -48,16 +48,59 @@ def setup_colab_environment(
     # Change to project directory
     os.chdir('/content/YaleGWI')
     
-    # Install base requirements
+    # Install base requirements - handle missing requirements.txt
     print("📦 Installing base requirements...")
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'], check=True)
+    
+    # Check if requirements.txt exists
+    if Path('requirements.txt').exists():
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'], check=True)
+    else:
+        # Install packages directly from environment.yml dependencies
+        print("📦 No requirements.txt found, installing packages directly...")
+        
+        # Core packages that are essential
+        core_packages = [
+            'torch', 'torchvision', 'torchaudio',
+            'numpy', 'pandas', 'matplotlib', 'tqdm',
+            'pytest', 'boto3', 'botocore', 'awscli',
+            'zarr', 'dask', 'scipy', 's3fs', 'psutil',
+            'timm', 'einops', 'polars', 'watchdog', 'omegaconf'
+        ]
+        
+        # Install core packages
+        for package in core_packages:
+            try:
+                print(f"  Installing {package}...")
+                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️ Warning: Failed to install {package}: {e}")
+                # Continue with other packages
+        
+        # Install additional pip packages
+        pip_packages = [
+            'kagglehub', 'google-auth-oauthlib', 'google-auth-httplib2',
+            'google-api-python-client', 'monai', 'pytorch-lightning==2.0.0',
+            'torchmetrics==0.11.4', 'segmentation-models-pytorch',
+            'webdataset', 'plotly', 'packaging'
+        ]
+        
+        for package in pip_packages:
+            try:
+                print(f"  Installing {package}...")
+                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️ Warning: Failed to install {package}: {e}")
+                # Continue with other packages
     
     # Install additional packages for preprocessing
     if install_extra_packages:
         print("📦 Installing additional packages for preprocessing...")
         extra_packages = ['zarr', 'dask', 'scipy', 'mlflow']
         for package in extra_packages:
-            subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️ Warning: Failed to install {package}: {e}")
     
     # Set up environment variables
     os.environ['GWI_ENV'] = 'colab'
@@ -89,6 +132,14 @@ def setup_colab_environment(
         print(f"✅ Device: {CFG.env.device}")
     except ImportError as e:
         print(f"❌ Configuration import failed: {e}")
+    
+    # Test basic imports
+    try:
+        import numpy as np
+        import pandas as pd
+        print("✅ Core scientific packages imported successfully")
+    except ImportError as e:
+        print(f"❌ Core package import failed: {e}")
     
     return {
         'repo_cloned': Path('/content/YaleGWI').exists(),
@@ -683,6 +734,28 @@ def complete_colab_setup(
             results['aws_credentials'] = 'manual' if aws_manual else 'none'
             if aws_manual:
                 results['aws_verification'] = verify_aws_setup()
+        
+        # If AWS setup failed but S3 is requested, warn the user
+        if use_s3 and results['aws_credentials'] == 'none':
+            print("⚠️ WARNING: S3 is requested but AWS credentials are not available")
+            print("💡 You can:")
+            print("   1. Set up AWS credentials in Colab secrets and restart")
+            print("   2. Continue with local processing (set use_s3=False)")
+            print("   3. Proceed anyway (S3 operations will fail)")
+            
+            # Ask user what to do
+            try:
+                response = input("Continue with local processing instead? (y/n): ").strip().lower()
+                if response in ['y', 'yes']:
+                    print("🔄 Switching to local processing mode")
+                    use_s3 = False
+                    results['aws_credentials'] = 'switched_to_local'
+                else:
+                    print("⚠️ Proceeding with S3 mode - operations may fail")
+            except:
+                print("⚠️ No input available - proceeding with S3 mode")
+    else:
+        results['aws_credentials'] = 'not_requested'
     
     # Step 3: Mount Google Drive (optional)
     if mount_drive:
@@ -839,18 +912,58 @@ def setup_aws_credentials_from_secrets() -> bool:
         bool: True if credentials were loaded successfully
     """
     try:
-        from google.colab import userdata
-        import os
-        # Load AWS credentials from Colab secrets
-        os.environ['AWS_ACCESS_KEY_ID'] = userdata.get('aws_access_key_id') or ''
-        os.environ['AWS_SECRET_ACCESS_KEY'] = userdata.get('aws_secret_access_key') or ''
-        os.environ['AWS_REGION'] = userdata.get('aws_region') or 'us-east-1'
-        os.environ['AWS_S3_BUCKET'] = userdata.get('aws_s3_bucket') or ''
-        print("✅ AWS credentials loaded from Colab secrets")
-        return True
-    except ImportError:
-        print("❌ Google Colab userdata not available - not in Colab environment")
-        return False
+        # Try different methods to get Colab secrets
+        aws_access_key = None
+        aws_secret_key = None
+        aws_region = None
+        aws_bucket = None
+        
+        # Method 1: Try google.colab.userdata (newer Colab)
+        try:
+            from google.colab import userdata
+            aws_access_key = userdata.get('aws_access_key_id')
+            aws_secret_key = userdata.get('aws_secret_access_key')
+            aws_region = userdata.get('aws_region')
+            aws_bucket = userdata.get('aws_s3_bucket')
+            print("✅ Loaded AWS credentials from google.colab.userdata")
+        except ImportError:
+            print("⚠️ google.colab.userdata not available")
+        
+        # Method 2: Try kaggle_secrets (Kaggle environment)
+        if not aws_access_key:
+            try:
+                from kaggle_secrets import UserSecretsClient
+                user_secrets = UserSecretsClient()
+                aws_access_key = user_secrets.get_secret("aws_access_key_id")
+                aws_secret_key = user_secrets.get_secret("aws_secret_access_key")
+                aws_region = user_secrets.get_secret("aws_region")
+                aws_bucket = user_secrets.get_secret("aws_s3_bucket")
+                print("✅ Loaded AWS credentials from kaggle_secrets")
+            except ImportError:
+                print("⚠️ kaggle_secrets not available")
+        
+        # Method 3: Try environment variables (already set)
+        if not aws_access_key:
+            aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+            aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+            aws_region = os.environ.get('AWS_REGION')
+            aws_bucket = os.environ.get('AWS_S3_BUCKET')
+            if aws_access_key:
+                print("✅ AWS credentials found in environment variables")
+        
+        # Set environment variables if we found credentials
+        if aws_access_key and aws_secret_key:
+            os.environ['AWS_ACCESS_KEY_ID'] = aws_access_key
+            os.environ['AWS_SECRET_ACCESS_KEY'] = aws_secret_key
+            os.environ['AWS_REGION'] = aws_region or 'us-east-1'
+            if aws_bucket:
+                os.environ['AWS_S3_BUCKET'] = aws_bucket
+            print("✅ AWS credentials loaded successfully")
+            return True
+        else:
+            print("❌ No AWS credentials found in any source")
+            return False
+            
     except Exception as e:
         print(f"❌ Failed to load AWS credentials from secrets: {e}")
         return False
