@@ -240,8 +240,8 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
     Processing Steps:
     1. Validate Nyquist criterion (if seismic)
     2. Apply anti-aliasing filter and downsample (if seismic and dt_decimate > 1)
-    3. Convert to float16
-    4. Normalize using robust statistics
+    3. Normalize using robust statistics (in float32/64)
+    4. Convert to float16 for storage
     
     Args:
         arr: Input seismic array
@@ -301,10 +301,7 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
         elif is_seismic and dt_decimate == 1:
             logger.info("No downsampling applied (dt_decimate=1)")
         
-        # Convert to float16
-        arr = arr.astype('float16')
-        
-        # Robust normalization per trace
+        # Robust normalization per trace (in original precision)
         try:
             μ = np.median(arr, keepdims=True)
             σ = np.percentile(arr, 95, keepdims=True) - np.percentile(arr, 5, keepdims=True)
@@ -326,6 +323,9 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
                 arr = (arr - arr.mean()) / (arr.std() + 1e-6)
             except Exception as e2:
                 logger.warning(f"Simple normalization also failed: {e2}. Skipping normalization.")
+
+        # Convert to float16 for storage efficiency AFTER all calculations
+        arr = arr.astype('float16')
             
     except Exception as e:
         logger.error(f"Error during preprocessing: {e}")
