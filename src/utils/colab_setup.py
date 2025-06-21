@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import logging
 import numpy as np
+import tempfile
 
 # Set up logging robustly to ensure messages are always displayed
 logger = logging.getLogger()
@@ -692,7 +693,6 @@ def run_tests_and_validation() -> Dict[str, Any]:
         # Test geometric dataset
         from src.core.geometric_loader import GeometricDataset
         # Create mock data for testing
-        import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             # This is a basic test - in real usage, we'd have actual zarr data
             print("  ✅ Geometric dataset structure working")
@@ -792,8 +792,6 @@ def run_tests_and_validation() -> Dict[str, Any]:
     try:
         # Test 7: Shape Separation Test (NEW - Critical for preprocessing fix)
         print("  Testing shape separation...")
-        import tempfile
-        
         # Create test data with different shapes (like the actual data)
         seismic_data = np.random.randn(500, 5, 250, 70).astype(np.float16)  # Seismic data (downsampled)
         velocity_data = np.random.randn(500, 1, 70, 70).astype(np.float16)  # Velocity data (different shape)
@@ -801,21 +799,26 @@ def run_tests_and_validation() -> Dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             
-            # Save test files with different naming patterns
-            np.save(tmp_path / "seis_data1.npy", seismic_data)
-            np.save(tmp_path / "seis_data2.npy", seismic_data)
-            np.save(tmp_path / "vel_data1.npy", velocity_data)
-            np.save(tmp_path / "vel_data2.npy", velocity_data)
+            # Save test files with different naming patterns (matching actual data)
+            np.save(tmp_path / "seis_data1.npy", seismic_data)  # Pure seismic data
+            np.save(tmp_path / "seis_data2.npy", seismic_data)  # Pure seismic data
+            np.save(tmp_path / "seis_vel1.npy", velocity_data)  # Velocity data (contains 'vel')
+            np.save(tmp_path / "seis_vel2.npy", velocity_data)  # Velocity data (contains 'vel')
             
             # Test the separation logic (same as in preprocess.py)
             seismic_paths = []
             velocity_paths = []
             
             for path in tmp_path.glob("*.npy"):
-                if 'seis_' in path.name:
-                    seismic_paths.append(str(path))
-                elif 'vel_' in path.name:
+                filename = Path(path).name
+                # Check for velocity files first (they contain 'vel' in the name)
+                if 'vel' in filename:
                     velocity_paths.append(str(path))
+                # Then check for pure seismic files (contain 'seis' but not 'vel')
+                elif 'seis' in filename and 'vel' not in filename:
+                    seismic_paths.append(str(path))
+                else:
+                    print(f"  ⚠️ Unknown file type: {path}")
             
             print(f"  ✅ Found {len(seismic_paths)} seismic files and {len(velocity_paths)} velocity files")
             
@@ -1491,13 +1494,18 @@ def check_and_fix_s3fs_installation() -> bool:
             print("⚠️ S3fs version is old and may cause compatibility issues")
             print("💡 Updating s3fs to latest version...")
             try:
-                # Force reinstall s3fs to latest version
+                # Force reinstall s3fs to latest version with more aggressive approach
+                print("  Uninstalling old s3fs...")
                 subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
-                subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0'], check=True)
+                
+                print("  Installing latest s3fs...")
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0', '--no-cache-dir', '--force-reinstall'], check=True)
+                
                 print("✅ S3fs updated successfully")
                 
-                # Reload s3fs to get new version
+                # Force reload s3fs to get new version
                 import importlib
+                import s3fs
                 importlib.reload(s3fs)
                 print(f"✅ New s3fs version: {s3fs.__version__}")
                 
@@ -1509,7 +1517,17 @@ def check_and_fix_s3fs_installation() -> bool:
                 except Exception as e:
                     if "asynchronous" in str(e):
                         print(f"❌ S3fs still has 'asynchronous' issue after update: {e}")
-                        return False
+                        # Try one more time with different approach
+                        print("💡 Trying alternative s3fs installation...")
+                        try:
+                            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0', '--no-cache-dir', '--force-reinstall'], check=True)
+                            importlib.reload(s3fs)
+                            fs = s3fs.S3FileSystem(anon=True)
+                            print("✅ S3fs fixed with alternative installation")
+                            return True
+                        except Exception as e2:
+                            print(f"❌ Alternative installation also failed: {e2}")
+                            return False
                     else:
                         print(f"✅ S3fs working (different error: {e})")
                         return True

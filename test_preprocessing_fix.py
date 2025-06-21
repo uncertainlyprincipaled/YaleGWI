@@ -21,21 +21,26 @@ def test_shape_separation_fix():
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             
-            # Save test files with different naming patterns
-            np.save(tmp_path / "seis_data1.npy", seismic_data)
-            np.save(tmp_path / "seis_data2.npy", seismic_data)
-            np.save(tmp_path / "vel_data1.npy", velocity_data)
-            np.save(tmp_path / "vel_data2.npy", velocity_data)
+            # Save test files with different naming patterns (matching actual data)
+            np.save(tmp_path / "seis_data1.npy", seismic_data)  # Pure seismic data
+            np.save(tmp_path / "seis_data2.npy", seismic_data)  # Pure seismic data
+            np.save(tmp_path / "seis_vel1.npy", velocity_data)  # Velocity data (contains 'vel')
+            np.save(tmp_path / "seis_vel2.npy", velocity_data)  # Velocity data (contains 'vel')
             
             # Test the separation logic (same as in preprocess.py)
             seismic_paths = []
             velocity_paths = []
             
             for path in tmp_path.glob("*.npy"):
-                if 'seis_' in path.name:
-                    seismic_paths.append(str(path))
-                elif 'vel_' in path.name:
+                filename = Path(path).name
+                # Check for velocity files first (they contain 'vel' in the name)
+                if 'vel' in filename:
                     velocity_paths.append(str(path))
+                # Then check for pure seismic files (contain 'seis' but not 'vel')
+                elif 'seis' in filename and 'vel' not in filename:
+                    seismic_paths.append(str(path))
+                else:
+                    print(f"⚠️ Unknown file type: {path}")
             
             print(f"✅ Found {len(seismic_paths)} seismic files and {len(velocity_paths)} velocity files")
             

@@ -461,10 +461,13 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         velocity_paths = []
         
         for path in processed_paths:
-            if 'seis_' in Path(path).name:
-                seismic_paths.append(path)
-            elif 'vel_' in Path(path).name:
+            filename = Path(path).name
+            # Check for velocity files first (they contain 'vel' in the name)
+            if 'vel' in filename:
                 velocity_paths.append(path)
+            # Then check for pure seismic files (contain 'seis' but not 'vel')
+            elif 'seis' in filename and 'vel' not in filename:
+                seismic_paths.append(path)
             else:
                 logger.warning(f"Unknown file type: {path}")
         
