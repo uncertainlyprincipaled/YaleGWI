@@ -50,6 +50,18 @@ def setup_colab_environment(
     # Change to project directory
     os.chdir('/content/YaleGWI')
     
+    # CRITICAL: Install correct s3fs version first to avoid compatibility issues
+    print("🔧 Installing correct s3fs version to avoid compatibility issues...")
+    try:
+        # Uninstall any existing s3fs
+        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
+        # Install the correct version that fixes the 'asynchronous' parameter issue
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2024.1.0'], check=True)
+        print("✅ Correct s3fs version installed")
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Warning: Failed to install correct s3fs version: {e}")
+        print("💡 S3 operations may fail due to compatibility issues")
+    
     # Install base requirements - handle missing requirements.txt
     print("📦 Installing base requirements...")
     
@@ -65,7 +77,7 @@ def setup_colab_environment(
             'torch', 'torchvision', 'torchaudio',
             'numpy', 'pandas', 'matplotlib', 'tqdm',
             'pytest', 'boto3', 'botocore', 'awscli',
-            'zarr', 'dask', 'scipy', 's3fs', 'psutil',
+            'zarr', 'dask', 'scipy', 'psutil',
             'timm', 'einops', 'polars', 'watchdog', 'omegaconf'
         ]
         
@@ -108,7 +120,7 @@ def setup_colab_environment(
     print("🔍 Checking zarr installation...")
     zarr_working = check_and_fix_zarr_installation()
     
-    # Check and fix s3fs installation
+    # Check and fix s3fs installation (this should now work correctly)
     print("🔍 Checking s3fs installation...")
     s3fs_working = check_and_fix_s3fs_installation()
     

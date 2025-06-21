@@ -266,6 +266,9 @@ The project uses a notebook update script (`update_kaggle_notebook.py`) that aut
 !git clone -b dev https://github.com/uncertainlyprincipaled/YaleGWI.git
 %cd YaleGWI
 
+# CRITICAL: Install correct s3fs version to avoid compatibility issues
+!python setup_s3fs.py
+
 # Quick setup - skips preprocessing if data exists locally or in Google Drive
 from src.utils.colab_setup import quick_colab_setup
 results = quick_colab_setup(
@@ -316,6 +319,15 @@ results = complete_colab_setup(
 - ✅ **Robust Installation**: Handles missing requirements.txt gracefully
 - ✅ **Flexible AWS Setup**: Works with different Colab secret methods
 - ✅ **Debug Mode**: Process only one family for quick S3 I/O testing
+- ✅ **S3fs Compatibility**: Automatically installs correct s3fs version
+
+**Critical Setup Step:**
+The setup now automatically installs the correct s3fs version (>=2024.1.0) to avoid the `Session.__init__() got an unexpected keyword argument 'asynchronous'` error. This happens automatically, but you can also run it manually:
+
+```python
+# Manual s3fs fix (if needed)
+!python setup_s3fs.py
+```
 
 **Debug Mode for S3 I/O Testing:**
 When you encounter S3 I/O issues that only appear after 10+ minutes of preprocessing, use debug mode to test quickly:
