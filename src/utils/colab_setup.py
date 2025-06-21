@@ -1544,7 +1544,7 @@ def check_and_fix_s3fs_installation() -> bool:
                 minor = int(version_parts[1])
                 
                 # Check for old format (0.x.x) or new format but too old
-                if major == 0 or (major < 2023):
+                if major == 0 or (major < 2024):
                     print("⚠️ S3fs version is old and may cause compatibility issues")
                     return _update_s3fs()
                 else:
@@ -1557,7 +1557,7 @@ def check_and_fix_s3fs_installation() -> bool:
                     except Exception as e:
                         if "asynchronous" in str(e):
                             print(f"❌ S3fs has 'asynchronous' issue despite recent version: {e}")
-                            return False
+                            return _update_s3fs()
                         else:
                             print(f"✅ S3fs working (different error: {e})")
                             return True
@@ -1572,7 +1572,7 @@ def check_and_fix_s3fs_installation() -> bool:
         print("❌ S3fs not installed")
         print("💡 Installing s3fs...")
         try:
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0'], check=True)
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2024.1.0'], check=True)
             print("✅ S3fs installed successfully")
             return True
         except subprocess.CalledProcessError as e:
@@ -1594,7 +1594,8 @@ def _update_s3fs() -> bool:
         subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
         
         print("  Installing latest s3fs...")
-        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0', '--no-cache-dir', '--force-reinstall'], check=True)
+        # Try to install a much newer version that fixes the 'asynchronous' issue
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.12.0', '--no-cache-dir', '--force-reinstall'], check=True)
         
         print("✅ S3fs updated successfully")
         
@@ -1612,22 +1613,22 @@ def _update_s3fs() -> bool:
         except Exception as e:
             if "asynchronous" in str(e):
                 print(f"❌ S3fs still has 'asynchronous' issue after update: {e}")
-                # Try alternative approach
+                # Try alternative approach with even newer version
                 print("💡 Trying alternative s3fs installation...")
                 try:
-                    subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0', '--no-cache-dir', '--force-reinstall'], check=True)
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2024.1.0', '--no-cache-dir', '--force-reinstall'], check=True)
                     importlib.reload(s3fs)
                     fs = s3fs.S3FileSystem(anon=True)
                     print("✅ S3fs fixed with alternative installation")
                     return True
                 except Exception as e2:
                     print(f"❌ Alternative installation also failed: {e2}")
-                    # Try final approach
+                    # Try final approach - completely clean install
                     print("💡 Trying final s3fs fix...")
                     try:
                         subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs', 'fsspec'], check=True)
-                        subprocess.run([sys.executable, '-m', 'pip', 'install', 'fsspec>=2023.1.0'], check=True)
-                        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0'], check=True)
+                        subprocess.run([sys.executable, '-m', 'pip', 'install', 'fsspec>=2024.1.0'], check=True)
+                        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2024.1.0'], check=True)
                         importlib.reload(s3fs)
                         fs = s3fs.S3FileSystem(anon=True)
                         print("✅ S3fs fixed with final approach")

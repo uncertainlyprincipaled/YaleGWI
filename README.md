@@ -432,11 +432,32 @@ from src.utils.colab_setup import quick_colab_setup
 results = quick_colab_setup(use_s3=True, mount_drive=True)
 ```
 
-The preprocessing pipeline now automatically handles zarr compression issues by:
-- Trying default compression first
-- Falling back to no compression if needed
-- Using computed arrays as final fallback
-- Providing clear error messages and guidance
+##### S3 I/O Issues (NEW)
+If you encounter `Session.__init__() got an unexpected keyword argument 'asynchronous'` errors:
+```python
+# This is an s3fs version compatibility issue that has been fixed
+# The code now automatically updates s3fs to a compatible version
+
+# 1. Test the s3fs fix
+!python tests/test_s3fs_fix.py
+
+# 2. Use debug mode to test S3 I/O quickly
+from src.utils.colab_setup import quick_colab_setup
+results = quick_colab_setup(
+    use_s3=True,
+    debug_mode=True,
+    debug_family='FlatVel_A'
+)
+
+# 3. If S3 issues persist, try local processing
+results = quick_colab_setup(use_s3=False, mount_drive=True)
+```
+
+The preprocessing pipeline now automatically handles s3fs compatibility issues by:
+- Detecting old s3fs versions (like 0.4.2)
+- Automatically updating to recent versions (>=2024.1.0)
+- Providing fallback to local processing if S3 fails
+- Using debug mode for quick S3 I/O testing
 
 ---
 
