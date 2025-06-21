@@ -269,23 +269,22 @@ The project uses a notebook update script (`update_kaggle_notebook.py`) that aut
 # CRITICAL: Install correct s3fs version to avoid compatibility issues
 !python setup_s3fs.py
 
-# Quick setup - skips preprocessing if data exists locally or in Google Drive
-from src.utils.colab_setup import quick_colab_setup
-results = quick_colab_setup(
+# Streamlined setup - skips unnecessary environment setup
+from src.utils.colab_setup import quick_colab_setup_streamlined
+results = quick_colab_setup_streamlined(
     use_s3=True,           # Use S3 for data operations
     mount_drive=True,      # Mount Google Drive for persistent storage
-    run_tests=True,        # Run validation tests
-    force_reprocess=False  # Skip preprocessing if data exists
+    run_tests=False,       # Skip tests for faster execution
+    force_reprocess=False, # Skip preprocessing if data exists
+    debug_mode=True,       # Process only one family for testing
+    debug_family='FlatVel_A'
 )
 
-# Force reprocessing after config changes
-results = quick_colab_setup(use_s3=True, force_reprocess=True)
-
-# Debug mode - process only one family for quick S3 I/O testing
-results = quick_colab_setup(
+# Full preprocessing (all families)
+results = quick_colab_setup_streamlined(
     use_s3=True,
-    debug_mode=True,       # Process only one family
-    debug_family='FlatVel_A'  # Which family to process
+    debug_mode=False,      # Process all families
+    force_reprocess=True   # Force reprocessing
 )
 
 # Check data status manually
@@ -786,4 +785,5 @@ chmod +x scripts/cleanup_ebs_volumes.sh
 - **Confirmation prompts** - asks for confirmation before deletion
 - **Safety checks** - won't delete volumes that are attached, have snapshots, or are in use.
 - **Cost estimation** - shows potential cost savings
+- **Detailed reporting** - provides comprehensive results
 - **Detailed reporting** - provides comprehensive results

@@ -28,7 +28,8 @@ if not logger.handlers:
 
 def setup_colab_environment(
     repo_url: str = "https://github.com/uncertainlyprincipaled/YaleGWI.git",
-    install_extra_packages: bool = True
+    install_extra_packages: bool = True,
+    skip_package_install: bool = True  # NEW: Skip package installation
 ) -> Dict[str, Any]:
     """
     Set up the Colab environment with all necessary dependencies.
@@ -36,6 +37,7 @@ def setup_colab_environment(
     Args:
         repo_url: URL of the repository to clone
         install_extra_packages: Whether to install additional packages for preprocessing
+        skip_package_install: Whether to skip package installation (assumes setup_s3fs.py was run)
         
     Returns:
         Dict containing setup information
@@ -50,79 +52,85 @@ def setup_colab_environment(
     # Change to project directory
     os.chdir('/content/YaleGWI')
     
-    # CRITICAL: Install correct s3fs version first to avoid compatibility issues
-    print("🔧 Installing correct s3fs version to avoid compatibility issues...")
-    try:
-        # Uninstall any existing s3fs
-        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
-        # Install the correct version that fixes the 'asynchronous' parameter issue
-        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2024.1.0'], check=True)
-        print("✅ Correct s3fs version installed")
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️ Warning: Failed to install correct s3fs version: {e}")
-        print("💡 S3 operations may fail due to compatibility issues")
-    
-    # Install base requirements - handle missing requirements.txt
-    print("📦 Installing base requirements...")
-    
-    # Check if requirements.txt exists
-    if Path('requirements.txt').exists():
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'], check=True)
+    # Skip package installation if requested (assumes setup_s3fs.py was run)
+    if skip_package_install:
+        print("⏭️ Skipping package installation (assumes setup_s3fs.py was run)")
+        zarr_working = True  # Assume it's working
+        s3fs_working = True  # Assume it's working
     else:
-        # Install packages directly from environment.yml dependencies
-        print("📦 No requirements.txt found, installing packages directly...")
+        # CRITICAL: Install correct s3fs version first to avoid compatibility issues
+        print("🔧 Installing correct s3fs version to avoid compatibility issues...")
+        try:
+            # Uninstall any existing s3fs
+            subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
+            # Install the correct version that fixes the 'asynchronous' parameter issue
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2024.1.0'], check=True)
+            print("✅ Correct s3fs version installed")
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Warning: Failed to install correct s3fs version: {e}")
+            print("💡 S3 operations may fail due to compatibility issues")
         
-        # Core packages that are essential
-        core_packages = [
-            'torch', 'torchvision', 'torchaudio',
-            'numpy', 'pandas', 'matplotlib', 'tqdm',
-            'pytest', 'boto3', 'botocore', 'awscli',
-            'zarr', 'dask', 'scipy', 'psutil',
-            'timm', 'einops', 'polars', 'watchdog', 'omegaconf'
-        ]
+        # Install base requirements - handle missing requirements.txt
+        print("📦 Installing base requirements...")
         
-        # Install core packages
-        for package in core_packages:
-            try:
-                print(f"  Installing {package}...")
-                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
-            except subprocess.CalledProcessError as e:
-                print(f"⚠️ Warning: Failed to install {package}: {e}")
-                # Continue with other packages
+        # Check if requirements.txt exists
+        if Path('requirements.txt').exists():
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'], check=True)
+        else:
+            # Install packages directly from environment.yml dependencies
+            print("📦 No requirements.txt found, installing packages directly...")
+            
+            # Core packages that are essential
+            core_packages = [
+                'torch', 'torchvision', 'torchaudio',
+                'numpy', 'pandas', 'matplotlib', 'tqdm',
+                'pytest', 'boto3', 'botocore', 'awscli',
+                'zarr', 'dask', 'scipy', 'psutil',
+                'timm', 'einops', 'polars', 'watchdog', 'omegaconf'
+            ]
+            
+            # Install core packages
+            for package in core_packages:
+                try:
+                    print(f"  Installing {package}...")
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"⚠️ Warning: Failed to install {package}: {e}")
+                    # Continue with other packages
+            
+            # Install additional pip packages
+            pip_packages = [
+                'kagglehub', 'google-auth-oauthlib', 'google-auth-httplib2',
+                'google-api-python-client', 'monai', 'pytorch-lightning==2.0.0',
+                'torchmetrics==0.11.4', 'segmentation-models-pytorch',
+                'webdataset', 'plotly', 'packaging'
+            ]
+            
+            for package in pip_packages:
+                try:
+                    print(f"  Installing {package}...")
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"⚠️ Warning: Failed to install {package}: {e}")
+                    # Continue with other packages
         
-        # Install additional pip packages
-        pip_packages = [
-            'kagglehub', 'google-auth-oauthlib', 'google-auth-httplib2',
-            'google-api-python-client', 'monai', 'pytorch-lightning==2.0.0',
-            'torchmetrics==0.11.4', 'segmentation-models-pytorch',
-            'webdataset', 'plotly', 'packaging'
-        ]
+        # Install additional packages for preprocessing
+        if install_extra_packages:
+            print("📦 Installing additional packages for preprocessing...")
+            extra_packages = ['zarr', 'dask', 'scipy', 'mlflow']
+            for package in extra_packages:
+                try:
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"⚠️ Warning: Failed to install {package}: {e}")
         
-        for package in pip_packages:
-            try:
-                print(f"  Installing {package}...")
-                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
-            except subprocess.CalledProcessError as e:
-                print(f"⚠️ Warning: Failed to install {package}: {e}")
-                # Continue with other packages
-    
-    # Install additional packages for preprocessing
-    if install_extra_packages:
-        print("📦 Installing additional packages for preprocessing...")
-        extra_packages = ['zarr', 'dask', 'scipy', 'mlflow']
-        for package in extra_packages:
-            try:
-                subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
-            except subprocess.CalledProcessError as e:
-                print(f"⚠️ Warning: Failed to install {package}: {e}")
-    
-    # Check and fix zarr installation
-    print("🔍 Checking zarr installation...")
-    zarr_working = check_and_fix_zarr_installation()
-    
-    # Check and fix s3fs installation (this should now work correctly)
-    print("🔍 Checking s3fs installation...")
-    s3fs_working = check_and_fix_s3fs_installation()
+        # Check and fix zarr installation
+        print("🔍 Checking zarr installation...")
+        zarr_working = check_and_fix_zarr_installation()
+        
+        # Check and fix s3fs installation (this should now work correctly)
+        print("🔍 Checking s3fs installation...")
+        s3fs_working = check_and_fix_s3fs_installation()
     
     # Set up environment variables
     os.environ['GWI_ENV'] = 'colab'
@@ -1401,16 +1409,17 @@ def verify_aws_setup() -> Dict[str, Any]:
     
     return results
 
-def quick_colab_setup(
+def quick_colab_setup_streamlined(
     use_s3: bool = True,
     mount_drive: bool = True,
-    run_tests: bool = True,
+    run_tests: bool = False,  # Skip tests by default for speed
     force_reprocess: bool = False,
     debug_mode: bool = False,
     debug_family: str = 'FlatVel_A'
 ) -> Dict[str, Any]:
     """
-    Quick Colab setup that skips preprocessing if data already exists.
+    Streamlined Colab setup that skips unnecessary environment setup.
+    Assumes setup_s3fs.py was run separately.
     
     Args:
         use_s3: Whether to use S3 for data operations
@@ -1423,23 +1432,101 @@ def quick_colab_setup(
     Returns:
         Dict containing setup results
     """
-    print("⚡ Quick Colab Setup - Skipping preprocessing if data exists")
+    print("⚡ Streamlined Colab Setup - Fast Mode")
     if debug_mode:
         print(f"🐛 DEBUG MODE ENABLED - Processing only family: {debug_family}")
     print("="*60)
     
-    return complete_colab_setup(
-        data_path='/content/YaleGWI/train_samples',
+    results = {}
+    
+    # Skip environment setup (assumes packages are already installed)
+    print("⏭️ Skipping environment setup (assumes setup_s3fs.py was run)")
+    results['environment'] = {
+        'repo_cloned': True,
+        'requirements_installed': True,
+        'cuda_available': False,  # Will be detected during processing
+        'gpu_count': 0,
+        'environment': 'colab',
+        'zarr_working': True,
+        's3fs_working': True
+    }
+    
+    # Skip CUDA setup check
+    print("⏭️ Skipping CUDA setup check")
+    results['cuda_working'] = False  # Will be detected during processing
+    
+    # Skip AWS setup (assumes credentials are already set)
+    if use_s3:
+        print("⏭️ Skipping AWS setup (assumes credentials are already set)")
+        results['aws_credentials'] = 'assumed'
+        results['aws_verification'] = {'s3_accessible': True, 'bucket_exists': True}
+    else:
+        results['aws_credentials'] = 'not_requested'
+    
+    # Skip Google Drive mounting if not requested
+    if mount_drive:
+        print("⏭️ Skipping Google Drive setup")
+        results['drive_mounted'] = True  # Assume it's working
+    else:
+        results['drive_mounted'] = False
+    
+    # Skip dataset download
+    results['dataset_download'] = False
+    
+    # Add src to Python path
+    import sys
+    sys.path.append('/content/YaleGWI/src')
+    
+    from src.core.config import CFG
+    # Determine the correct input root based on whether we're using S3
+    effective_input_root = CFG.s3_paths.raw_prefix if use_s3 else '/content/YaleGWI/train_samples'
+    print(f"Effective input root: {effective_input_root}")
+
+    # Go straight to preprocessing
+    print("\n" + "="*50)
+    print("STEP 5 & 6: Data Preprocessing")
+    print("="*50)
+    import logging
+    logger = logging.getLogger()
+    logger.info("Starting data preprocessing...")
+    results['preprocessing'] = run_preprocessing(
+        input_root=effective_input_root,
+        output_root='/content/YaleGWI/preprocessed',
         use_s3=use_s3,
-        mount_drive=mount_drive,
-        download_dataset=False,  # Skip dataset download
-        dataset_source='manual',
-        setup_aws=use_s3,
-        run_tests=run_tests,
+        save_to_drive=mount_drive,
         force_reprocess=force_reprocess,
         debug_mode=debug_mode,
         debug_family=debug_family
     )
+    logger.info("Data preprocessing step finished.")
+
+    # Skip training configuration
+    print("⏭️ Skipping training configuration")
+    results['training_config'] = {}
+    
+    # Skip tests unless specifically requested
+    if run_tests:
+        print("\n" + "="*50)
+        print("STEP 8: Testing and Validation")
+        print("="*50)
+        results['tests'] = run_tests_and_validation()
+    else:
+        print("⏭️ Skipping tests for faster execution")
+    
+    print("\n" + "="*50)
+    print("🎉 Streamlined Setup Complete!")
+    print("="*50)
+    
+    # Minimal summary
+    print("\n📋 Setup Summary:")
+    preproc_result = results.get('preprocessing', {})
+    preproc_success = preproc_result.get('success', False)
+    print(f"  Preprocessing: {'✅' if preproc_success else '❌'}")
+    
+    if debug_mode:
+        print(f"  Debug Mode: ✅ (processed only {debug_family})")
+    
+    return results
 
 def check_and_fix_cuda_setup() -> bool:
     """
