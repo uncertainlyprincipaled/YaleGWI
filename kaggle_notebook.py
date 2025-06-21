@@ -1097,6 +1097,99 @@ def main():
         logger.error(f"Error in main preprocessing: {str(e)}")
         raise
 
+def load_data_debug(input_root, output_root, use_s3=False, debug_family='FlatVel_A'):
+    """
+    Debug version of load_data that processes only one family for quick S3 I/O testing.
+    
+    Args:
+        input_root (str): Path to the root of the raw data.
+        output_root (str): Path where the processed data will be saved.
+        use_s3 (bool): Whether to use S3 for data I/O.
+        debug_family (str): Which family to process (default: 'FlatVel_A').
+        
+    Returns:
+        A dictionary containing feedback from the preprocessing run.
+    """
+    input_root = Path(input_root)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    
+    data_manager = DataManager(use_s3=use_s3)
+    
+    # Process only the specified family
+    families = [debug_family]
+    
+    logger.info(f"🐛 DEBUG MODE: Processing only family '{debug_family}'")
+    logger.info(f"🐛 This will help identify S3 I/O issues quickly")
+    
+    all_processed_paths = []
+    all_feedback = {}
+
+    for family in families:
+        logger.info(f"🐛 --- Starting debug family: {family} ---")
+        family_output_dir = output_root / family
+
+        if use_s3:
+            # For S3, the input_path is a prefix string
+            family_input_path = f"{input_root}/{family}"
+            logger.info(f"🐛 S3 input path: {family_input_path}")
+            processed_paths, feedback = process_family(family, family_input_path, family_output_dir, data_manager)
+        else:
+            # For local, the input_path is a Path object
+            family_input_path = Path(input_root) / family
+            logger.info(f"🐛 Local input path: {family_input_path}")
+            if not family_input_path.exists():
+                logger.warning(f"🐛 Skipping family {family}: directory not found at {family_input_path}")
+                continue
+            processed_paths, feedback = process_family(family, family_input_path, family_output_dir, data_manager)
+
+        all_processed_paths.extend(processed_paths)
+        all_feedback[family] = feedback
+        
+        logger.info(f"🐛 Family {family}: {len(processed_paths)} files processed")
+
+    # Create GPU-specific datasets (simplified for debug mode)
+    logger.info("🐛 --- Creating GPU-specific datasets (debug mode) ---")
+    
+    if all_processed_paths:
+        # In debug mode, put all processed files in GPU0 for simplicity
+        gpu0_dir = output_root / 'gpu0'
+        gpu1_dir = output_root / 'gpu1'
+        gpu0_dir.mkdir(parents=True, exist_ok=True)
+        gpu1_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a minimal zarr dataset for GPU0
+        create_zarr_dataset(
+            all_processed_paths,
+            gpu0_dir / 'seismic.zarr',
+            (1, CHUNK_SRC_REC, CHUNK_TIME, CHUNK_SRC_REC),
+            data_manager
+        )
+        
+        # Create an empty zarr dataset for GPU1 (to maintain structure)
+        logger.info("🐛 Creating empty GPU1 dataset to maintain structure")
+        try:
+            import zarr
+            empty_data = zarr.create((0, 5, 500, 70), dtype='float16')
+            zarr.save(gpu1_dir / 'seismic.zarr', empty_data)
+        except Exception as e:
+            logger.warning(f"🐛 Could not create empty GPU1 dataset: {e}")
+        
+        logger.info(f"🐛 Created debug GPU datasets with {len(all_processed_paths)} samples in GPU0")
+    else:
+        logger.warning("🐛 No files processed - cannot create GPU datasets")
+    
+    # Clean up temporary family directories
+    for family in families:
+        family_dir = output_root / family
+        if family_dir.exists():
+            import shutil
+            shutil.rmtree(family_dir)
+            logger.info(f"🐛 Cleaned up temporary family directory: {family_dir}")
+    
+    logger.info("🐛 --- Debug preprocessing pipeline complete ---")
+    return all_feedback
+
 def load_data(input_root, output_root, use_s3=False):
     """
     Main function to run the complete preprocessing pipeline.

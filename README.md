@@ -278,6 +278,13 @@ results = quick_colab_setup(
 # Force reprocessing after config changes
 results = quick_colab_setup(use_s3=True, force_reprocess=True)
 
+# Debug mode - process only one family for quick S3 I/O testing
+results = quick_colab_setup(
+    use_s3=True,
+    debug_mode=True,       # Process only one family
+    debug_family='FlatVel_A'  # Which family to process
+)
+
 # Check data status manually
 from src.utils.colab_setup import check_preprocessed_data_exists
 status = check_preprocessed_data_exists('/content/YaleGWI/preprocessed', save_to_drive=True, use_s3=True)
@@ -294,7 +301,9 @@ results = complete_colab_setup(
     download_dataset=False, # Set to True if you need to download the dataset
     setup_aws=True,        # Load AWS credentials from Colab secrets
     run_tests=True,        # Run validation tests
-    force_reprocess=False  # Skip preprocessing if data exists
+    force_reprocess=False, # Skip preprocessing if data exists
+    debug_mode=False,      # Set to True for quick S3 I/O testing
+    debug_family='FlatVel_A'  # Which family to process in debug mode
 )
 ```
 
@@ -306,12 +315,41 @@ results = complete_colab_setup(
 - ✅ **Data Validation**: Verifies data quality before skipping
 - ✅ **Robust Installation**: Handles missing requirements.txt gracefully
 - ✅ **Flexible AWS Setup**: Works with different Colab secret methods
+- ✅ **Debug Mode**: Process only one family for quick S3 I/O testing
+
+**Debug Mode for S3 I/O Testing:**
+When you encounter S3 I/O issues that only appear after 10+ minutes of preprocessing, use debug mode to test quickly:
+
+```python
+# Test S3 I/O with just one family (takes ~1-2 minutes instead of 10+ minutes)
+results = quick_colab_setup(
+    use_s3=True,
+    debug_mode=True,
+    debug_family='FlatVel_A',  # Process only this family
+    run_tests=False  # Skip tests for faster debugging
+)
+
+# Test different families
+results = quick_colab_setup(
+    use_s3=True,
+    debug_mode=True,
+    debug_family='CurveVel_A'  # Test a different family
+)
+
+# Test local processing in debug mode
+results = quick_colab_setup(
+    use_s3=False,
+    debug_mode=True,
+    debug_family='FlatVel_A'
+)
+```
 
 **Phase 1 Status: ✅ COMPLETE**
 - ✅ All Phase 1 tests passing
 - ✅ Preprocessing working with reduced aliasing (5-7% vs 10-13%)
 - ✅ All components functional and tested
 - ✅ Ready for Phase 2 & 3 training
+- ✅ Debug mode for quick S3 I/O testing
 
 **AWS Credentials Setup (Optional for S3):**
 The setup automatically tries multiple methods to find AWS credentials:
@@ -339,7 +377,7 @@ The setup automatically tries multiple methods to find AWS credentials:
 If you encounter package installation errors:
 ```python
 # Test the setup components
-!python test_colab_setup.py
+!python tests/test_colab_validation.py
 
 # Or install packages manually
 !pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
@@ -368,7 +406,7 @@ If you encounter `module 'zarr' has no attribute 'Blosc'` errors:
 # But if you still have issues, try these steps:
 
 # 1. Test the zarr fix
-!python test_zarr_fix.py
+!python tests/test_zarr_fix.py
 
 # 2. Reinstall zarr if needed
 !pip install --upgrade zarr
@@ -387,7 +425,7 @@ If you encounter `got multiple values for keyword argument 'chunks'` errors:
 # The code now properly handles chunking without conflicts
 
 # 1. Test the fix
-!python test_zarr_fix.py
+!python tests/test_zarr_fix.py
 
 # 2. Run setup again (should work now)
 from src.utils.colab_setup import quick_colab_setup

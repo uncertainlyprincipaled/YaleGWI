@@ -369,7 +369,9 @@ def run_preprocessing(
     output_root: str,
     use_s3: bool,
     save_to_drive: bool,
-    force_reprocess: bool = False
+    force_reprocess: bool = False,
+    debug_mode: bool = False,
+    debug_family: str = 'FlatVel_A'
 ) -> Dict[str, Any]:
     """
     Run the preprocessing pipeline with monitoring and error handling.
@@ -380,18 +382,26 @@ def run_preprocessing(
         use_s3: Whether to use S3 for data operations
         save_to_drive: Whether to save results to Google Drive
         force_reprocess: Whether to force reprocessing even if data exists
+        debug_mode: Whether to enable debug mode (process only one family)
+        debug_family: Which family to process in debug mode (default: 'FlatVel_A')
         
     Returns:
         Dict containing preprocessing results
     """
     print("🔄 Starting preprocessing pipeline...")
     
+    if debug_mode:
+        print(f"🐛 DEBUG MODE ENABLED - Processing only family: {debug_family}")
+        print("💡 This will help identify S3 I/O issues quickly")
+    
     result = {
         'success': False,
         'processed_files': 0,
         'error': None,
         'output_path': output_root,
-        'feedback': {}
+        'feedback': {},
+        'debug_mode': debug_mode,
+        'debug_family': debug_family if debug_mode else None
     }
     
     # Monitor memory before preprocessing
@@ -405,52 +415,66 @@ def run_preprocessing(
     
     try:
         # Import preprocessing function
-        from src.core.preprocess import load_data
+        from src.core.preprocess import load_data, load_data_debug
         
-        # Check if data already exists
-        data_exists = check_preprocessed_data_exists(output_root, save_to_drive, use_s3)
-        
-        if data_exists['exists_locally']:
-            if not force_reprocess:
-                print("✅ Preprocessed data already exists locally - skipping preprocessing")
-                result['success'] = True
-                result['processed_files'] = 0
-                result['skipped'] = True
-                result['data_quality'] = data_exists['data_quality']
-                return result
-            else:
-                print("🔄 Force reprocessing requested - will overwrite existing data")
-        
-        elif data_exists['exists_in_drive'] and not data_exists['exists_locally']:
-            if not force_reprocess:
-                print("📋 Found data in Google Drive but not locally - copying...")
-                if copy_preprocessed_data_from_drive(data_exists['drive_path'], output_root):
-                    print("✅ Successfully copied preprocessed data from Google Drive")
+        # Check if data already exists (skip this check in debug mode)
+        if not debug_mode:
+            data_exists = check_preprocessed_data_exists(output_root, save_to_drive, use_s3)
+            
+            if data_exists['exists_locally']:
+                if not force_reprocess:
+                    print("✅ Preprocessed data already exists locally - skipping preprocessing")
                     result['success'] = True
                     result['processed_files'] = 0
                     result['skipped'] = True
-                    result['copied_from_drive'] = True
+                    result['data_quality'] = data_exists['data_quality']
                     return result
                 else:
-                    print("⚠️ Failed to copy from Google Drive - will reprocess")
-            else:
-                print("🔄 Force reprocessing requested - will reprocess even though data exists in Drive")
-        
-        elif data_exists['exists_in_s3'] and not data_exists['exists_locally'] and not data_exists['exists_in_drive']:
-            if not force_reprocess:
-                print("📋 Found data in S3 but not locally - downloading...")
-                # TODO: Implement S3 download functionality
-                print("⚠️ S3 download not yet implemented - will reprocess")
-            else:
-                print("🔄 Force reprocessing requested - will reprocess even though data exists in S3")
+                    print("🔄 Force reprocessing requested - will overwrite existing data")
+            
+            elif data_exists['exists_in_drive'] and not data_exists['exists_locally']:
+                if not force_reprocess:
+                    print("📋 Found data in Google Drive but not locally - copying...")
+                    if copy_preprocessed_data_from_drive(data_exists['drive_path'], output_root):
+                        print("✅ Successfully copied preprocessed data from Google Drive")
+                        result['success'] = True
+                        result['processed_files'] = 0
+                        result['skipped'] = True
+                        result['copied_from_drive'] = True
+                        return result
+                    else:
+                        print("⚠️ Failed to copy from Google Drive - will reprocess")
+                else:
+                    print("🔄 Force reprocessing requested - will reprocess even though data exists in Drive")
+            
+            elif data_exists['exists_in_s3'] and not data_exists['exists_locally'] and not data_exists['exists_in_drive']:
+                if not force_reprocess:
+                    print("📋 Found data in S3 but not locally - downloading...")
+                    # TODO: Implement S3 download functionality
+                    print("⚠️ S3 download not yet implemented - will reprocess")
+                else:
+                    print("🔄 Force reprocessing requested - will reprocess even though data exists in S3")
+        else:
+            print("🐛 Debug mode: Skipping data existence check")
         
         # Run preprocessing and capture feedback
         print("🔄 Starting preprocessing pipeline...")
-        feedback = load_data(
-            input_root=input_root,
-            output_root=output_root,
-            use_s3=use_s3
-        )
+        
+        if debug_mode:
+            # Use debug version of load_data that processes only one family
+            feedback = load_data_debug(
+                input_root=input_root,
+                output_root=output_root,
+                use_s3=use_s3,
+                debug_family=debug_family
+            )
+        else:
+            # Use normal load_data
+            feedback = load_data(
+                input_root=input_root,
+                output_root=output_root,
+                use_s3=use_s3
+            )
         
         result['success'] = True
         result['feedback'] = feedback
@@ -467,6 +491,9 @@ def run_preprocessing(
 
         print(f"✅ Preprocessing completed successfully!")
         print(f"📊 Processed {total_processed} files")
+        
+        if debug_mode:
+            print(f"🐛 Debug mode: Processed only family '{debug_family}'")
         
         # Verify output
         output_dir = Path(output_root)
@@ -948,7 +975,9 @@ def complete_colab_setup(
     dataset_source: str = 'manual',
     setup_aws: bool = True,
     run_tests: bool = True,
-    force_reprocess: bool = False
+    force_reprocess: bool = False,
+    debug_mode: bool = False,
+    debug_family: str = 'FlatVel_A'
 ) -> Dict[str, Any]:
     """
     Complete Colab setup including environment, data verification, preprocessing, and testing.
@@ -962,11 +991,17 @@ def complete_colab_setup(
         setup_aws: Whether to set up AWS credentials
         run_tests: Whether to run tests after setup
         force_reprocess: Whether to force reprocessing even if data exists
+        debug_mode: Whether to enable debug mode (process only one family)
+        debug_family: Which family to process in debug mode (default: 'FlatVel_A')
         
     Returns:
         Dict containing complete setup results
     """
     print("🎯 Starting complete Colab setup...")
+    
+    if debug_mode:
+        print(f"🐛 DEBUG MODE ENABLED - Processing only family: {debug_family}")
+        print("💡 This will help identify S3 I/O issues quickly")
     
     results = {}
     
@@ -1079,7 +1114,9 @@ def complete_colab_setup(
         output_root='/content/YaleGWI/preprocessed',
         use_s3=use_s3,
         save_to_drive=mount_drive,
-        force_reprocess=force_reprocess
+        force_reprocess=force_reprocess,
+        debug_mode=debug_mode,
+        debug_family=debug_family
     )
     logger.info("Data preprocessing step finished.")
 
@@ -1128,6 +1165,9 @@ def complete_colab_setup(
             print(f"  Preprocessing: {'✅' if preproc_success else '❌'} (skipped - data exists)")
     else:
         print(f"  Preprocessing: {'✅' if preproc_success else '❌'}")
+    
+    if debug_mode:
+        print(f"  Debug Mode: ✅ (processed only {debug_family})")
     
     if run_tests and 'tests' in results:
         tests = results['tests']
@@ -1353,7 +1393,9 @@ def quick_colab_setup(
     use_s3: bool = True,
     mount_drive: bool = True,
     run_tests: bool = True,
-    force_reprocess: bool = False
+    force_reprocess: bool = False,
+    debug_mode: bool = False,
+    debug_family: str = 'FlatVel_A'
 ) -> Dict[str, Any]:
     """
     Quick Colab setup that skips preprocessing if data already exists.
@@ -1363,11 +1405,15 @@ def quick_colab_setup(
         mount_drive: Whether to mount Google Drive
         run_tests: Whether to run tests after setup
         force_reprocess: Whether to force reprocessing even if data exists
+        debug_mode: Whether to enable debug mode (process only one family)
+        debug_family: Which family to process in debug mode (default: 'FlatVel_A')
         
     Returns:
         Dict containing setup results
     """
     print("⚡ Quick Colab Setup - Skipping preprocessing if data exists")
+    if debug_mode:
+        print(f"🐛 DEBUG MODE ENABLED - Processing only family: {debug_family}")
     print("="*60)
     
     return complete_colab_setup(
@@ -1378,7 +1424,9 @@ def quick_colab_setup(
         dataset_source='manual',
         setup_aws=use_s3,
         run_tests=run_tests,
-        force_reprocess=force_reprocess
+        force_reprocess=force_reprocess,
+        debug_mode=debug_mode,
+        debug_family=debug_family
     )
 
 def check_and_fix_cuda_setup() -> bool:
@@ -1486,83 +1534,39 @@ def check_and_fix_s3fs_installation() -> bool:
         print(f"✅ S3fs version: {s3fs.__version__}")
         
         # Check if version is too old (causing compatibility issues)
+        # Old versions like 0.4.2 cause performance problems and 'asynchronous' parameter issues
         version_parts = s3fs.__version__.split('.')
-        major = int(version_parts[0])
-        minor = int(version_parts[1]) if len(version_parts) > 1 else 0
         
-        if major < 2023 or (major == 2023 and minor < 1):
-            print("⚠️ S3fs version is old and may cause compatibility issues")
-            print("💡 Updating s3fs to latest version...")
-            try:
-                # Force reinstall s3fs to latest version with more aggressive approach
-                print("  Uninstalling old s3fs...")
-                subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
+        # Handle both old format (0.x.x) and new format (2023.1.0)
+        if len(version_parts) >= 2:
+            if version_parts[0].isdigit() and version_parts[1].isdigit():
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
                 
-                print("  Installing latest s3fs...")
-                subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0', '--no-cache-dir', '--force-reinstall'], check=True)
-                
-                print("✅ S3fs updated successfully")
-                
-                # Force reload s3fs to get new version
-                import importlib
-                import s3fs
-                importlib.reload(s3fs)
-                print(f"✅ New s3fs version: {s3fs.__version__}")
-                
-                # Test that the fix worked
-                try:
-                    fs = s3fs.S3FileSystem(anon=True)
-                    print("✅ S3fs functionality verified after update")
-                    return True
-                except Exception as e:
-                    if "asynchronous" in str(e):
-                        print(f"❌ S3fs still has 'asynchronous' issue after update: {e}")
-                        # Try one more time with different approach
-                        print("💡 Trying alternative s3fs installation...")
-                        try:
-                            subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0', '--no-cache-dir', '--force-reinstall'], check=True)
-                            importlib.reload(s3fs)
-                            fs = s3fs.S3FileSystem(anon=True)
-                            print("✅ S3fs fixed with alternative installation")
-                            return True
-                        except Exception as e2:
-                            print(f"❌ Alternative installation also failed: {e2}")
-                            # Try one final approach - install a known working version
-                            print("💡 Trying final s3fs fix...")
-                            try:
-                                subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs', 'fsspec'], check=True)
-                                subprocess.run([sys.executable, '-m', 'pip', 'install', 'fsspec>=2023.1.0'], check=True)
-                                subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0'], check=True)
-                                importlib.reload(s3fs)
-                                fs = s3fs.S3FileSystem(anon=True)
-                                print("✅ S3fs fixed with final approach")
-                                return True
-                            except Exception as e3:
-                                print(f"❌ All s3fs fixes failed: {e3}")
-                                print("⚠️ S3 operations will be disabled - using local processing only")
-                                return False
-                    else:
-                        print(f"✅ S3fs working (different error: {e})")
-                        return True
-                        
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to update s3fs: {e}")
-                print("⚠️ Continuing with old version - S3 operations may fail")
-                return False
-        else:
-            print("✅ S3fs version is recent and should work properly")
-            # Test functionality
-            try:
-                fs = s3fs.S3FileSystem(anon=True)
-                print("✅ S3fs functionality verified")
-                return True
-            except Exception as e:
-                if "asynchronous" in str(e):
-                    print(f"❌ S3fs has 'asynchronous' issue despite recent version: {e}")
-                    return False
+                # Check for old format (0.x.x) or new format but too old
+                if major == 0 or (major < 2023):
+                    print("⚠️ S3fs version is old and may cause compatibility issues")
+                    return _update_s3fs()
                 else:
-                    print(f"✅ S3fs working (different error: {e})")
-                    return True
+                    print("✅ S3fs version is recent and should work properly")
+                    # Test functionality
+                    try:
+                        fs = s3fs.S3FileSystem(anon=True)
+                        print("✅ S3fs functionality verified")
+                        return True
+                    except Exception as e:
+                        if "asynchronous" in str(e):
+                            print(f"❌ S3fs has 'asynchronous' issue despite recent version: {e}")
+                            return False
+                        else:
+                            print(f"✅ S3fs working (different error: {e})")
+                            return True
+            else:
+                print("⚠️ Could not parse s3fs version, assuming it needs update")
+                return _update_s3fs()
+        else:
+            print("⚠️ Could not parse s3fs version, assuming it needs update")
+            return _update_s3fs()
             
     except ImportError:
         print("❌ S3fs not installed")
@@ -1574,6 +1578,72 @@ def check_and_fix_s3fs_installation() -> bool:
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed to install s3fs: {e}")
             return False
+
+def _update_s3fs() -> bool:
+    """
+    Helper function to update s3fs to a working version.
+    
+    Returns:
+        bool: True if update was successful
+    """
+    try:
+        print("💡 Updating s3fs to latest version...")
+        
+        # Force reinstall s3fs to latest version
+        print("  Uninstalling old s3fs...")
+        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs'], check=True)
+        
+        print("  Installing latest s3fs...")
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs>=2023.1.0', '--no-cache-dir', '--force-reinstall'], check=True)
+        
+        print("✅ S3fs updated successfully")
+        
+        # Force reload s3fs to get new version
+        import importlib
+        import s3fs
+        importlib.reload(s3fs)
+        print(f"✅ New s3fs version: {s3fs.__version__}")
+        
+        # Test that the fix worked
+        try:
+            fs = s3fs.S3FileSystem(anon=True)
+            print("✅ S3fs functionality verified after update")
+            return True
+        except Exception as e:
+            if "asynchronous" in str(e):
+                print(f"❌ S3fs still has 'asynchronous' issue after update: {e}")
+                # Try alternative approach
+                print("💡 Trying alternative s3fs installation...")
+                try:
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0', '--no-cache-dir', '--force-reinstall'], check=True)
+                    importlib.reload(s3fs)
+                    fs = s3fs.S3FileSystem(anon=True)
+                    print("✅ S3fs fixed with alternative installation")
+                    return True
+                except Exception as e2:
+                    print(f"❌ Alternative installation also failed: {e2}")
+                    # Try final approach
+                    print("💡 Trying final s3fs fix...")
+                    try:
+                        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 's3fs', 'fsspec'], check=True)
+                        subprocess.run([sys.executable, '-m', 'pip', 'install', 'fsspec>=2023.1.0'], check=True)
+                        subprocess.run([sys.executable, '-m', 'pip', 'install', 's3fs==2023.12.0'], check=True)
+                        importlib.reload(s3fs)
+                        fs = s3fs.S3FileSystem(anon=True)
+                        print("✅ S3fs fixed with final approach")
+                        return True
+                    except Exception as e3:
+                        print(f"❌ All s3fs fixes failed: {e3}")
+                        print("⚠️ S3 operations will be disabled - using local processing only")
+                        return False
+            else:
+                print(f"✅ S3fs working (different error: {e})")
+                return True
+                
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to update s3fs: {e}")
+        print("⚠️ Continuing with old version - S3 operations may fail")
+        return False
 
 if __name__ == "__main__":
     # Example usage
