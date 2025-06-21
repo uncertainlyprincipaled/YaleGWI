@@ -760,47 +760,22 @@ def run_tests_and_validation() -> Dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test_5d.zarr"
             
-            # Try different zarr saving approaches
-            success = False
-            
-            # Approach 1: Try with compressor parameter
-            if not success:
-                try:
-                    import numcodecs
-                    compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                    stack.to_zarr(str(output_path), compressor=compressor)
-                    print("  ✅ 5D data saved with compressor parameter")
-                    success = True
-                except Exception as e:
-                    print(f"  ⚠️ Compressor parameter failed: {e}")
-            
-            # Approach 2: Try without compression
-            if not success:
-                try:
-                    stack.to_zarr(str(output_path))
-                    print("  ✅ 5D data saved without compression")
-                    success = True
-                except Exception as e:
-                    print(f"  ⚠️ No compression failed: {e}")
-            
-            # Approach 3: Final fallback - compute and save
-            if not success:
-                try:
-                    computed_stack = stack.compute()
-                    zarr.save(str(output_path), computed_stack)
-                    print("  ✅ 5D data saved as computed arrays")
-                    success = True
-                except Exception as e:
-                    print(f"  ❌ All zarr saving approaches failed: {e}")
-                    return False
-            
-            # Verify data
-            loaded_data = zarr.open(str(output_path))
-            if loaded_data.shape == stack_shape:
-                print("  ✅ 5D dimension handling working")
-                results['5d_dimension_tests'] = True
-            else:
-                raise ValueError(f"Shape mismatch: expected {stack_shape}, got {loaded_data.shape}")
+            # Try basic zarr saving without compression
+            try:
+                stack.to_zarr(str(output_path))
+                print("  ✅ 5D data saved to zarr successfully")
+                
+                # Verify data
+                loaded_data = zarr.open(str(output_path))
+                if loaded_data.shape == stack_shape:
+                    print("  ✅ 5D dimension handling working")
+                    results['5d_dimension_tests'] = True
+                else:
+                    raise ValueError(f"Shape mismatch: expected {stack_shape}, got {loaded_data.shape}")
+                    
+            except Exception as e:
+                print(f"  ❌ 5D zarr save failed: {e}")
+                return False
         
     except Exception as e:
         results['errors'].append(f"5D dimension test failed: {e}")
@@ -1364,39 +1339,14 @@ def check_and_fix_zarr_installation() -> bool:
             
             # Test compression with zarr 3.0.8 compatibility
             try:
-                import numcodecs
-                # For zarr 3.0.8, try different approaches
-                try:
-                    # Try with compressor parameter (correct API)
-                    compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                    test_compressed = zarr.create((10, 10), dtype='float32', compressor=compressor)
-                    test_compressed[:] = 1.0
-                    print("✅ Zarr compression working with compressor parameter")
-                    return True
-                except Exception as e1:
-                    print(f"⚠️ Compressor parameter failed: {e1}")
-                    # Try without any compression (fallback)
-                    test_compressed = zarr.create((10, 10), dtype='float32')
-                    test_compressed[:] = 1.0
-                    print("✅ Zarr compression (none) working")
-                    return True
-            except ImportError:
-                print("⚠️ numcodecs not available, testing without compression")
+                # Skip compression entirely - just test basic functionality
                 test_compressed = zarr.create((10, 10), dtype='float32')
                 test_compressed[:] = 1.0
-                print("✅ Zarr compression (none) working")
+                print("✅ Zarr functionality working (no compression)")
                 return True
             except Exception as comp_error:
-                print(f"⚠️ Zarr compression test failed: {comp_error}")
-                # Final fallback to no compression
-                try:
-                    test_compressed = zarr.create((10, 10), dtype='float32')
-                    test_compressed[:] = 1.0
-                    print("✅ Zarr compression (none) working as fallback")
-                    return True
-                except Exception as no_comp_error:
-                    print(f"❌ Zarr compression fallback also failed: {no_comp_error}")
-                    return False
+                print(f"❌ Zarr functionality failed: {comp_error}")
+                return False
                 
         except Exception as e:
             print(f"❌ Basic zarr functionality failed: {e}")

@@ -8,8 +8,8 @@ import tempfile
 from pathlib import Path
 
 def test_zarr_compression():
-    """Test that zarr compression works with zarr 3.0.8 compatibility"""
-    print("🧪 Testing zarr compression fix...")
+    """Test that zarr functionality works without compression"""
+    print("🧪 Testing zarr functionality...")
     
     try:
         import zarr
@@ -26,35 +26,19 @@ def test_zarr_compression():
         dask_array = dask_array.rechunk((50, 50))  # Ensure proper chunking
         print("✅ Dask array created and rechunked")
         
-        # Test saving with zarr 3.0.8 compatible compression
+        # Test saving without compression
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test.zarr"
             
-            try:
-                # Try with compressor parameter (correct API)
-                import numcodecs
-                compressor = numcodecs.Blosc(cname='zstd', clevel=1, shuffle=numcodecs.Blosc.SHUFFLE)
-                dask_array.to_zarr(str(output_path), compressor=compressor)
-                print("✅ Zarr compression working with compressor parameter")
-                
-                # Verify data
-                loaded_data = zarr.open(str(output_path))
-                print(f"✅ Data loaded: {loaded_data.shape}")
-                
-                return True
-                
-            except Exception as e:
-                print(f"⚠️ Compressor parameter failed: {e}")
-                
-                # Try without compression (fallback)
-                dask_array.to_zarr(str(output_path))
-                print("✅ No compression works")
-                
-                # Verify data
-                loaded_data = zarr.open(str(output_path))
-                print(f"✅ Data loaded: {loaded_data.shape}")
-                
-                return True
+            # Save without compression
+            dask_array.to_zarr(str(output_path))
+            print("✅ Zarr save without compression works")
+            
+            # Verify data
+            loaded_data = zarr.open(str(output_path))
+            print(f"✅ Data loaded: {loaded_data.shape}")
+            
+            return True
                 
     except ImportError as e:
         print(f"❌ Import error: {e}")
