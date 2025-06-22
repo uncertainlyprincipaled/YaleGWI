@@ -191,12 +191,8 @@ def train(dryrun: bool = False, fp16: bool = False, use_geometric: bool = True):
             
             # Try to use geometric loading
             try:
-                # Check if preprocessed data exists
-                preprocessed_paths = [
-                    Path('/content/drive/MyDrive/YaleGWI/preprocessed'),
-                    Path('/kaggle/working/preprocessed'),
-                    Path('preprocessed')
-                ]
+                # Check if preprocessed data exists using config paths
+                preprocessed_paths = CFG.paths.preprocessed_paths
                 
                 data_root = None
                 for path in preprocessed_paths:
@@ -206,16 +202,31 @@ def train(dryrun: bool = False, fp16: bool = False, use_geometric: bool = True):
                 
                 if data_root:
                     print(f"Using preprocessed data from: {data_root}")
-                    family_loader = FamilyDataLoader(
-                        data_root=str(data_root),
-                        batch_size=CFG.batch,
-                        num_workers=CFG.num_workers,
-                        extract_features=True
-                    )
-                    print("✅ Geometric data loader initialized")
-                    use_geometric_loader = True
+                    
+                    # Check data structure compatibility
+                    structure_check = CFG.check_preprocessed_data_structure(data_root)
+                    print(f"Data structure: {structure_check['current_structure']}")
+                    
+                    if not structure_check['geometric_compatible']:
+                        print("⚠️ Data structure not compatible with geometric loading:")
+                        for issue in structure_check['issues']:
+                            print(f"  - {issue}")
+                        print("Falling back to original loading")
+                        use_geometric_loader = False
+                    else:
+                        family_loader = FamilyDataLoader(
+                            data_root=str(data_root),
+                            batch_size=CFG.batch,
+                            num_workers=CFG.num_workers,
+                            extract_features=True
+                        )
+                        print("✅ Geometric data loader initialized")
+                        use_geometric_loader = True
                 else:
-                    print("⚠️ Preprocessed data not found, falling back to original loading")
+                    print("⚠️ Preprocessed data not found in any expected location:")
+                    for path in preprocessed_paths:
+                        print(f"  - {path} (exists: {path.exists()})")
+                    print("Falling back to original loading")
                     use_geometric_loader = False
                     
             except Exception as e:

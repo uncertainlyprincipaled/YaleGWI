@@ -59,6 +59,45 @@ class _KagglePaths:
         self.aws_train: Optional[Path] = None
         self.aws_test: Optional[Path] = None
         self.aws_output: Optional[Path] = None
+        
+        # Preprocessed data paths (what the training code expects)
+        self.preprocessed_paths = [
+            Path('/kaggle/working/preprocessed'),      # Kaggle working directory
+            Path('/content/drive/MyDrive/YaleGWI/preprocessed'),  # Google Drive
+            Path('preprocessed'),                     # Local directory
+            Path('/content/YaleGWI/preprocessed'),    # Colab local
+        ]
+        
+        # Expected zarr file structure for geometric loading
+        self.expected_zarr_structure = {
+            'geometric_loader': {
+                'description': 'Family-specific directories with seis/ zarr arrays',
+                'structure': {
+                    'gpu0': {
+                        'FlatVel_A': 'seis/',
+                        'FlatVel_B': 'seis/',
+                        'CurveVel_A': 'seis/',
+                        'CurveVel_B': 'seis/',
+                        'Style_A': 'seis/',
+                        'Style_B': 'seis/',
+                        'FlatFault_A': 'seis/',
+                        'FlatFault_B': 'seis/',
+                        'CurveFault_A': 'seis/',
+                        'CurveFault_B': 'seis/',
+                    },
+                    'gpu1': {
+                        # Same structure for GPU1
+                    }
+                }
+            },
+            'current_preprocessing': {
+                'description': 'GPU-specific directories with combined seismic.zarr files',
+                'structure': {
+                    'gpu0': 'seismic.zarr/ (contains seismic/ and velocity/ arrays)',
+                    'gpu1': 'seismic.zarr/ (contains seismic/ and velocity/ arrays)',
+                }
+            }
+        }
 
 class _S3Paths:
     def __init__(self):
@@ -192,6 +231,78 @@ class Config:
     def torch_dtype(self):
         """Helper to get the torch dtype based on config."""
         return getattr(torch, self.dtype)
+    
+    def check_preprocessed_data_structure(self, data_root: Path) -> dict:
+        """
+        Check if the preprocessed data structure matches expected formats.
+        
+        Args:
+            data_root: Path to preprocessed data directory
+            
+        Returns:
+            dict: Status of data structure compatibility
+        """
+        if not data_root.exists():
+            return {
+                'exists': False,
+                'geometric_compatible': False,
+                'current_structure': 'not_found',
+                'issues': ['Data directory does not exist']
+            }
+        
+        # Check for current preprocessing structure (GPU-specific with seismic.zarr)
+        gpu0_path = data_root / 'gpu0'
+        gpu1_path = data_root / 'gpu1'
+        
+        current_structure = 'unknown'
+        geometric_compatible = False
+        issues = []
+        
+        if gpu0_path.exists() and gpu1_path.exists():
+            # Check for current structure: gpu0/seismic.zarr/
+            seismic_zarr_gpu0 = gpu0_path / 'seismic.zarr'
+            seismic_zarr_gpu1 = gpu1_path / 'seismic.zarr'
+            
+            if seismic_zarr_gpu0.exists() and seismic_zarr_gpu1.exists():
+                current_structure = 'gpu_specific_combined'
+                
+                # Check if it contains the expected arrays
+                try:
+                    import zarr
+                    gpu0_data = zarr.open(str(seismic_zarr_gpu0))
+                    if 'seismic' in gpu0_data and 'velocity' in gpu0_data:
+                        geometric_compatible = False  # Current structure doesn't match geometric loader expectations
+                        issues.append('Current structure uses combined seismic.zarr files, but geometric loader expects family-specific directories')
+                    else:
+                        issues.append('seismic.zarr exists but missing expected seismic/velocity arrays')
+                except Exception as e:
+                    issues.append(f'Error reading seismic.zarr: {e}')
+            else:
+                # Check for geometric loader structure: family-specific directories
+                family_dirs = [d for d in gpu0_path.iterdir() if d.is_dir()]
+                if family_dirs:
+                    # Check if any family has the expected seis/ structure
+                    for family_dir in family_dirs:
+                        seis_path = family_dir / 'seis'
+                        if seis_path.exists():
+                            current_structure = 'family_specific_geometric'
+                            geometric_compatible = True
+                            break
+                    else:
+                        current_structure = 'family_specific_unknown'
+                        issues.append('Family directories exist but missing expected seis/ zarr arrays')
+                else:
+                    issues.append('Neither gpu-specific nor family-specific structure found')
+        else:
+            issues.append('Missing gpu0/ and gpu1/ directories')
+        
+        return {
+            'exists': True,
+            'geometric_compatible': geometric_compatible,
+            'current_structure': current_structure,
+            'issues': issues,
+            'data_root': str(data_root)
+        }
 
 CFG = Config()
 
@@ -214,7 +325,9 @@ def save_cfg(out_dir: Path):
                 'root': str(v.root),
                 'train': str(v.train),
                 'test': str(v.test),
-                'families': {k: str(p) for k, p in v.families.items()}
+                'families': {k: str(p) for k, p in v.families.items()},
+                'preprocessed_paths': [str(p) for p in v.preprocessed_paths],
+                'expected_zarr_structure': v.expected_zarr_structure
             }
         else:
             cfg_dict[k] = v
@@ -355,6 +468,11 @@ import json
 from src.core.config import CFG, FAMILY_FILE_MAP
 import tempfile
 from src.core.data_manager import DataManager
+import pickle
+import hashlib
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -382,6 +500,41 @@ class PreprocessingFeedback:
         if self.arrays_processed == 0:
             return 0.0
         return (self.nyquist_warnings / self.arrays_processed) * 100
+
+class PreprocessingCache:
+    """Cache for preprocessing results to avoid reprocessing test data."""
+    def __init__(self, cache_dir: Path = None):
+        self.cache_dir = cache_dir or Path('/tmp/preprocessing_cache')
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+    def _get_cache_key(self, data_hash: str, dt_decimate: int, is_seismic: bool) -> str:
+        """Generate cache key for preprocessing parameters."""
+        key_data = f"{data_hash}_{dt_decimate}_{is_seismic}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def get_cached_result(self, data_hash: str, dt_decimate: int, is_seismic: bool) -> Optional[np.ndarray]:
+        """Get cached preprocessing result if available."""
+        cache_key = self._get_cache_key(data_hash, dt_decimate, is_seismic)
+        cache_file = self.cache_dir / f"{cache_key}.pkl"
+        
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load cache: {e}")
+        return None
+    
+    def cache_result(self, data_hash: str, dt_decimate: int, is_seismic: bool, result: np.ndarray):
+        """Cache preprocessing result."""
+        cache_key = self._get_cache_key(data_hash, dt_decimate, is_seismic)
+        cache_file = self.cache_dir / f"{cache_key}.pkl"
+        
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(result, f)
+        except Exception as e:
+            logger.warning(f"Failed to cache result: {e}")
 
 def verify_data_structure(data_root: Path) -> bool:
     """
@@ -653,6 +806,42 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
         
     return arr
 
+def preprocess_one_cached(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = True, 
+                         feedback: Optional[PreprocessingFeedback] = None,
+                         use_cache: bool = True) -> np.ndarray:
+    """
+    Cached version of preprocess_one for inference efficiency.
+    
+    Args:
+        arr: Input seismic array
+        dt_decimate: The factor by which to downsample the data
+        is_seismic: Flag to indicate if the data is seismic or a velocity model
+        feedback: An optional feedback collector
+        use_cache: Whether to use caching (recommended for inference)
+        
+    Returns:
+        np.ndarray: Preprocessed array
+    """
+    if not use_cache:
+        return preprocess_one(arr, dt_decimate, is_seismic, feedback)
+    
+    # Generate hash of input data for caching
+    data_hash = hashlib.md5(arr.tobytes()).hexdigest()
+    
+    # Check cache first
+    cache = PreprocessingCache()
+    cached_result = cache.get_cached_result(data_hash, dt_decimate, is_seismic)
+    
+    if cached_result is not None:
+        logger.debug(f"Using cached preprocessing result for {data_hash[:8]}...")
+        return cached_result
+    
+    # Process and cache result
+    result = preprocess_one(arr, dt_decimate, is_seismic, feedback)
+    cache.cache_result(data_hash, dt_decimate, is_seismic, result)
+    
+    return result
+
 def process_family(family: str, input_path: Union[str, Path], output_dir: Path, data_manager: Optional[DataManager] = None) -> Tuple[List[str], PreprocessingFeedback]:
     """
     Process all files for a given geological family.
@@ -717,8 +906,8 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
                 vel_arr = np.load(local_vel_path, mmap_mode='r')
                 
                 # Apply preprocessing
-                seis_arr = preprocess_one(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
-                vel_arr = preprocess_one(vel_arr, is_seismic=False, feedback=feedback)
+                seis_arr = preprocess_one_cached(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
+                vel_arr = preprocess_one_cached(vel_arr, is_seismic=False, feedback=feedback)
                 
                 out_seis_path = output_dir / f"seis_{Path(seis_key).stem}.npy"
                 out_vel_path = output_dir / f"vel_{Path(vel_key).stem}.npy"
@@ -749,8 +938,8 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             vel_arr = np.load(vfile, mmap_mode='r')
             
             # Apply preprocessing
-            seis_arr = preprocess_one(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
-            vel_arr = preprocess_one(vel_arr, is_seismic=False, feedback=feedback)
+            seis_arr = preprocess_one_cached(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
+            vel_arr = preprocess_one_cached(vel_arr, is_seismic=False, feedback=feedback)
 
             out_seis_path = output_dir / f"seis_{sfile.stem}.npy"
             out_vel_path = output_dir / f"vel_{vfile.stem}.npy"
@@ -794,8 +983,9 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
         
         logger.info(f"Found {len(seismic_paths)} seismic files and {len(velocity_paths)} velocity files")
         
-        # Process seismic data if available
-        if seismic_paths:
+        # Create a single zarr group with both seismic and velocity data
+        if seismic_paths and velocity_paths:
+            # Process seismic data
             first_seismic = np.load(seismic_paths[0], mmap_mode='r')
             seismic_shape = first_seismic.shape
             seismic_dtype = first_seismic.dtype
@@ -821,17 +1011,7 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             
             logger.info(f"Valid seismic arrays: {valid_seismic}/{len(seismic_paths)}")
             
-            if seismic_arrays:
-                # Stack seismic arrays
-                seismic_stack = da.stack(seismic_arrays, axis=0)
-                logger.info(f"Seismic stack shape: {seismic_stack.shape}")
-                
-                # Save seismic data
-                seismic_output = output_path.parent / f"{output_path.name}_seismic"
-                save_zarr_data(seismic_stack, seismic_output, data_manager)
-        
-        # Process velocity data if available
-        if velocity_paths:
+            # Process velocity data
             first_velocity = np.load(velocity_paths[0], mmap_mode='r')
             velocity_shape = first_velocity.shape
             velocity_dtype = first_velocity.dtype
@@ -857,17 +1037,21 @@ def create_zarr_dataset(processed_paths: List[str], output_path: Path, chunk_siz
             
             logger.info(f"Valid velocity arrays: {valid_velocity}/{len(velocity_paths)}")
             
-            if velocity_arrays:
-                # Stack velocity arrays
+            if seismic_arrays and velocity_arrays:
+                # Stack arrays
+                seismic_stack = da.stack(seismic_arrays, axis=0)
                 velocity_stack = da.stack(velocity_arrays, axis=0)
+                
+                logger.info(f"Seismic stack shape: {seismic_stack.shape}")
                 logger.info(f"Velocity stack shape: {velocity_stack.shape}")
                 
-                # Save velocity data
-                velocity_output = output_path.parent / f"{output_path.name}_velocity"
-                save_zarr_data(velocity_stack, velocity_output, data_manager)
-        
-        if not seismic_arrays and not velocity_arrays:
-            logger.error("No valid arrays found to save")
+                # Save both seismic and velocity data in a single zarr file
+                save_combined_zarr_data(seismic_stack, velocity_stack, output_path, data_manager)
+            else:
+                logger.error("No valid arrays found to save")
+                return
+        else:
+            logger.error("Need both seismic and velocity data to create dataset")
             return
                 
     except Exception as e:
@@ -1170,8 +1354,10 @@ def load_data_debug(input_root, output_root, use_s3=False, debug_family='FlatVel
         logger.info("🐛 Creating empty GPU1 dataset to maintain structure")
         try:
             import zarr
-            empty_data = zarr.create((0, 5, 500, 70), dtype='float16')
-            zarr.save(gpu1_dir / 'seismic.zarr', empty_data)
+            # Create empty combined zarr with both seismic and velocity arrays
+            root = zarr.group(str(gpu1_dir / 'seismic.zarr'))
+            root.create_dataset('seismic', data=np.zeros((0, 5, 500, 70), dtype='float16'))
+            root.create_dataset('velocity', data=np.zeros((0, 1, 70, 70), dtype='float16'))
         except Exception as e:
             logger.warning(f"🐛 Could not create empty GPU1 dataset: {e}")
         
@@ -1247,6 +1433,277 @@ def load_data(input_root, output_root, use_s3=False):
     
     logger.info("--- Preprocessing pipeline complete ---")
     return all_feedback
+
+def save_combined_zarr_data(seismic_stack, velocity_stack, output_path, data_manager):
+    """
+    Save both seismic and velocity data in a single zarr file with proper structure.
+    
+    Args:
+        seismic_stack: Dask array of seismic data
+        velocity_stack: Dask array of velocity data  
+        output_path: Path to save the zarr file
+        data_manager: DataManager instance for S3 operations
+    """
+    # Get the actual shapes after stacking
+    seismic_shape = seismic_stack.shape
+    velocity_shape = velocity_stack.shape
+    logger.info(f"Seismic stack shape: {seismic_shape}")
+    logger.info(f"Velocity stack shape: {velocity_shape}")
+    
+    # Adjust chunk size based on actual data shape and rechunk the arrays
+    if len(seismic_shape) == 5:
+        # For 5D data (batch, samples, sources, time, receivers)
+        seismic_chunk_size = (
+            1,  # batch dimension - keep small for memory efficiency
+            min(4, seismic_shape[1]),  # samples dimension
+            min(4, seismic_shape[2]),  # sources dimension  
+            min(64, seismic_shape[3]),  # time dimension
+            min(8, seismic_shape[4])   # receivers dimension
+        )
+    elif len(seismic_shape) == 4:
+        # For 4D data, use smaller chunks
+        seismic_chunk_size = (1, min(4, seismic_shape[1]), min(64, seismic_shape[2]), min(8, seismic_shape[3]))
+    else:
+        # For other dimensions, create a default chunk size
+        seismic_chunk_size = tuple(1 for _ in range(len(seismic_shape)))
+        logger.warning(f"Using default chunk size {seismic_chunk_size} for unexpected seismic shape {seismic_shape}")
+    
+    # Similar chunking for velocity data
+    if len(velocity_shape) == 4:
+        velocity_chunk_size = (1, min(4, velocity_shape[1]), min(8, velocity_shape[2]), min(8, velocity_shape[3]))
+    else:
+        velocity_chunk_size = tuple(1 for _ in range(len(velocity_shape)))
+        logger.warning(f"Using default chunk size {velocity_chunk_size} for unexpected velocity shape {velocity_shape}")
+    
+    # Rechunk the arrays
+    seismic_stack = seismic_stack.rechunk(seismic_chunk_size)
+    velocity_stack = velocity_stack.rechunk(velocity_chunk_size)
+    
+    logger.info(f"Using seismic chunk size: {seismic_chunk_size}")
+    logger.info(f"Using velocity chunk size: {velocity_chunk_size}")
+
+    # --- Save to Zarr ---
+    # If using S3, save directly to S3. Otherwise, save locally.
+    if data_manager and data_manager.use_s3:
+        import s3fs
+        s3_path = f"s3://{data_manager.s3_bucket}/{output_path.parent.name}/{output_path.name}"
+        logger.info(f"Saving combined zarr dataset to S3: {s3_path}")
+        
+        try:
+            # Create zarr group with both arrays
+            import zarr
+            store = s3fs.S3Map(root=s3_path, s3=data_manager.s3)
+            root = zarr.group(store=store)
+            
+            # Save seismic data
+            seismic_array = root.create_dataset(
+                'seismic', 
+                data=seismic_stack.compute(),
+                chunks=seismic_chunk_size,
+                dtype='float16'
+            )
+            
+            # Save velocity data
+            velocity_array = root.create_dataset(
+                'velocity',
+                data=velocity_stack.compute(), 
+                chunks=velocity_chunk_size,
+                dtype='float16'
+            )
+            
+            logger.info("Successfully saved combined dataset to S3")
+            
+        except Exception as e:
+            logger.warning(f"S3 save failed: {e}")
+            # Fallback to local save
+            logger.info("Falling back to local save...")
+            save_combined_zarr_local(seismic_stack, velocity_stack, output_path)
+            
+    else:
+        logger.info(f"Saving combined zarr dataset locally: {output_path}")
+        save_combined_zarr_local(seismic_stack, velocity_stack, output_path)
+
+def save_combined_zarr_local(seismic_stack, velocity_stack, output_path):
+    """
+    Save combined zarr dataset locally.
+    """
+    try:
+        import zarr
+        
+        # Create zarr group
+        root = zarr.group(str(output_path))
+        
+        # Save seismic data
+        seismic_array = root.create_dataset(
+            'seismic',
+            data=seismic_stack.compute(),
+            chunks=seismic_stack.chunks,
+            dtype='float16'
+        )
+        
+        # Save velocity data  
+        velocity_array = root.create_dataset(
+            'velocity',
+            data=velocity_stack.compute(),
+            chunks=velocity_stack.chunks,
+            dtype='float16'
+        )
+        
+        logger.info("Successfully saved combined dataset locally")
+        
+    except Exception as e:
+        logger.error(f"Local save failed: {e}")
+        # Final fallback - save as numpy arrays
+        try:
+            logger.info("Final fallback: saving as numpy arrays...")
+            np.save(output_path.with_suffix('.seismic.npy'), seismic_stack.compute())
+            np.save(output_path.with_suffix('.velocity.npy'), velocity_stack.compute())
+            logger.info("Saved as numpy arrays as final fallback")
+        except Exception as e2:
+            logger.error(f"All save methods failed: {e2}")
+            raise
+
+def preprocess_test_data_batch(test_files: List[Path], 
+                              output_dir: Path,
+                              dt_decimate: int = 4,
+                              batch_size: int = 100,
+                              num_workers: int = 4,
+                              use_cache: bool = True) -> List[Path]:
+    """
+    Efficiently preprocess test data in batches for inference.
+    
+    Args:
+        test_files: List of test file paths
+        output_dir: Directory to save preprocessed files
+        dt_decimate: Downsampling factor
+        batch_size: Number of files to process in parallel
+        num_workers: Number of parallel workers
+        use_cache: Whether to use preprocessing cache
+        
+    Returns:
+        List of preprocessed file paths
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    processed_files = []
+    
+    logger.info(f"Preprocessing {len(test_files)} test files in batches of {batch_size}")
+    
+    def process_file_batch(file_batch):
+        """Process a batch of files."""
+        batch_results = []
+        for file_path in file_batch:
+            try:
+                # Load data
+                data = np.load(file_path, mmap_mode='r')
+                
+                # Preprocess with caching
+                processed_data = preprocess_one_cached(
+                    data, dt_decimate=dt_decimate, is_seismic=True, 
+                    use_cache=use_cache
+                )
+                
+                # Save preprocessed file
+                output_file = output_dir / f"preprocessed_{file_path.stem}.npy"
+                np.save(output_file, processed_data)
+                batch_results.append(output_file)
+                
+            except Exception as e:
+                logger.error(f"Failed to process {file_path}: {e}")
+                continue
+                
+        return batch_results
+    
+    # Process files in batches
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        
+        for i in range(0, len(test_files), batch_size):
+            batch = test_files[i:i + batch_size]
+            future = executor.submit(process_file_batch, batch)
+            futures.append(future)
+        
+        # Collect results
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing batches"):
+            try:
+                batch_results = future.result()
+                processed_files.extend(batch_results)
+            except Exception as e:
+                logger.error(f"Batch processing failed: {e}")
+    
+    logger.info(f"Successfully processed {len(processed_files)} test files")
+    return processed_files
+
+def create_inference_optimized_dataset(test_files: List[Path],
+                                     output_dir: Path,
+                                     chunk_size: Tuple[int, ...] = (1, 4, 64, 8),
+                                     use_cache: bool = True) -> Path:
+    """
+    Create an inference-optimized zarr dataset for test data.
+    
+    Args:
+        test_files: List of test file paths
+        output_dir: Directory to save the dataset
+        chunk_size: Chunk size for zarr dataset
+        use_cache: Whether to use preprocessing cache
+        
+    Returns:
+        Path to the created zarr dataset
+    """
+    logger.info(f"Creating inference-optimized dataset for {len(test_files)} test files")
+    
+    # Preprocess all test files
+    preprocessed_files = preprocess_test_data_batch(
+        test_files, output_dir / 'temp', use_cache=use_cache
+    )
+    
+    # Create zarr dataset
+    zarr_path = output_dir / 'test_data.zarr'
+    
+    try:
+        # Load all preprocessed data
+        all_data = []
+        for file_path in tqdm(preprocessed_files, desc="Loading preprocessed data"):
+            data = np.load(file_path)
+            all_data.append(data)
+        
+        # Stack into single array
+        stacked_data = np.stack(all_data, axis=0)
+        logger.info(f"Stacked data shape: {stacked_data.shape}")
+        
+        # Save as zarr dataset
+        import dask.array as da
+        dask_array = da.from_array(stacked_data, chunks=chunk_size)
+        dask_array.to_zarr(str(zarr_path))
+        
+        logger.info(f"Created inference dataset at {zarr_path}")
+        
+        # Clean up temporary files
+        import shutil
+        shutil.rmtree(output_dir / 'temp')
+        
+        return zarr_path
+        
+    except Exception as e:
+        logger.error(f"Failed to create inference dataset: {e}")
+        raise
+
+def preprocess_for_inference(data: np.ndarray, 
+                           dt_decimate: int = 4,
+                           use_cache: bool = True) -> np.ndarray:
+    """
+    Inference-optimized preprocessing function that matches training preprocessing exactly.
+    
+    Args:
+        data: Input seismic data
+        dt_decimate: Downsampling factor (must match training)
+        use_cache: Whether to use caching
+        
+    Returns:
+        Preprocessed data in float16
+    """
+    return preprocess_one_cached(
+        data, dt_decimate=dt_decimate, is_seismic=True, use_cache=use_cache
+    )
 
 if __name__ == "__main__":
     main() 

@@ -41,6 +41,45 @@ class _KagglePaths:
         self.aws_train: Optional[Path] = None
         self.aws_test: Optional[Path] = None
         self.aws_output: Optional[Path] = None
+        
+        # Preprocessed data paths (what the training code expects)
+        self.preprocessed_paths = [
+            Path('/kaggle/working/preprocessed'),      # Kaggle working directory
+            Path('/content/drive/MyDrive/YaleGWI/preprocessed'),  # Google Drive
+            Path('preprocessed'),                     # Local directory
+            Path('/content/YaleGWI/preprocessed'),    # Colab local
+        ]
+        
+        # Expected zarr file structure for geometric loading
+        self.expected_zarr_structure = {
+            'geometric_loader': {
+                'description': 'Family-specific directories with seis/ zarr arrays',
+                'structure': {
+                    'gpu0': {
+                        'FlatVel_A': 'seis/',
+                        'FlatVel_B': 'seis/',
+                        'CurveVel_A': 'seis/',
+                        'CurveVel_B': 'seis/',
+                        'Style_A': 'seis/',
+                        'Style_B': 'seis/',
+                        'FlatFault_A': 'seis/',
+                        'FlatFault_B': 'seis/',
+                        'CurveFault_A': 'seis/',
+                        'CurveFault_B': 'seis/',
+                    },
+                    'gpu1': {
+                        # Same structure for GPU1
+                    }
+                }
+            },
+            'current_preprocessing': {
+                'description': 'GPU-specific directories with combined seismic.zarr files',
+                'structure': {
+                    'gpu0': 'seismic.zarr/ (contains seismic/ and velocity/ arrays)',
+                    'gpu1': 'seismic.zarr/ (contains seismic/ and velocity/ arrays)',
+                }
+            }
+        }
 
 class _S3Paths:
     def __init__(self):
@@ -174,6 +213,78 @@ class Config:
     def torch_dtype(self):
         """Helper to get the torch dtype based on config."""
         return getattr(torch, self.dtype)
+    
+    def check_preprocessed_data_structure(self, data_root: Path) -> dict:
+        """
+        Check if the preprocessed data structure matches expected formats.
+        
+        Args:
+            data_root: Path to preprocessed data directory
+            
+        Returns:
+            dict: Status of data structure compatibility
+        """
+        if not data_root.exists():
+            return {
+                'exists': False,
+                'geometric_compatible': False,
+                'current_structure': 'not_found',
+                'issues': ['Data directory does not exist']
+            }
+        
+        # Check for current preprocessing structure (GPU-specific with seismic.zarr)
+        gpu0_path = data_root / 'gpu0'
+        gpu1_path = data_root / 'gpu1'
+        
+        current_structure = 'unknown'
+        geometric_compatible = False
+        issues = []
+        
+        if gpu0_path.exists() and gpu1_path.exists():
+            # Check for current structure: gpu0/seismic.zarr/
+            seismic_zarr_gpu0 = gpu0_path / 'seismic.zarr'
+            seismic_zarr_gpu1 = gpu1_path / 'seismic.zarr'
+            
+            if seismic_zarr_gpu0.exists() and seismic_zarr_gpu1.exists():
+                current_structure = 'gpu_specific_combined'
+                
+                # Check if it contains the expected arrays
+                try:
+                    import zarr
+                    gpu0_data = zarr.open(str(seismic_zarr_gpu0))
+                    if 'seismic' in gpu0_data and 'velocity' in gpu0_data:
+                        geometric_compatible = False  # Current structure doesn't match geometric loader expectations
+                        issues.append('Current structure uses combined seismic.zarr files, but geometric loader expects family-specific directories')
+                    else:
+                        issues.append('seismic.zarr exists but missing expected seismic/velocity arrays')
+                except Exception as e:
+                    issues.append(f'Error reading seismic.zarr: {e}')
+            else:
+                # Check for geometric loader structure: family-specific directories
+                family_dirs = [d for d in gpu0_path.iterdir() if d.is_dir()]
+                if family_dirs:
+                    # Check if any family has the expected seis/ structure
+                    for family_dir in family_dirs:
+                        seis_path = family_dir / 'seis'
+                        if seis_path.exists():
+                            current_structure = 'family_specific_geometric'
+                            geometric_compatible = True
+                            break
+                    else:
+                        current_structure = 'family_specific_unknown'
+                        issues.append('Family directories exist but missing expected seis/ zarr arrays')
+                else:
+                    issues.append('Neither gpu-specific nor family-specific structure found')
+        else:
+            issues.append('Missing gpu0/ and gpu1/ directories')
+        
+        return {
+            'exists': True,
+            'geometric_compatible': geometric_compatible,
+            'current_structure': current_structure,
+            'issues': issues,
+            'data_root': str(data_root)
+        }
 
 CFG = Config()
 
@@ -196,7 +307,9 @@ def save_cfg(out_dir: Path):
                 'root': str(v.root),
                 'train': str(v.train),
                 'test': str(v.test),
-                'families': {k: str(p) for k, p in v.families.items()}
+                'families': {k: str(p) for k, p in v.families.items()},
+                'preprocessed_paths': [str(p) for p in v.preprocessed_paths],
+                'expected_zarr_structure': v.expected_zarr_structure
             }
         else:
             cfg_dict[k] = v
