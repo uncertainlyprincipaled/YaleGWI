@@ -687,9 +687,38 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000, dt_decimate: int
         high_freq_energy = np.abs(fft_data * nyquist_mask).mean()
         total_energy = np.abs(fft_data).mean()
         
-        # If more than 1% of energy is above Nyquist, warn
-        if total_energy > 1e-9 and high_freq_energy / total_energy > 0.01:
-            warnings.warn(f"Significant energy above Nyquist frequency detected: {high_freq_energy/total_energy:.2%}")
+        # Calculate energy ratio
+        energy_ratio = high_freq_energy / total_energy if total_energy > 1e-9 else 0.0
+        
+        # More detailed logging for high energy cases
+        if energy_ratio > 0.01:  # More than 1% energy above Nyquist
+            logger.warning(f"High energy above Nyquist frequency detected: {energy_ratio:.2%}")
+            logger.warning(f"  - Data shape: {data.shape}")
+            logger.warning(f"  - Time axis: {time_axis}")
+            logger.warning(f"  - Original sampling rate: {original_fs} Hz")
+            logger.warning(f"  - Decimation factor: {dt_decimate}")
+            logger.warning(f"  - New Nyquist frequency: {original_fs / (2 * dt_decimate)} Hz")
+            
+            # Check if this might be due to incorrect sampling rate assumption
+            if energy_ratio > 0.5:  # More than 50% energy above Nyquist
+                logger.error(f"CRITICAL: {energy_ratio:.2%} energy above Nyquist frequency!")
+                logger.error("This suggests either:")
+                logger.error("  1. Incorrect sampling rate assumption (not 1000 Hz)")
+                logger.error("  2. Data is already downsampled")
+                logger.error("  3. Data is corrupted or has high-frequency noise")
+                logger.error("  4. Decimation factor is too aggressive")
+                
+                # Suggest alternative sampling rates
+                suggested_rates = [500, 250, 125, 62.5]
+                for rate in suggested_rates:
+                    alt_nyquist = rate / (2 * dt_decimate)
+                    alt_mask = freqs > alt_nyquist
+                    if np.any(alt_mask):
+                        alt_mask = alt_mask.reshape(mask_shape)
+                        alt_high_energy = np.abs(fft_data * alt_mask).mean()
+                        alt_ratio = alt_high_energy / total_energy if total_energy > 1e-9 else 0.0
+                        logger.info(f"  - If sampling rate was {rate} Hz: {alt_ratio:.2%} energy above Nyquist")
+            
             if feedback:
                 feedback.add_nyquist_warning()
             return False
@@ -901,12 +930,17 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             local_seis_path = output_dir / f"temp_seis_{Path(seis_key).name}"
             local_vel_path = output_dir / f"temp_vel_{Path(vel_key).name}"
             
+            logger.debug(f"🐛 Processing S3 files: {seis_key} -> {local_seis_path}")
+            logger.debug(f"🐛 Processing S3 files: {vel_key} -> {local_vel_path}")
+            
             try:
                 data_manager.s3_download(seis_key, str(local_seis_path))
                 data_manager.s3_download(vel_key, str(local_vel_path))
 
                 seis_arr = np.load(local_seis_path, mmap_mode='r')
                 vel_arr = np.load(local_vel_path, mmap_mode='r')
+                
+                logger.debug(f"🐛 Loaded arrays - Seismic: {seis_arr.shape}, Velocity: {vel_arr.shape}")
                 
                 # Apply preprocessing
                 seis_arr = preprocess_one_cached(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
@@ -919,6 +953,8 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
                 np.save(out_vel_path, vel_arr)
                 processed_paths.append(str(out_seis_path))
                 processed_paths.append(str(out_vel_path))
+                
+                logger.debug(f"🐛 Saved processed files: {out_seis_path}, {out_vel_path}")
                 
                 # Clean up temporary files
                 local_seis_path.unlink(missing_ok=True)
@@ -975,6 +1011,19 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             logger.warning(f"🐛 Processed path does not exist: {path}")
     
     logger.info(f"🐛 Existing paths: {len(existing_paths)}/{len(processed_paths)}")
+    
+    # Additional debugging for S3 processing
+    if data_manager and data_manager.use_s3:
+        logger.info(f"🐛 S3 processing summary for {family}:")
+        logger.info(f"🐛 - Seismic keys found: {len(seis_keys) if 'seis_keys' in locals() else 'N/A'}")
+        logger.info(f"🐛 - Velocity keys found: {len(vel_keys) if 'vel_keys' in locals() else 'N/A'}")
+        logger.info(f"🐛 - Seismic prefix: {full_seis_prefix if 'full_seis_prefix' in locals() else 'N/A'}")
+        logger.info(f"🐛 - Velocity prefix: {full_vel_prefix if 'full_vel_prefix' in locals() else 'N/A'}")
+    else:
+        logger.info(f"🐛 Local processing summary for {family}:")
+        logger.info(f"🐛 - Seismic files found: {len(seis_files) if 'seis_files' in locals() else 'N/A'}")
+        logger.info(f"🐛 - Velocity files found: {len(vel_files) if 'vel_files' in locals() else 'N/A'}")
+        logger.info(f"🐛 - Input directory: {input_dir if 'input_dir' in locals() else 'N/A'}")
             
     return processed_paths, feedback
 
@@ -1362,6 +1411,19 @@ def load_data_debug(input_root, output_root, use_s3=False, debug_family='FlatVel
         logger.info(f"🐛 Family {family}: {len(processed_paths)} files processed")
         logger.info(f"🐛 Total processed paths so far: {len(all_processed_paths)}")
         logger.info(f"🐛 Sample processed paths: {processed_paths[:3] if processed_paths else 'None'}")
+
+        # Additional debugging for debug mode
+        if len(processed_paths) == 0:
+            logger.warning(f"🐛 WARNING: No files processed for family {family}")
+            logger.warning(f"🐛 - Input path: {family_input_path}")
+            logger.warning(f"🐛 - Output dir: {family_output_dir}")
+            logger.warning(f"🐛 - Use S3: {use_s3}")
+            if use_s3:
+                logger.warning(f"🐛 - S3 prefix: {family_input_path}")
+            else:
+                logger.warning(f"🐛 - Local path exists: {Path(family_input_path).exists()}")
+                if Path(family_input_path).exists():
+                    logger.warning(f"🐛 - Local path contents: {list(Path(family_input_path).glob('*.npy'))}")
 
     # Create GPU-specific datasets (simplified for debug mode)
     logger.info("🐛 --- Creating GPU-specific datasets (debug mode) ---")
