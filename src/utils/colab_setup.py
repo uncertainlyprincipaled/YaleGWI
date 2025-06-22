@@ -48,6 +48,15 @@ def setup_colab_environment(
     if not Path('/content/YaleGWI').exists():
         print("📥 Cloning repository...")
         subprocess.run(['git', 'clone', repo_url], check=True)
+    else:
+        print("📁 Repository already exists, skipping clone")
+        # Try to update the repository if it's a git repo
+        try:
+            os.chdir('/content/YaleGWI')
+            subprocess.run(['git', 'pull'], check=True)
+            print("✅ Repository updated")
+        except subprocess.CalledProcessError:
+            print("⚠️ Could not update repository, continuing with existing version")
     
     # Change to project directory
     os.chdir('/content/YaleGWI')

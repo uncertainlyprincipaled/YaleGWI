@@ -965,6 +965,16 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             
     logger.info(f"🐛 Processed {len(processed_paths)} files for family {family}")
     logger.info(f"🐛 Processed paths: {processed_paths}")
+    
+    # Check if files actually exist
+    existing_paths = []
+    for path in processed_paths:
+        if Path(path).exists():
+            existing_paths.append(path)
+        else:
+            logger.warning(f"🐛 Processed path does not exist: {path}")
+    
+    logger.info(f"🐛 Existing paths: {len(existing_paths)}/{len(processed_paths)}")
             
     return processed_paths, feedback
 
@@ -1281,6 +1291,8 @@ def main():
             all_processed_paths.extend(processed_paths)
             all_feedback[family] = feedback
             logger.info(f"Family {family}: {len(processed_paths)} samples processed")
+            logger.info(f"🐛 Total processed paths so far: {len(all_processed_paths)}")
+            logger.info(f"🐛 Sample processed paths: {processed_paths[:3] if processed_paths else 'None'}")
 
         # Split and create zarr datasets for GPUs
         logger.info("\nCreating GPU-specific datasets...")
@@ -1348,6 +1360,8 @@ def load_data_debug(input_root, output_root, use_s3=False, debug_family='FlatVel
         all_feedback[family] = feedback
         
         logger.info(f"🐛 Family {family}: {len(processed_paths)} files processed")
+        logger.info(f"🐛 Total processed paths so far: {len(all_processed_paths)}")
+        logger.info(f"🐛 Sample processed paths: {processed_paths[:3] if processed_paths else 'None'}")
 
     # Create GPU-specific datasets (simplified for debug mode)
     logger.info("🐛 --- Creating GPU-specific datasets (debug mode) ---")
@@ -1545,20 +1559,26 @@ def save_combined_zarr_data(seismic_stack, velocity_stack, output_path, data_man
                 import zarr
                 root = zarr.group(str(temp_zarr_path))
                 
-                # Save seismic data
-                root.create_dataset(
-                    'seismic', 
+                # Save seismic data with explicit shape
+                # Convert dask chunks to flat tuple for zarr
+                seismic_chunks = tuple(chunk[0] if isinstance(chunk, tuple) else chunk for chunk in seismic_stack.chunks)
+                seismic_array = root.create_dataset(
+                    'seismic',
                     data=seismic_data,
-                    chunks=seismic_chunk_size,
-                    dtype='float16'
+                    chunks=seismic_chunks,
+                    dtype='float16',
+                    shape=seismic_data.shape  # Explicitly provide shape
                 )
                 
-                # Save velocity data
-                root.create_dataset(
+                # Save velocity data with explicit shape
+                # Convert dask chunks to flat tuple for zarr
+                velocity_chunks = tuple(chunk[0] if isinstance(chunk, tuple) else chunk for chunk in velocity_stack.chunks)
+                velocity_array = root.create_dataset(
                     'velocity',
                     data=velocity_data, 
-                    chunks=velocity_chunk_size,
-                    dtype='float16'
+                    chunks=velocity_chunks,
+                    dtype='float16',
+                    shape=velocity_data.shape  # Explicitly provide shape
                 )
                 
                 # Now upload the entire zarr directory to S3
@@ -1611,19 +1631,23 @@ def save_combined_zarr_local(seismic_stack, velocity_stack, output_path):
         velocity_data = velocity_stack.compute()
         
         # Save seismic data with explicit shape
+        # Convert dask chunks to flat tuple for zarr
+        seismic_chunks = tuple(chunk[0] if isinstance(chunk, tuple) else chunk for chunk in seismic_stack.chunks)
         seismic_array = root.create_dataset(
             'seismic',
             data=seismic_data,
-            chunks=seismic_stack.chunks,
+            chunks=seismic_chunks,
             dtype='float16',
             shape=seismic_data.shape  # Explicitly provide shape
         )
         
         # Save velocity data with explicit shape
+        # Convert dask chunks to flat tuple for zarr
+        velocity_chunks = tuple(chunk[0] if isinstance(chunk, tuple) else chunk for chunk in velocity_stack.chunks)
         velocity_array = root.create_dataset(
             'velocity',
             data=velocity_data,
-            chunks=velocity_stack.chunks,
+            chunks=velocity_chunks,
             dtype='float16',
             shape=velocity_data.shape  # Explicitly provide shape
         )
