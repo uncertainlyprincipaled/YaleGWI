@@ -787,6 +787,7 @@ def run_tests_and_validation() -> Dict[str, Any]:
         # Test 6: 5D Dimension Handling (NEW - Critical for preprocessing fix)
         print("  Testing 5D dimension handling...")
         import tempfile
+        from pathlib import Path
         import zarr
         import dask.array as da
         import dask
@@ -852,6 +853,7 @@ def run_tests_and_validation() -> Dict[str, Any]:
         # Test 7: Shape Separation Test (NEW - Critical for preprocessing fix)
         print("  Testing shape separation...")
         import tempfile
+        from pathlib import Path
         # Create test data with different shapes (like the actual data)
         seismic_data = np.random.randn(500, 5, 250, 70).astype(np.float16)  # Seismic data (downsampled)
         velocity_data = np.random.randn(500, 1, 70, 70).astype(np.float16)  # Velocity data (different shape)

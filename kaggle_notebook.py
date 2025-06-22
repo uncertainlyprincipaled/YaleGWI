@@ -478,6 +478,16 @@ import multiprocessing as mp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Enable debug logging for detailed S3 processing output
+if os.environ.get('DEBUG_MODE', '0') == '1':
+    logger.setLevel(logging.DEBUG)
+    # Also set up debug handler for more detailed output
+    debug_handler = logging.StreamHandler()
+    debug_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    debug_handler.setFormatter(formatter)
+    logger.addHandler(debug_handler)
+
 # Constants for preprocessing
 CHUNK_TIME = 256  # After decimating by 4 - optimized for GPU memory
 CHUNK_SRC_REC = 8  # Chunk size for source-receiver dimensions
@@ -728,6 +738,71 @@ def validate_nyquist(data: np.ndarray, original_fs: int = 1000, dt_decimate: int
         logger.warning(f"Error in validate_nyquist: {e}. Skipping validation.")
         return True
 
+def detect_sampling_rate(data: np.ndarray, original_fs: int = 1000) -> int:
+    """
+    Detect the actual sampling rate of the data by analyzing frequency content.
+    
+    Args:
+        data: Input seismic data array
+        original_fs: Assumed original sampling frequency in Hz
+        
+    Returns:
+        int: Detected sampling rate in Hz
+    """
+    if data.ndim not in [3, 4]:
+        logger.warning(f"Unexpected data dimension {data.ndim} in detect_sampling_rate. Using assumed rate.")
+        return original_fs
+    
+    # Handle different data shapes
+    if data.ndim == 4:
+        if data.shape[1] == 5:  # sources
+            time_axis = 2
+        elif data.shape[1] == 1:  # channels
+            time_axis = 2
+        else:
+            time_axis = np.argmax(data.shape[1:]) + 1
+    else:  # 3D
+        if data.shape[0] == 5:  # sources first
+            time_axis = 1
+        elif data.shape[2] == 5:  # sources last
+            time_axis = 0
+        else:
+            time_axis = np.argmax(data.shape)
+
+    if time_axis >= data.ndim:
+        logger.warning(f"Invalid time_axis {time_axis} for data shape {data.shape}. Using assumed rate.")
+        return original_fs
+
+    try:
+        # Compute FFT
+        fft_data = np.fft.rfft(data, axis=time_axis)
+        freqs = np.fft.rfftfreq(data.shape[time_axis], d=1/original_fs)
+        
+        # Find the frequency where 95% of energy is below
+        total_energy = np.abs(fft_data).sum()
+        cumulative_energy = np.cumsum(np.abs(fft_data).sum(axis=tuple(i for i in range(data.ndim) if i != time_axis)))
+        
+        # Find frequency where 95% of energy is contained
+        energy_threshold = 0.95 * total_energy
+        energy_idx = np.where(cumulative_energy >= energy_threshold)[0]
+        
+        if len(energy_idx) > 0:
+            detected_freq = freqs[energy_idx[0]]
+            
+            # Round to common sampling rates
+            common_rates = [1000, 500, 250, 125, 62.5]
+            detected_rate = min(common_rates, key=lambda x: abs(x - detected_freq))
+            
+            logger.info(f"Detected sampling rate: {detected_rate} Hz (95% energy below {detected_freq:.1f} Hz)")
+            return detected_rate
+        else:
+            logger.warning("Could not detect sampling rate. Using assumed rate.")
+            return original_fs
+            
+    except Exception as e:
+        logger.warning(f"Error in detect_sampling_rate: {e}. Using assumed rate.")
+        return original_fs
+
 def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = True, feedback: Optional[PreprocessingFeedback] = None) -> np.ndarray:
     """
     Preprocess a single seismic array with downsampling and normalization.
@@ -785,20 +860,29 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
                 if time_axis >= arr.ndim:
                     logger.warning(f"Invalid time_axis {time_axis} for data shape {arr.shape}. Skipping decimation.")
                 else:
-                    # Validate Nyquist criterion
-                    if not validate_nyquist(arr, dt_decimate=dt_decimate, feedback=feedback):
-                        logger.warning("Data may violate Nyquist criterion after downsampling")
+                    # Detect actual sampling rate first
+                    detected_fs = detect_sampling_rate(arr, original_fs=1000)
                     
-                    # Decimate time axis with anti-aliasing filter
-                    try:
-                        # Check if the time dimension is large enough for decimation
-                        time_dim_size = arr.shape[time_axis]
-                        if time_dim_size < dt_decimate * 2:
-                            logger.warning(f"Time dimension {time_dim_size} too small for decimation factor {dt_decimate}. Skipping decimation.")
-                        else:
-                            arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
-                    except Exception as e:
-                        logger.warning(f"Decimation failed: {e}. Skipping decimation.")
+                    # Validate Nyquist criterion with detected sampling rate
+                    if not validate_nyquist(arr, original_fs=detected_fs, dt_decimate=dt_decimate, feedback=feedback):
+                        logger.warning(f"Data may violate Nyquist criterion after downsampling (detected fs: {detected_fs} Hz)")
+                        
+                        # If data appears to be already downsampled, skip further decimation
+                        if detected_fs < 1000:
+                            logger.info(f"Data appears to be already downsampled (detected fs: {detected_fs} Hz). Skipping decimation.")
+                            dt_decimate = 1
+                    
+                    # Decimate time axis with anti-aliasing filter (only if not already downsampled)
+                    if dt_decimate > 1:
+                        try:
+                            # Check if the time dimension is large enough for decimation
+                            time_dim_size = arr.shape[time_axis]
+                            if time_dim_size < dt_decimate * 2:
+                                logger.warning(f"Time dimension {time_dim_size} too small for decimation factor {dt_decimate}. Skipping decimation.")
+                            else:
+                                arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
+                        except Exception as e:
+                            logger.warning(f"Decimation failed: {e}. Skipping decimation.")
         elif is_seismic and dt_decimate == 1:
             logger.info("No downsampling applied (dt_decimate=1)")
         
