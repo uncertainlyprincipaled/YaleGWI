@@ -887,6 +887,8 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
         seis_keys = data_manager.list_s3_files(full_seis_prefix)
         vel_keys = data_manager.list_s3_files(full_vel_prefix)
         
+        logger.info(f"Found {len(seis_keys)} seismic files and {len(vel_keys)} velocity files in S3")
+        
         # 2. Check if files exist in S3
         if not seis_keys or not vel_keys:
             logger.warning(f"No data files found for family {family} in S3 at prefixes: {full_seis_prefix}, {full_vel_prefix}")
@@ -895,10 +897,11 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
         # 3. Loop and process from S3
         pbar = tqdm(zip(sorted(seis_keys), sorted(vel_keys)), total=len(seis_keys), desc=f"Processing {family} from S3")
         for seis_key, vel_key in pbar:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                local_seis_path = Path(tmpdir) / Path(seis_key).name
-                local_vel_path = Path(tmpdir) / Path(vel_key).name
-                
+            # Create temporary files in the output directory instead of a temp directory
+            local_seis_path = output_dir / f"temp_seis_{Path(seis_key).name}"
+            local_vel_path = output_dir / f"temp_vel_{Path(vel_key).name}"
+            
+            try:
                 data_manager.s3_download(seis_key, str(local_seis_path))
                 data_manager.s3_download(vel_key, str(local_vel_path))
 
@@ -916,6 +919,17 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
                 np.save(out_vel_path, vel_arr)
                 processed_paths.append(str(out_seis_path))
                 processed_paths.append(str(out_vel_path))
+                
+                # Clean up temporary files
+                local_seis_path.unlink(missing_ok=True)
+                local_vel_path.unlink(missing_ok=True)
+                
+            except Exception as e:
+                logger.error(f"Failed to process {seis_key}: {e}")
+                # Clean up temporary files on error
+                local_seis_path.unlink(missing_ok=True)
+                local_vel_path.unlink(missing_ok=True)
+                continue
     # === Local Processing Path ===
     else:
         if not isinstance(input_path, Path):
@@ -948,6 +962,9 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             np.save(out_vel_path, vel_arr)
             processed_paths.append(str(out_seis_path))
             processed_paths.append(str(out_vel_path))
+            
+    logger.info(f"🐛 Processed {len(processed_paths)} files for family {family}")
+    logger.info(f"🐛 Processed paths: {processed_paths}")
             
     return processed_paths, feedback
 
@@ -1356,8 +1373,18 @@ def load_data_debug(input_root, output_root, use_s3=False, debug_family='FlatVel
             import zarr
             # Create empty combined zarr with both seismic and velocity arrays
             root = zarr.group(str(gpu1_dir / 'seismic.zarr'))
-            root.create_dataset('seismic', data=np.zeros((0, 5, 500, 70), dtype='float16'))
-            root.create_dataset('velocity', data=np.zeros((0, 1, 70, 70), dtype='float16'))
+            root.create_dataset(
+                'seismic', 
+                data=np.zeros((0, 5, 500, 70), dtype='float16'),
+                shape=(0, 5, 500, 70),  # Explicit shape parameter
+                dtype='float16'
+            )
+            root.create_dataset(
+                'velocity', 
+                data=np.zeros((0, 1, 70, 70), dtype='float16'),
+                shape=(0, 1, 70, 70),  # Explicit shape parameter
+                dtype='float16'
+            )
         except Exception as e:
             logger.warning(f"🐛 Could not create empty GPU1 dataset: {e}")
         
@@ -1503,28 +1530,61 @@ def save_combined_zarr_data(seismic_stack, velocity_stack, output_path, data_man
         logger.info(f"Saving combined zarr dataset to S3: {s3_path}")
         
         try:
-            # Create zarr group with both arrays
-            import zarr
-            store = s3fs.S3Map(root=s3_path, s3=data_manager.s3)
-            root = zarr.group(store=store)
+            # Use dask's to_zarr method which handles S3 better
+            logger.info("Attempting S3 save with dask.to_zarr...")
             
-            # Save seismic data
-            seismic_array = root.create_dataset(
-                'seismic', 
-                data=seismic_stack.compute(),
-                chunks=seismic_chunk_size,
-                dtype='float16'
-            )
+            # Compute the data first to avoid S3 compatibility issues
+            seismic_data = seismic_stack.compute()
+            velocity_data = velocity_stack.compute()
             
-            # Save velocity data
-            velocity_array = root.create_dataset(
-                'velocity',
-                data=velocity_stack.compute(), 
-                chunks=velocity_chunk_size,
-                dtype='float16'
-            )
-            
-            logger.info("Successfully saved combined dataset to S3")
+            # Create a temporary local zarr file first
+            with tempfile.TemporaryDirectory() as tmpdir:
+                temp_zarr_path = Path(tmpdir) / "temp.zarr"
+                
+                # Save locally first
+                import zarr
+                root = zarr.group(str(temp_zarr_path))
+                
+                # Save seismic data
+                root.create_dataset(
+                    'seismic', 
+                    data=seismic_data,
+                    chunks=seismic_chunk_size,
+                    dtype='float16'
+                )
+                
+                # Save velocity data
+                root.create_dataset(
+                    'velocity',
+                    data=velocity_data, 
+                    chunks=velocity_chunk_size,
+                    dtype='float16'
+                )
+                
+                # Now upload the entire zarr directory to S3
+                import shutil
+                import subprocess
+                
+                # Use aws CLI to sync the zarr directory to S3
+                s3_uri = f"s3://{data_manager.s3_bucket}/{output_path.parent.name}/{output_path.name}"
+                try:
+                    subprocess.run([
+                        'aws', 's3', 'sync', str(temp_zarr_path), s3_uri, '--quiet'
+                    ], check=True)
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # Fallback: use boto3 to upload files
+                    logger.info("AWS CLI not available, using boto3 fallback...")
+                    import boto3
+                    s3_client = boto3.client('s3')
+                    
+                    # Upload each file in the zarr directory
+                    for file_path in temp_zarr_path.rglob('*'):
+                        if file_path.is_file():
+                            relative_path = file_path.relative_to(temp_zarr_path)
+                            s3_key = f"{output_path.parent.name}/{output_path.name}/{relative_path}"
+                            s3_client.upload_file(str(file_path), data_manager.s3_bucket, str(s3_key))
+                
+                logger.info("Successfully saved combined dataset to S3")
             
         except Exception as e:
             logger.warning(f"S3 save failed: {e}")
@@ -1546,20 +1606,26 @@ def save_combined_zarr_local(seismic_stack, velocity_stack, output_path):
         # Create zarr group
         root = zarr.group(str(output_path))
         
-        # Save seismic data
+        # Compute the data first to get actual shapes
+        seismic_data = seismic_stack.compute()
+        velocity_data = velocity_stack.compute()
+        
+        # Save seismic data with explicit shape
         seismic_array = root.create_dataset(
             'seismic',
-            data=seismic_stack.compute(),
+            data=seismic_data,
             chunks=seismic_stack.chunks,
-            dtype='float16'
+            dtype='float16',
+            shape=seismic_data.shape  # Explicitly provide shape
         )
         
-        # Save velocity data  
+        # Save velocity data with explicit shape
         velocity_array = root.create_dataset(
             'velocity',
-            data=velocity_stack.compute(),
+            data=velocity_data,
             chunks=velocity_stack.chunks,
-            dtype='float16'
+            dtype='float16',
+            shape=velocity_data.shape  # Explicitly provide shape
         )
         
         logger.info("Successfully saved combined dataset locally")
@@ -1569,8 +1635,10 @@ def save_combined_zarr_local(seismic_stack, velocity_stack, output_path):
         # Final fallback - save as numpy arrays
         try:
             logger.info("Final fallback: saving as numpy arrays...")
-            np.save(output_path.with_suffix('.seismic.npy'), seismic_stack.compute())
-            np.save(output_path.with_suffix('.velocity.npy'), velocity_stack.compute())
+            seismic_data = seismic_stack.compute()
+            velocity_data = velocity_stack.compute()
+            np.save(output_path.with_suffix('.seismic.npy'), seismic_data)
+            np.save(output_path.with_suffix('.velocity.npy'), velocity_data)
             logger.info("Saved as numpy arrays as final fallback")
         except Exception as e2:
             logger.error(f"All save methods failed: {e2}")
