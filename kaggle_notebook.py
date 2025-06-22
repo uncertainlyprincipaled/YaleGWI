@@ -394,10 +394,10 @@ class SeismicDataset(Dataset):
 # Temporary mapping for family data structure
 FAMILY_FILE_MAP = {
     'CurveFault_A': {
-        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
+        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
     },
     'CurveFault_B': {
-        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
+        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
     },
     'CurveVel_A': {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
@@ -406,10 +406,10 @@ FAMILY_FILE_MAP = {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
     },
     'FlatFault_A': {
-        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
+        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
     },
     'FlatFault_B': {
-        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 1
+        'seis_glob': 'seis*.npy', 'vel_glob': 'vel*.npy', 'seis_dir': '', 'vel_dir': '', 'downsample_factor': 4
     },
     'FlatVel_A': {
         'seis_glob': 'data/*.npy', 'vel_glob': 'model/*.npy', 'seis_dir': 'data', 'vel_dir': 'model', 'downsample_factor': 4
@@ -877,12 +877,28 @@ def preprocess_one(arr: np.ndarray, dt_decimate: int = 4, is_seismic: bool = Tru
                         try:
                             # Check if the time dimension is large enough for decimation
                             time_dim_size = arr.shape[time_axis]
-                            if time_dim_size < dt_decimate * 2:
-                                logger.warning(f"Time dimension {time_dim_size} too small for decimation factor {dt_decimate}. Skipping decimation.")
+                            
+                            # If data is detected as already downsampled but still has large time dimension,
+                            # we need to downsample to get to the target time dimension
+                            target_time_dim = 500  # Target time dimension after preprocessing
+                            
+                            if time_dim_size > target_time_dim:
+                                # Calculate required decimation factor to reach target
+                                required_decimate = time_dim_size // target_time_dim
+                                logger.info(f"Time dimension {time_dim_size} > {target_time_dim}. Applying decimation factor {required_decimate}")
+                                
+                                if time_dim_size >= required_decimate * 2:
+                                    arr = decimate(arr, required_decimate, axis=time_axis, ftype='fir')
+                                    logger.info(f"Decimated from {time_dim_size} to {arr.shape[time_axis]} time steps")
+                                else:
+                                    logger.warning(f"Time dimension {time_dim_size} too small for decimation factor {required_decimate}. Skipping decimation.")
                             else:
-                                arr = decimate(arr, dt_decimate, axis=time_axis, ftype='fir')
+                                logger.info(f"Time dimension {time_dim_size} already at or below target {target_time_dim}. No decimation needed.")
+                                
                         except Exception as e:
                             logger.warning(f"Decimation failed: {e}. Skipping decimation.")
+                    else:
+                        logger.info(f"No decimation applied (dt_decimate={dt_decimate})")
         elif is_seismic and dt_decimate == 1:
             logger.info("No downsampling applied (dt_decimate=1)")
         
@@ -1018,34 +1034,55 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
             logger.debug(f"🐛 Processing S3 files: {vel_key} -> {local_vel_path}")
             
             try:
+                # Download files from S3
+                logger.debug(f"🐛 Downloading {seis_key}...")
                 data_manager.s3_download(seis_key, str(local_seis_path))
+                logger.debug(f"🐛 Downloading {vel_key}...")
                 data_manager.s3_download(vel_key, str(local_vel_path))
 
+                # Check if files were downloaded successfully
+                if not local_seis_path.exists():
+                    logger.error(f"🐛 Failed to download seismic file: {seis_key}")
+                    continue
+                if not local_vel_path.exists():
+                    logger.error(f"🐛 Failed to download velocity file: {vel_key}")
+                    continue
+
+                logger.debug(f"🐛 Loading arrays from downloaded files...")
                 seis_arr = np.load(local_seis_path, mmap_mode='r')
                 vel_arr = np.load(local_vel_path, mmap_mode='r')
                 
                 logger.debug(f"🐛 Loaded arrays - Seismic: {seis_arr.shape}, Velocity: {vel_arr.shape}")
                 
                 # Apply preprocessing
+                logger.debug(f"🐛 Applying preprocessing to seismic data...")
                 seis_arr = preprocess_one_cached(seis_arr, dt_decimate=downsample_factor, is_seismic=True, feedback=feedback)
+                logger.debug(f"🐛 Applying preprocessing to velocity data...")
                 vel_arr = preprocess_one_cached(vel_arr, is_seismic=False, feedback=feedback)
+                
+                logger.debug(f"🐛 Preprocessed arrays - Seismic: {seis_arr.shape}, Velocity: {vel_arr.shape}")
                 
                 out_seis_path = output_dir / f"seis_{Path(seis_key).stem}.npy"
                 out_vel_path = output_dir / f"vel_{Path(vel_key).stem}.npy"
                 
+                logger.debug(f"🐛 Saving processed files...")
                 np.save(out_seis_path, seis_arr)
                 np.save(out_vel_path, vel_arr)
-                processed_paths.append(str(out_seis_path))
-                processed_paths.append(str(out_vel_path))
                 
-                logger.debug(f"🐛 Saved processed files: {out_seis_path}, {out_vel_path}")
+                # Verify files were saved
+                if out_seis_path.exists() and out_vel_path.exists():
+                    processed_paths.append(str(out_seis_path))
+                    processed_paths.append(str(out_vel_path))
+                    logger.debug(f"🐛 Successfully saved and added to processed paths: {out_seis_path}, {out_vel_path}")
+                else:
+                    logger.error(f"🐛 Failed to save processed files: {out_seis_path}, {out_vel_path}")
                 
                 # Clean up temporary files
                 local_seis_path.unlink(missing_ok=True)
                 local_vel_path.unlink(missing_ok=True)
                 
             except Exception as e:
-                logger.error(f"Failed to process {seis_key}: {e}")
+                logger.error(f"🐛 Failed to process {seis_key}: {e}")
                 # Clean up temporary files on error
                 local_seis_path.unlink(missing_ok=True)
                 local_vel_path.unlink(missing_ok=True)
