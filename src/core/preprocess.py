@@ -1037,8 +1037,21 @@ def save_combined_zarr_data(seismic_stack, velocity_stack, output_path, data_man
         logger.warning(f"Using default chunk size {seismic_chunk_size} for unexpected seismic shape {seismic_shape}")
     
     # Similar chunking for velocity data
-    if len(velocity_shape) == 4:
+    if len(velocity_shape) == 5:
+        # For 5D velocity data (batch, samples, channels, height, width)
+        velocity_chunk_size = (
+            1,  # batch dimension - keep small for memory efficiency
+            min(4, velocity_shape[1]),  # samples dimension
+            min(1, velocity_shape[2]),  # channels dimension (usually 1 for velocity)
+            min(8, velocity_shape[3]),  # height dimension
+            min(8, velocity_shape[4])   # width dimension
+        )
+    elif len(velocity_shape) == 4:
+        # For 4D velocity data (batch, channels, height, width)
         velocity_chunk_size = (1, min(4, velocity_shape[1]), min(8, velocity_shape[2]), min(8, velocity_shape[3]))
+    elif len(velocity_shape) == 3:
+        # For 3D velocity data (channels, height, width)
+        velocity_chunk_size = (1, min(8, velocity_shape[1]), min(8, velocity_shape[2]))
     else:
         velocity_chunk_size = tuple(1 for _ in range(len(velocity_shape)))
         logger.warning(f"Using default chunk size {velocity_chunk_size} for unexpected velocity shape {velocity_shape}")
