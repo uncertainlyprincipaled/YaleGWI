@@ -100,6 +100,58 @@ def test_different_families():
         print(f"❌ Family tests failed with error: {e}")
         return False
 
+def test_s3_debugging():
+    """Test S3 structure debugging functionality."""
+    print("🔍 Testing S3 structure debugging...")
+    
+    try:
+        from src.utils.colab_setup import debug_s3_structure
+        from src.core.data_manager import DataManager
+        
+        # Test with S3 enabled
+        data_manager = DataManager(use_s3=True)
+        
+        # Debug S3 structure for FlatVel_A
+        debug_s3_structure(data_manager, 'FlatVel_A')
+        
+        print("✅ S3 debugging test completed")
+        return True
+        
+    except Exception as e:
+        print(f"❌ S3 debugging test failed: {e}")
+        return False
+
+def test_s3_download():
+    """Test S3 download functionality."""
+    print("📋 Testing S3 download functionality...")
+    
+    try:
+        from src.utils.colab_setup import download_preprocessed_data_from_s3
+        from src.core.data_manager import DataManager
+        import tempfile
+        from pathlib import Path
+        
+        # Test with S3 enabled
+        data_manager = DataManager(use_s3=True)
+        
+        # Create temporary directory for download
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir) / "test_download"
+            
+            # Try to download preprocessed data
+            success = download_preprocessed_data_from_s3("preprocessed", str(tmp_path), data_manager)
+            
+            if success:
+                print(f"✅ S3 download test successful - downloaded to {tmp_path}")
+            else:
+                print("⚠️ S3 download test - no files found (this is expected if no preprocessed data exists)")
+            
+            return True
+        
+    except Exception as e:
+        print(f"❌ S3 download test failed: {e}")
+        return False
+
 def main():
     """Run all debug mode tests."""
     print("🧪 Debug Mode Testing Suite")
@@ -108,7 +160,9 @@ def main():
     tests = [
         ("Local Processing", test_debug_mode_local),
         ("S3 Processing", test_debug_mode_s3),
-        ("Different Families", test_different_families)
+        ("Different Families", test_different_families),
+        ("S3 Debugging", test_s3_debugging),
+        ("S3 Download", test_s3_download)
     ]
     
     results = {}

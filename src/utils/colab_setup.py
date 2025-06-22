@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 import logging
 import numpy as np
 import tempfile
+from tqdm import tqdm
 
 # Set up logging robustly to ensure messages are always displayed
 logger = logging.getLogger()
@@ -479,8 +480,27 @@ def run_preprocessing(
             elif data_exists['exists_in_s3'] and not data_exists['exists_locally'] and not data_exists['exists_in_drive']:
                 if not force_reprocess:
                     print("📋 Found data in S3 but not locally - downloading...")
-                    # TODO: Implement S3 download functionality
-                    print("⚠️ S3 download not yet implemented - will reprocess")
+                    # Implement S3 download functionality
+                    try:
+                        from src.core.data_manager import DataManager
+                        s3_data_manager = DataManager(use_s3=True)
+                        
+                        # Debug S3 structure first
+                        debug_s3_structure(s3_data_manager, debug_family if debug_mode else 'FlatVel_A')
+                        
+                        # Try to download preprocessed data
+                        s3_prefix = "preprocessed"
+                        if download_preprocessed_data_from_s3(s3_prefix, output_root, s3_data_manager):
+                            print("✅ Successfully downloaded preprocessed data from S3")
+                            result['success'] = True
+                            result['processed_files'] = 0
+                            result['skipped'] = True
+                            result['downloaded_from_s3'] = True
+                            return result
+                        else:
+                            print("⚠️ Failed to download from S3 - will reprocess")
+                    except Exception as e:
+                        print(f"⚠️ S3 download failed: {e} - will reprocess")
                 else:
                     print("🔄 Force reprocessing requested - will reprocess even though data exists in S3")
         else:
@@ -1811,6 +1831,115 @@ def _update_s3fs() -> bool:
         print(f"❌ Failed to update s3fs: {e}")
         print("⚠️ Continuing with old version - S3 operations may fail")
         return False
+
+def download_preprocessed_data_from_s3(s3_prefix: str, local_path: str, data_manager) -> bool:
+    """
+    Download preprocessed data from S3 to local directory.
+    
+    Args:
+        s3_prefix: S3 prefix for preprocessed data
+        local_path: Local path to download to
+        data_manager: DataManager instance for S3 operations
+        
+    Returns:
+        bool: True if download was successful
+    """
+    try:
+        print(f"📋 Downloading preprocessed data from S3...")
+        print(f"  From: s3://{data_manager.s3_bucket}/{s3_prefix}")
+        print(f"  To: {local_path}")
+        
+        # Create local directory
+        local_dir = Path(local_path)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        
+        # List all files in the S3 prefix
+        s3_keys = data_manager.list_s3_files(s3_prefix)
+        
+        if not s3_keys:
+            print(f"❌ No files found in S3 prefix: {s3_prefix}")
+            return False
+        
+        print(f"📋 Found {len(s3_keys)} files to download")
+        
+        # Download each file
+        downloaded_count = 0
+        for s3_key in tqdm(s3_keys, desc="Downloading from S3"):
+            try:
+                # Create local file path
+                relative_path = s3_key[len(s3_prefix):].lstrip('/')
+                local_file_path = local_dir / relative_path
+                
+                # Create parent directory if needed
+                local_file_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Download file
+                if data_manager.s3_download(s3_key, str(local_file_path)):
+                    downloaded_count += 1
+                else:
+                    print(f"⚠️ Failed to download: {s3_key}")
+                    
+            except Exception as e:
+                print(f"⚠️ Error downloading {s3_key}: {e}")
+                continue
+        
+        print(f"✅ Successfully downloaded {downloaded_count}/{len(s3_keys)} files from S3")
+        return downloaded_count > 0
+        
+    except Exception as e:
+        print(f"❌ Error downloading from S3: {e}")
+        return False
+
+def debug_s3_structure(data_manager, family: str = 'FlatVel_A'):
+    """
+    Debug S3 structure to understand what files are available.
+    
+    Args:
+        data_manager: DataManager instance
+        family: Family to debug (default: 'FlatVel_A')
+    """
+    print(f"🔍 Debugging S3 structure for family: {family}")
+    
+    try:
+        from src.core.config import CFG, FAMILY_FILE_MAP
+        
+        # Get S3 family prefix
+        s3_family_prefix = CFG.s3_paths.families[family]
+        print(f"🐛 S3 family prefix: {s3_family_prefix}")
+        
+        # Get family configuration
+        family_config = FAMILY_FILE_MAP.get(family, {})
+        print(f"🐛 Family config: {family_config}")
+        
+        # Check different possible structures
+        possible_prefixes = [
+            s3_family_prefix,
+            f"{s3_family_prefix}/",
+            f"{s3_family_prefix}/data/",
+            f"{s3_family_prefix}/model/",
+            f"{s3_family_prefix}/seis/",
+            f"{s3_family_prefix}/vel/",
+        ]
+        
+        for prefix in possible_prefixes:
+            print(f"🐛 Checking prefix: {prefix}")
+            files = data_manager.list_s3_files(prefix)
+            print(f"🐛   Found {len(files)} files")
+            if files:
+                print(f"🐛   Sample files: {files[:3]}")
+            else:
+                print(f"🐛   No files found")
+        
+        # Also check the raw prefix
+        raw_prefix = CFG.s3_paths.raw_prefix
+        print(f"🐛 Raw prefix: {raw_prefix}")
+        raw_files = data_manager.list_s3_files(raw_prefix)
+        print(f"🐛 Raw files found: {len(raw_files)}")
+        if raw_files:
+            print(f"🐛 Sample raw files: {raw_files[:5]}")
+        
+    except Exception as e:
+        print(f"❌ Error debugging S3 structure: {e}")
 
 if __name__ == "__main__":
     # Example usage

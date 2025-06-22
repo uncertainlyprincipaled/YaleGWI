@@ -1013,10 +1013,46 @@ def process_family(family: str, input_path: Union[str, Path], output_dir: Path, 
         full_seis_prefix = f"{family_s3_prefix}/{seis_dir}/" if seis_dir else f"{family_s3_prefix}/"
         full_vel_prefix = f"{family_s3_prefix}/{vel_dir}/" if vel_dir else f"{family_s3_prefix}/"
         
+        logger.info(f"🐛 S3 processing for family {family}")
+        logger.info(f"🐛 Family S3 prefix: {family_s3_prefix}")
+        logger.info(f"🐛 Seismic prefix: {full_seis_prefix}")
+        logger.info(f"🐛 Velocity prefix: {full_vel_prefix}")
+        
         seis_keys = data_manager.list_s3_files(full_seis_prefix)
         vel_keys = data_manager.list_s3_files(full_vel_prefix)
         
-        logger.info(f"Found {len(seis_keys)} seismic files and {len(vel_keys)} velocity files in S3")
+        logger.info(f"🐛 Found {len(seis_keys)} seismic files and {len(vel_keys)} velocity files in S3")
+        
+        # If no files found with expected structure, try alternative patterns
+        if not seis_keys or not vel_keys:
+            logger.warning(f"🐛 No files found with expected structure. Trying alternative patterns...")
+            
+            # Try different possible patterns
+            alternative_patterns = [
+                (f"{family_s3_prefix}/", f"{family_s3_prefix}/"),  # Same prefix for both
+                (f"{family_s3_prefix}/seis/", f"{family_s3_prefix}/vel/"),  # seis/vel subdirs
+                (f"{family_s3_prefix}/data/", f"{family_s3_prefix}/model/"),  # data/model subdirs
+                (f"{family_s3_prefix}/", f"{family_s3_prefix}/"),  # Root level
+            ]
+            
+            for seis_pattern, vel_pattern in alternative_patterns:
+                logger.info(f"🐛 Trying pattern: seis={seis_pattern}, vel={vel_pattern}")
+                test_seis_keys = data_manager.list_s3_files(seis_pattern)
+                test_vel_keys = data_manager.list_s3_files(vel_pattern)
+                
+                logger.info(f"🐛   Found {len(test_seis_keys)} seismic, {len(test_vel_keys)} velocity")
+                
+                if test_seis_keys and test_vel_keys:
+                    logger.info(f"🐛   Success! Using alternative pattern")
+                    seis_keys = test_seis_keys
+                    vel_keys = test_vel_keys
+                    full_seis_prefix = seis_pattern
+                    full_vel_prefix = vel_pattern
+                    break
+            else:
+                logger.error(f"🐛 No alternative patterns worked. Available files in {family_s3_prefix}:")
+                all_files = data_manager.list_s3_files(family_s3_prefix)
+                logger.error(f"🐛   {all_files}")
         
         # 2. Check if files exist in S3
         if not seis_keys or not vel_keys:

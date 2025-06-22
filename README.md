@@ -19,6 +19,7 @@
     - [Usage Examples](#usage-examples-1)
     - [Model Tracking](#model-tracking)
     - [AWS Management Tools](#aws-management-tools)
+    - [S3 Debugging and Troubleshooting](#s3-debugging-and-troubleshooting)
 
 ## 1. Overview
 
@@ -925,6 +926,91 @@ Precision_Strategy = {
 ---
 
 ## 6. Additional Documentation
+
+### S3 Debugging and Troubleshooting
+
+If you're experiencing issues with S3 data loading or preprocessing, use these debugging tools:
+
+#### Quick S3 Debug
+```python
+# Run the S3 debugging utility
+!python src/utils/debug_s3.py
+```
+
+#### Debug Mode for Preprocessing
+```python
+# Use debug mode to process only one family and see detailed logs
+from src.utils.colab_setup import quick_colab_setup_streamlined
+
+results = quick_colab_setup_streamlined(
+    use_s3=True,
+    debug_mode=True,           # Process only one family
+    debug_family='FlatVel_A',  # Which family to process
+    force_reprocess=True       # Force reprocessing
+)
+```
+
+#### Manual S3 Structure Check
+```python
+from src.utils.colab_setup import debug_s3_structure
+from src.core.data_manager import DataManager
+
+# Check S3 structure for a specific family
+data_manager = DataManager(use_s3=True)
+debug_s3_structure(data_manager, 'FlatVel_A')
+```
+
+#### Common S3 Issues and Solutions
+
+1. **No files found in S3**
+   - **Cause**: S3 bucket structure doesn't match expected patterns
+   - **Solution**: Run `debug_s3.py` to see actual bucket structure
+   - **Fix**: Update `FAMILY_FILE_MAP` in `src/core/config.py` to match your structure
+
+2. **AWS credentials not found**
+   - **Cause**: Environment variables not set
+   - **Solution**: Set AWS credentials in Colab secrets or environment variables
+   ```python
+   import os
+   os.environ['AWS_ACCESS_KEY_ID'] = 'your_access_key'
+   os.environ['AWS_SECRET_ACCESS_KEY'] = 'your_secret_key'
+   os.environ['AWS_REGION'] = 'us-east-1'
+   os.environ['AWS_S3_BUCKET'] = 'your_bucket_name'
+   ```
+
+3. **S3fs compatibility issues**
+   - **Cause**: Old s3fs version causing 'asynchronous' parameter errors
+   - **Solution**: Run the setup script to fix s3fs
+   ```python
+   !python setup_s3fs.py
+   ```
+
+4. **Permission denied errors**
+   - **Cause**: AWS credentials don't have read access to S3 bucket
+   - **Solution**: Check IAM permissions for S3 read access
+
+#### Expected S3 Structure
+The preprocessing expects this structure in your S3 bucket:
+```
+your-bucket/
+├── raw/train_samples/
+│   ├── FlatVel_A/
+│   │   ├── data/
+│   │   │   └── *.npy (seismic files)
+│   │   └── model/
+│   │       └── *.npy (velocity files)
+│   ├── FlatVel_B/
+│   │   ├── data/
+│   │   └── model/
+│   └── ... (other families)
+└── preprocessed/
+    ├── gpu0/
+    │   └── seismic.zarr/
+    └── gpu1/
+        └── seismic.zarr/
+```
+
+If your structure is different, the preprocessing will try alternative patterns automatically.
 
 ### Usage Examples
 - For large datasets, use the provided preprocessing script to create GPU-specific datasets
