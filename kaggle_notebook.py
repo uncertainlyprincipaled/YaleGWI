@@ -483,6 +483,7 @@ import hashlib
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -2038,6 +2039,15 @@ def preprocess_for_inference(data: np.ndarray,
     return preprocess_one_cached(
         data, dt_decimate=dt_decimate, is_seismic=True, use_cache=use_cache
     )
+
+def upload_dye_marker(data_manager, prefix="preprocessed/dye_marker"):
+    marker_name = f"{prefix}_{int(time.time())}.txt"
+    local_marker = "/tmp/dye_marker.txt"
+    with open(local_marker, "w") as f:
+        f.write(f"Upload marker at {time.ctime()}\n")
+    if data_manager.use_s3:
+        data_manager.s3.upload_file(local_marker, data_manager.s3_bucket, marker_name)
+    print(f"🟢 Dye marker uploaded: {marker_name}")
 
 if __name__ == "__main__":
     main() 
