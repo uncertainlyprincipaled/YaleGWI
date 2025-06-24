@@ -1564,6 +1564,12 @@ def load_data_debug(input_root, output_root, use_s3=False, debug_family='FlatVel
             family_input_path = f"{input_root}/{family}"
             logger.info(f"🐛 S3 input path: {family_input_path}")
             processed_paths, feedback = process_family(family, family_input_path, family_output_dir, data_manager)
+            try:
+                if use_s3:
+                    from src.core.preprocess import upload_dye_marker
+                    upload_dye_marker(data_manager)
+            except Exception as e:
+                print(f"⚠️ Failed to upload dye marker: {e}")
         else:
             # For local, the input_path is a Path object
             family_input_path = Path(input_root) / family
@@ -1679,6 +1685,12 @@ def load_data(input_root, output_root, use_s3=False):
             # For S3, the input_path is a prefix string
             family_input_path = f"{input_root}/{family}"
             processed_paths, feedback = process_family(family, family_input_path, family_output_dir, data_manager)
+            try:
+                if use_s3:
+                    from src.core.preprocess import upload_dye_marker
+                    upload_dye_marker(data_manager)
+            except Exception as e:
+                print(f"⚠️ Failed to upload dye marker: {e}")
         else:
             # For local, the input_path is a Path object
             family_input_path = Path(input_root) / family

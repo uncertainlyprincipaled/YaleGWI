@@ -544,6 +544,16 @@ def run_preprocessing(
         if debug_mode:
             print(f"🐛 Debug mode: Processed only family '{debug_family}'")
         
+        # Upload dye marker to S3 for monitoring
+        try:
+            if use_s3:
+                from src.core.preprocess import upload_dye_marker
+                from src.core.data_manager import DataManager
+                data_manager = DataManager(use_s3=True)
+                upload_dye_marker(data_manager)
+        except Exception as e:
+            print(f"⚠️ Failed to upload dye marker: {e}")
+        
         # Verify output
         output_dir = Path(output_root)
         if output_dir.exists():
