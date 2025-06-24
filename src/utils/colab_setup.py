@@ -1564,7 +1564,54 @@ def quick_colab_setup_streamlined(
     import sys
     sys.path.append('/content/YaleGWI/src')
     
-    from src.core.config import CFG
+    # Check for missing dependencies and install them if needed
+    print("🔍 Checking for required dependencies...")
+    missing_deps = []
+    
+    try:
+        import boto3
+        print("✅ boto3 available")
+    except ImportError:
+        print("❌ boto3 not available - installing...")
+        missing_deps.append('boto3')
+    
+    try:
+        import zarr
+        print("✅ zarr available")
+    except ImportError:
+        print("❌ zarr not available - installing...")
+        missing_deps.append('zarr')
+    
+    try:
+        import dask
+        print("✅ dask available")
+    except ImportError:
+        print("❌ dask not available - installing...")
+        missing_deps.append('dask')
+    
+    # Install missing dependencies
+    if missing_deps:
+        print(f"📦 Installing missing dependencies: {missing_deps}")
+        for dep in missing_deps:
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', dep], check=True)
+                print(f"✅ Installed {dep}")
+            except subprocess.CalledProcessError as e:
+                print(f"❌ Failed to install {dep}: {e}")
+                if dep == 'boto3' and use_s3:
+                    print("⚠️ boto3 is required for S3 operations. Switching to local mode.")
+                    use_s3 = False
+                    results['aws_credentials'] = 'switched_to_local'
+    
+    # Now try to import config
+    try:
+        from src.core.config import CFG
+        print("✅ Config imported successfully")
+    except ImportError as e:
+        print(f"❌ Failed to import config: {e}")
+        print("💡 This might be due to missing dependencies. Please run setup_s3fs.py first.")
+        raise
+    
     # Determine the correct input root based on whether we're using S3
     effective_input_root = CFG.s3_paths.raw_prefix if use_s3 else '/content/YaleGWI/train_samples'
     print(f"Effective input root: {effective_input_root}")

@@ -8,8 +8,18 @@ import json
 from pathlib import Path
 from typing import Literal, NamedTuple, Optional
 import torch
-import boto3
-from botocore.exceptions import ClientError
+
+# Make boto3 import optional to prevent ModuleNotFoundError
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+    BOTO3_AVAILABLE = True
+except ImportError:
+    BOTO3_AVAILABLE = False
+    # Create dummy classes for when boto3 is not available
+    class ClientError(Exception):
+        pass
+
 import logging
 import numpy as np
 from torch.utils.data import Dataset

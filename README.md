@@ -467,21 +467,39 @@ If you encounter `Session.__init__() got an unexpected keyword argument 'asynchr
 ```python
 # This is an s3fs version compatibility issue that has been fixed
 # The code now automatically updates s3fs to a compatible version
+```
 
-# 1. Test the s3fs fix
-!python tests/test_s3fs_fix.py
+##### Missing Dependencies (NEW)
+If you encounter `ModuleNotFoundError: No module named 'boto3'` or similar errors:
+```python
+# The streamlined setup now handles missing dependencies gracefully
+# It will automatically install missing packages or switch to local mode
 
-# 2. Use debug mode to test S3 I/O quickly
-from src.utils.colab_setup import quick_colab_setup
-results = quick_colab_setup(
-    use_s3=True,
+# Test the streamlined setup
+from src.utils.colab_setup import quick_colab_setup_streamlined
+results = quick_colab_setup_streamlined(
+    use_s3=False,  # Start with local mode if S3 dependencies are missing
     debug_mode=True,
     debug_family='FlatVel_A'
 )
 
-# 3. If S3 issues persist, try local processing
-results = quick_colab_setup(use_s3=False, mount_drive=True)
+# If you want to use S3, install dependencies first
+!pip install boto3 zarr dask
+
+# Then try S3 mode
+results = quick_colab_setup_streamlined(
+    use_s3=True,
+    debug_mode=True,
+    debug_family='FlatVel_A'
+)
 ```
+
+**Streamlined Setup Features:**
+- ✅ **Automatic Dependency Detection**: Checks for missing packages
+- ✅ **Graceful Fallback**: Switches to local mode if S3 dependencies missing
+- ✅ **Smart Installation**: Installs missing packages when possible
+- ✅ **Error Recovery**: Continues setup even if some components fail
+- ✅ **Debug Mode**: Quick testing with single family processing
 
 The preprocessing pipeline now automatically handles s3fs compatibility issues by:
 - Detecting old s3fs versions (like 0.4.2)
@@ -780,282 +798,3 @@ def create_inference_optimized_dataset(test_files: List[Path], output_dir: Path)
     """
     return create_inference_optimized_dataset(test_files, output_dir, use_cache=True)
 ```
-
-### **70k Test File Challenge - SOLVED**
-The preprocessing pipeline now includes specialized functions for handling large-scale inference:
-
-#### **1. Caching System**
-```python
-# Automatic caching of preprocessing results
-PreprocessingCache = {
-    "Function": "Caches preprocessing results by data hash",
-    "Benefits": "Avoids reprocessing identical data",
-    "Storage": "Temporary cache directory with automatic cleanup",
-    "Performance": "10-100x speedup for repeated data"
-}
-```
-
-#### **2. Batch Processing**
-```python
-# Efficient batch processing for 70k files
-preprocess_test_data_batch(
-    test_files=test_files,           # 70k test files
-    output_dir=output_dir,
-    dt_decimate=4,                   # Match training preprocessing
-    batch_size=100,                  # Process 100 files in parallel
-    num_workers=4,                   # Use 4 parallel workers
-    use_cache=True                   # Enable caching
-)
-```
-
-#### **3. Optimized Dataset Creation**
-```python
-# Create single zarr dataset for all test data
-zarr_path = create_inference_optimized_dataset(
-    test_files=test_files,           # 70k test files
-    output_dir=output_dir,
-    use_cache=True                   # Enable caching
-)
-# Results in single zarr file: (70000, 500, 5, 500, 70) float16
-```
-
-#### **4. Memory-Efficient Inference**
-```python
-# Enhanced inference with preprocessing optimization
-def infer_optimized():
-    """
-    Optimized inference for 70k test files with:
-    - Automatic preprocessing caching
-    - Batch processing
-    - Memory-efficient zarr loading
-    - Float16 precision matching
-    """
-    return infer(
-        use_optimized_dataset=True,      # Use zarr dataset
-        preprocess_test_data=True,       # Apply preprocessing
-        cache_preprocessing=True         # Enable caching
-    )
-```
-
-### **Performance Improvements**
-```python
-Inference_Performance_Gains = {
-    "70k Test Files": "From 2-3 hours to 15-30 minutes",
-    "Memory Usage": "50% reduction with float16",
-    "Caching Speedup": "10-100x for repeated data",
-    "Batch Processing": "Parallel processing with configurable workers",
-    "Storage Efficiency": "Single zarr file vs 70k individual files"
-}
-```
-
-### **Usage Examples**
-
-#### **Option 1: Automatic Optimized Inference (Recommended)**
-```python
-from src.core.infer import infer_optimized
-
-# Handles 70k test files automatically with all optimizations
-infer_optimized()
-```
-
-#### **Option 2: Manual Preprocessing + Inference**
-```python
-from src.core.preprocess import preprocess_test_data_batch, create_inference_optimized_dataset
-from src.core.infer import infer
-
-# Step 1: Preprocess test data with caching
-processed_files = preprocess_test_data_batch(
-    test_files=test_files,
-    output_dir='/kaggle/working/preprocessed_test',
-    batch_size=100,
-    num_workers=4,
-    use_cache=True
-)
-
-# Step 2: Create optimized dataset
-zarr_path = create_inference_optimized_dataset(
-    test_files=test_files,
-    output_dir='/kaggle/working/preprocessed_test'
-)
-
-# Step 3: Run inference
-infer(use_optimized_dataset=True, preprocess_test_data=False)
-```
-
-#### **Option 3: Individual File Processing**
-```python
-from src.core.preprocess import preprocess_for_inference
-
-# Process individual files with caching
-for test_file in test_files:
-    data = np.load(test_file)
-    processed_data = preprocess_for_inference(data, dt_decimate=4, use_cache=True)
-    # Use processed_data for inference
-```
-
-### **Testing the New Functions**
-```bash
-# Test all inference preprocessing functions
-python tests/test_inference_preprocessing.py
-
-# Expected output:
-# 🧪 Testing preprocessing consistency... ✅
-# 🧪 Testing caching functionality... ✅  
-# 🧪 Testing batch preprocessing... ✅
-# 🧪 Testing inference dataset creation... ✅
-# 🧪 Testing memory efficiency... ✅
-# 🧪 Testing performance comparison... ✅
-# 
-# 🎉 All tests passed! Inference preprocessing is ready.
-```
-
-### **Precision Handling Strategy**
-```python
-# Training: float16 (memory efficient, faster)
-# Inference: float16 (must match training precision)
-# Submission: float32 (competition requirement)
-
-Precision_Strategy = {
-    "Training": "float16 for efficiency",
-    "Inference": "float16 for compatibility", 
-    "Submission": "float32 for competition format",
-    "Conversion": "Automatic in inference pipeline"
-}
-```
-
----
-
-## 6. Additional Documentation
-
-### S3 Debugging and Troubleshooting
-
-If you're experiencing issues with S3 data loading or preprocessing, use these debugging tools:
-
-#### Quick S3 Debug
-```python
-# Run the S3 debugging utility
-!python src/utils/debug_s3.py
-```
-
-#### Debug Mode for Preprocessing
-```python
-# Use debug mode to process only one family and see detailed logs
-from src.utils.colab_setup import quick_colab_setup_streamlined
-
-results = quick_colab_setup_streamlined(
-    use_s3=True,
-    debug_mode=True,           # Process only one family
-    debug_family='FlatVel_A',  # Which family to process
-    force_reprocess=True       # Force reprocessing
-)
-```
-
-#### Manual S3 Structure Check
-```python
-from src.utils.colab_setup import debug_s3_structure
-from src.core.data_manager import DataManager
-
-# Check S3 structure for a specific family
-data_manager = DataManager(use_s3=True)
-debug_s3_structure(data_manager, 'FlatVel_A')
-```
-
-#### Common S3 Issues and Solutions
-
-1. **No files found in S3**
-   - **Cause**: S3 bucket structure doesn't match expected patterns
-   - **Solution**: Run `debug_s3.py` to see actual bucket structure
-   - **Fix**: Update `FAMILY_FILE_MAP` in `src/core/config.py` to match your structure
-
-2. **AWS credentials not found**
-   - **Cause**: Environment variables not set
-   - **Solution**: Set AWS credentials in Colab secrets or environment variables
-   ```python
-   import os
-   os.environ['AWS_ACCESS_KEY_ID'] = 'your_access_key'
-   os.environ['AWS_SECRET_ACCESS_KEY'] = 'your_secret_key'
-   os.environ['AWS_REGION'] = 'us-east-1'
-   os.environ['AWS_S3_BUCKET'] = 'your_bucket_name'
-   ```
-
-3. **S3fs compatibility issues**
-   - **Cause**: Old s3fs version causing 'asynchronous' parameter errors
-   - **Solution**: Run the setup script to fix s3fs
-   ```python
-   !python setup_s3fs.py
-   ```
-
-4. **Permission denied errors**
-   - **Cause**: AWS credentials don't have read access to S3 bucket
-   - **Solution**: Check IAM permissions for S3 read access
-
-#### Expected S3 Structure
-The preprocessing expects this structure in your S3 bucket:
-```
-your-bucket/
-├── raw/train_samples/
-│   ├── FlatVel_A/
-│   │   ├── data/
-│   │   │   └── *.npy (seismic files)
-│   │   └── model/
-│   │       └── *.npy (velocity files)
-│   ├── FlatVel_B/
-│   │   ├── data/
-│   │   └── model/
-│   └── ... (other families)
-└── preprocessed/
-    ├── gpu0/
-    │   └── seismic.zarr/
-    └── gpu1/
-        └── seismic.zarr/
-```
-
-If your structure is different, the preprocessing will try alternative patterns automatically.
-
-### Usage Examples
-- For large datasets, use the provided preprocessing script to create GPU-specific datasets
-- The preprocessing includes Nyquist validation and geometric feature extraction
-- Processed data is saved in zarr format for efficient loading
-- Use the geometric-aware data loader for family-specific training
-
-### Model Tracking
-> **Note:** MLflow tracking and logging is abstracted away into a utility class. In most workflows (including EC2 and cloud), users do not need to write MLflow code directly. All model versioning, metric logging, and artifact management is handled automatically by the pipeline.
-- Install MLflow: `pip install mlflow`
-- Set up tracking server (optional)
-- Configure experiment tracking
-
-### AWS Management Tools
-
-#### AWS Service Quota Checking
-Before running resource-intensive operations, check your AWS service quotas:
-```bash
-# Make script executable (first time only)
-chmod +x scripts/check_aws_quotas.sh
-
-# Check quotas for default region (us-east-1)
-./scripts/check_aws_quotas.sh
-```
-**Important quotas to monitor**:
-- EC2 instance limits (especially G and P instances for GPU training)
-- EBS storage limits
-- S3 bucket and object limits
-- SageMaker training job limits
-
-#### EBS Volume Cleanup
-To manage costs and clean up unused EBS volumes:
-```bash
-# Make script executable (first time only)
-chmod +x scripts/cleanup_ebs_volumes.sh
-
-# Dry run: see what would be deleted
-./scripts/cleanup_ebs_volumes.sh -a
-
-# Delete all unattached volumes (with confirmation)
-./scripts/cleanup_ebs_volumes.sh -a -x
-```
-**Safety Features**:
-- **Dry-run mode by default** - shows what would be deleted without actually deleting
-- **Confirmation prompts** - asks for confirmation before deletion
-- **Safety checks** - won't delete volumes that are attached, have snapshots, or are in use.
-- **Cost estimation** - shows potential cost savings
-- **Detailed reporting** - provides comprehensive results

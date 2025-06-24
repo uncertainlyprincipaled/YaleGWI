@@ -17,8 +17,18 @@ import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
-import boto3
-from botocore.exceptions import ClientError
+
+# Make boto3 import optional
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+    BOTO3_AVAILABLE = True
+except ImportError:
+    BOTO3_AVAILABLE = False
+    # Create dummy classes for when boto3 is not available
+    class ClientError(Exception):
+        pass
+
 from tqdm import tqdm
 
 # Local imports
@@ -106,6 +116,11 @@ class DataManager:
 
     def _setup_s3(self):
         """Set up S3 client and configuration."""
+        if not BOTO3_AVAILABLE:
+            logging.error("boto3 is not available. S3 operations will be disabled.")
+            self.use_s3 = False
+            raise RuntimeError("boto3 is required for S3 operations. Please install it with: pip install boto3")
+        
         try:
             # Try to load credentials from .env/aws/credentials.json
             creds_path = Path('.env/aws/credentials.json')
